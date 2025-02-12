@@ -17,7 +17,7 @@ const Auth = () => {
 
   return (
     <div className="flex justify-center items-center h-[100vh]">
-      <div className="h-[80vh] w-[80vw] text-opacity-90 md:w-[90vw] lg:w-[70vw] xl:w[60vw] bg-white border-white border-2 rounded-2xl shadow-2xl">
+      <div className="h-[80vh] w-[80vw] text-opacity-90 md:w-[90vw] lg:w-[70vw] xl:w[60vw] bg-white border-white border-2 rounded-2xl shadow-2xl flex items-center justify-center">
         <div className="flex items-center justify-center">
           <div className="flex justify-center items-center flex-col">
             <div className="flex justify-center items-center">
@@ -102,7 +102,7 @@ const Auth = () => {
             </div>
           </div>
           <div className="hidden xl:flex justify-center items-center">
-            <img src={Background} alt="background image" />
+            <img src={Background} alt="background login" />
           </div>
         </div>
       </div>
