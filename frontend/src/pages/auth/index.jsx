@@ -5,16 +5,101 @@ import { Tabs, TabsContent, TabsTrigger } from "@/components/ui/tabs";
 import { TabsList } from "@radix-ui/react-tabs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import useAxios from "@/hooks/useAxios.js";
+import { HOST, LOGIN_ROUTE, SIGNUP_ROUTE } from "@/utils/constants";
+import axios from "axios";
+import { toast } from "sonner";
+import { useNavigate } from "react-router-dom";
+import useAppStore from "@/store";
 
 const Auth = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
-  const handleLogin = async () => {};
+  const navigate = useNavigate();
+  const setUser = useAppStore((state) => state.setUser);
 
-  const handleSignup = async () => {
-    
+  const validateSignup = () => {
+    if (!email.length) {
+      toast.error("Email is required!");
+      return false;
+    }
+    if (!password.length) {
+      toast.error("Password is required!");
+      return false;
+    }
+    if (!confirmPassword.length) {
+      toast.error("Confirm Password is required.");
+      return false;
+    }
+    if (confirmPassword != password) {
+      toast.error("Confirm password and password are not same.");
+      return false;
+    }
+    return true;
+  };
+
+  const validateLogin = () => {
+    if (!email.length) {
+      toast.error("Email is required!");
+      return false;
+    }
+    if (!password.length) {
+      toast.error("Password is required!");
+      return false;
+    }
+    return true;
+  };
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (validateLogin()) {
+      try {
+        const response = await axios.post(
+          `${HOST}${LOGIN_ROUTE}`,
+          {
+            email,
+            password,
+          },
+          { withCredentials: true }
+        );
+        console.log(response.data);
+
+        if (response.status == 200) {
+          setUser(response.data);
+          if (response.data.profileSetup) navigate("/chats");
+          else navigate("/profile");
+        }
+      } catch (error) {
+        console.log(error);
+      }
+    }
+  };
+
+  const handleSignup = async (e) => {
+    e.preventDefault();
+    if (validateSignup()) {
+      try {
+        const response = await axios.post(
+          `${HOST}${SIGNUP_ROUTE}`,
+          {
+            email,
+            password,
+          },
+          { withCredentials: true }
+        );
+
+        if (response.status == 201) {
+          setUser(response.data);
+          navigate("/profile");
+        }
+
+        console.log(response.data);
+      } catch (error) {
+        console.log(error);
+      }
+    }
   };
 
   return (
@@ -55,6 +140,7 @@ const Auth = () => {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    required
                     className="rounded-full"
                   />
                   <Input
@@ -63,6 +149,7 @@ const Auth = () => {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     className="rounded-full"
+                    required
                   />
                   <Button
                     className="rounded-full p-6 w-full"
@@ -78,6 +165,7 @@ const Auth = () => {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     className="rounded-full"
+                    required
                   />
                   <Input
                     placeholder="Password"
@@ -85,6 +173,7 @@ const Auth = () => {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     className="rounded-full"
+                    required
                   />
                   <Input
                     placeholder="Confirm Password"
@@ -92,6 +181,7 @@ const Auth = () => {
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     className="rounded-full"
+                    required
                   />
                   <Button
                     className="rounded-full p-6 w-full"

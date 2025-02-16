@@ -8,7 +8,7 @@ export const signup = async (req, res, next) => {
     if (error) return next(createError(400, error.details[0].message));
 
     const { email, password } = req.body;
-    const newUser = new User({email, password});
+    const newUser = new User({ email, password });
     const result = await newUser.save();
 
     //token generation
@@ -49,6 +49,10 @@ export const login = async (req, res, next) => {
       id: user._id,
       email: user.email,
       profileSetup: user.profileSetup,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      color: user.color,
+      image: user.image,
     });
   } catch (error) {
     next(error);
