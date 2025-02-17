@@ -5,7 +5,6 @@ import { Tabs, TabsContent, TabsTrigger } from "@/components/ui/tabs";
 import { TabsList } from "@radix-ui/react-tabs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import useAxios from "@/hooks/useAxios.js";
 import { HOST, LOGIN_ROUTE, SIGNUP_ROUTE } from "@/utils/constants";
 import axios from "axios";
 import { toast } from "sonner";
@@ -66,10 +65,9 @@ const Auth = () => {
         );
         console.log(response.data);
 
-        if (response.status == 200) {
+        if (response.status === 200) {
           setUser(response.data);
-          if (response.data.profileSetup) navigate("/chats");
-          else navigate("/profile");
+          navigate(response.data.profileSetup ? "/chats" : "/profile");
         }
       } catch (error) {
         console.log(error);
@@ -90,7 +88,7 @@ const Auth = () => {
           { withCredentials: true }
         );
 
-        if (response.status == 201) {
+        if (response.status === 201) {
           setUser(response.data);
           navigate("/profile");
         }

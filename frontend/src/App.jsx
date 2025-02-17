@@ -1,22 +1,33 @@
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
-
 import "./App.css";
 import { Navigate, Route, Routes } from "react-router-dom";
-import Auth from "./pages/auth";
-import Chats from "./pages/chat";
-import Profile from "./pages/profile";
+import Auth from "./pages/auth/Auth";
+import Chats from "./pages/chats/Chats";
+import ProtectedRoute from "./components/ProtectedRoutes.jsx";
+import Profile from "./pages/profile/Profile";
 
 function App() {
-  const [count, setCount] = useState(0);
-
   return (
     <Routes>
-      <Route path="/auth" element={<Auth />}></Route>
-      <Route path="/chats" element={<Chats />}></Route>
-      <Route path="/profile" element={<Profile />}></Route>
+      <Route path="/auth" element={<Auth />} />
 
-      <Route path="*" element={<Navigate to="/auth" />}></Route>
+      <Route
+        path="/profile"
+        element={
+          <ProtectedRoute requireProfileSetup={false}>
+            <Profile />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/chats"
+        element={
+          <ProtectedRoute requireProfileSetup={true}>
+            <Chats />
+          </ProtectedRoute>
+        }
+      ></Route>
+
+      <Route path="*" element={<Navigate to="/auth" />} />
     </Routes>
   );
 }
