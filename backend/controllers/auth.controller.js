@@ -16,6 +16,8 @@ export const signup = async (req, res, next) => {
     res.cookie("authToken", token, {
       httpOnly: true,
       secure: true,
+      sameSite: "lax",
+      maxAge: 3600000,
     });
 
     return res.status(201).json({
@@ -44,6 +46,8 @@ export const login = async (req, res, next) => {
     res.cookie("authToken", token, {
       httpOnly: true,
       secure: true,
+      sameSite: "lax",
+      maxAge: 3600000,
     });
     return res.status(200).json({
       id: user._id,
@@ -53,6 +57,23 @@ export const login = async (req, res, next) => {
       lastName: user.lastName,
       color: user.color,
       image: user.image,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const sendUser = async (req, res, next) => {
+  try {
+    const userInfo = await User.findById(req.user._id);
+    return res.status(200).json({
+      id: userInfo._id,
+      email: userInfo.email,
+      profileSetup: userInfo.profileSetup,
+      firstName: userInfo.firstName,
+      lastName: userInfo.lastName,
+      color: userInfo.color,
+      image: userInfo.image,
     });
   } catch (error) {
     next(error);
