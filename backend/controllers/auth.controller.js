@@ -8,6 +8,13 @@ export const signup = async (req, res, next) => {
     if (error) return next(createError(400, error.details[0].message));
 
     const { email, password } = req.body;
+
+    const existingUser = User.findOne({email});
+    if(existingUser)
+    {
+      return next(createError(409, "Email already registered."));
+    }
+    
     const newUser = new User({ email, password });
     const result = await newUser.save();
 

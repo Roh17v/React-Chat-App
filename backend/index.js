@@ -21,7 +21,6 @@ app.use(express.json());
 app.use('/api/auth', authRouter);
 
 
-//error handler
 //Error Handler
 app.use((err, req, res, next) => {
   const errorStatus = err.status || 500;

@@ -39,9 +39,14 @@ const Auth = () => {
     return true;
   };
 
+  const validateEmail = (email) => {
+    const regex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    return regex.test(email);
+  };
+
   const validateLogin = () => {
-    if (!email.length) {
-      toast.error("Email is required!");
+    if (!email.length || !validateEmail(email)) {
+      toast.error("Invaild Email.");
       return false;
     }
     if (!password.length) {
@@ -70,6 +75,7 @@ const Auth = () => {
           navigate(response.data.profileSetup ? "/chats" : "/profile");
         }
       } catch (error) {
+        toast.error(error.response.data.message);
         console.log(error);
       }
     }
@@ -95,6 +101,7 @@ const Auth = () => {
 
         console.log(response.data);
       } catch (error) {
+        toast.error(error.response.data.message);
         console.log(error);
       }
     }
