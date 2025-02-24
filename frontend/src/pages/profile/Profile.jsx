@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import useAppStore from "@/store";
 import { useState } from "react";
 import { FaArrowLeft } from "react-icons/fa6";
@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { FaTrash, FaPlus } from "react-icons/fa";
+import axios from "axios";
+import { USER_ROUTES, HOST } from "@/utils/constants";
 
 const Profile = () => {
   const navigate = useNavigate();
@@ -20,6 +22,16 @@ const Profile = () => {
     textColor: "#ff006e",
   });
   const user = useAppStore((state) => state.user);
+  const setUser = useAppStore((state) => state.setUser);
+
+  useEffect(() => {
+    setImage(user.image || null);
+    setFirstName(user.firstName || "");
+    setLastName(user.lastName || "");
+    setSelectedColor(
+      user.color || { bgColor: "#ff007f", textColor: "#ff006e" }
+    );
+  }, [user]);
 
   const colors = [
     { bgColor: "#ff007f", textColor: "#ff006e" },
@@ -28,13 +40,34 @@ const Profile = () => {
     { bgColor: "#264653", textColor: "#4cc950" },
   ];
 
-  const handleSave = async () => {
+  const handleSave = async (e) => {
+    e.preventDefault();
     if (!firstName) {
       return toast.error("Enter your First name.");
     }
 
     if (!lastName) {
       return toast.error("Enter your Last name.");
+    }
+    const reqData = { firstName, lastName };
+
+    if (image) reqData.image = image;
+    if (selectedColor) reqData.color = selectedColor;
+    reqData.profileSetup = true;
+
+    try {
+      const response = await axios.patch(
+        `${HOST}${USER_ROUTES}/${user.id}/profile`,
+        reqData
+      );
+
+      console.log(response);
+
+      if (response.status === 200) {
+        return toast.success("Profile updated Successfully.");
+      }
+    } catch (error) {
+      toast(error.response.data.message);
     }
   };
   return (

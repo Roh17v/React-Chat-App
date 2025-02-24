@@ -1,25 +1,26 @@
 import connectDB from "./src/db/index.js";
 import dotenv from "dotenv";
 import express from "express";
-import cors from 'cors';
+import cors from "cors";
 import cookieParser from "cookie-parser";
-import authRouter from './routes/auth.routes.js';
+import authRouter from "./routes/auth.routes.js";
+import userRouter from "./routes/user.router.js";
 
 const app = express();
 dotenv.config();
 
 //middlewares
 app.use(
-    cors({
+  cors({
     origin: [process.env.ORIGIN],
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     credentials: true,
-    })
+  })
 );
 app.use(cookieParser());
 app.use(express.json());
-app.use('/api/auth', authRouter);
-
+app.use("/api/auth", authRouter);
+app.use("/api/users", userRouter);
 
 //Error Handler
 app.use((err, req, res, next) => {

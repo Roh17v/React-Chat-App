@@ -9,12 +9,11 @@ export const signup = async (req, res, next) => {
 
     const { email, password } = req.body;
 
-    const existingUser = User.findOne({email});
-    if(existingUser)
-    {
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
       return next(createError(409, "Email already registered."));
     }
-    
+
     const newUser = new User({ email, password });
     const result = await newUser.save();
 

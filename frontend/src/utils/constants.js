@@ -6,3 +6,4 @@ export const SIGNUP_ROUTE = `${AUTH_ROUTES}/signup`;
 
 export const LOGIN_ROUTE = `${AUTH_ROUTES}/login`;
 
+export const USER_ROUTES = "/api/users";

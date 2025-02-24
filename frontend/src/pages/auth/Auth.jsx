@@ -45,7 +45,12 @@ const Auth = () => {
   };
 
   const validateLogin = () => {
-    if (!email.length || !validateEmail(email)) {
+    if (!email.length) {
+      toast.error("Email is required!");
+      return false;
+    }
+
+    if (!validateEmail(email)) {
       toast.error("Invaild Email.");
       return false;
     }
@@ -72,7 +77,10 @@ const Auth = () => {
 
         if (response.status === 200) {
           setUser(response.data);
-          navigate(response.data.profileSetup ? "/chats" : "/profile");
+          toast.success("Logged In Successfully.");
+          setTimeout(() => {
+            navigate(response.data.profileSetup ? "/chats" : "/profile");
+          }, 2000);
         }
       } catch (error) {
         toast.error(error.response.data.message);
@@ -96,7 +104,10 @@ const Auth = () => {
 
         if (response.status === 201) {
           setUser(response.data);
-          navigate("/profile");
+          toast.success("User registration successful.");
+          setTimeout(() => {
+            navigate("/profile");
+          }, 2000);
         }
 
         console.log(response.data);

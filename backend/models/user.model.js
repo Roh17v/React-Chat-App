@@ -26,7 +26,7 @@ const userSchema = new mongoose.Schema({
     required: false,
   },
   color: {
-    type: String,
+    type: Object,
     required: false,
   },
   profileSetup: {
@@ -51,17 +51,17 @@ userSchema.methods.generateAuthToken = function () {
 };
 
 export const validateUser = (user) => {
-    const schema = Joi.object({
-      email: Joi.string().email().required(),
-      password: Joi.string().required().min(5).max(1024),
-      firstName: Joi.string().optional(),
-      lastName: Joi.string().optional(),
-      image: Joi.string().optional(),
-      color: Joi.string().optional(),
-      profileSetup: Joi.boolean().optional(),
-    });
-  
-    return schema.validate(user);
-  };
+  const schema = Joi.object({
+    email: Joi.string().email().required(),
+    password: Joi.string().required().min(5).max(1024),
+    firstName: Joi.string().optional(),
+    lastName: Joi.string().optional(),
+    image: Joi.string().optional(),
+    color: Joi.string().optional(),
+    profileSetup: Joi.boolean().optional(),
+  });
+
+  return schema.validate(user);
+};
 
 export const User = mongoose.model("User", userSchema);
