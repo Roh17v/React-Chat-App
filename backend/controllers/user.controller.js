@@ -1,17 +1,20 @@
 import { User } from "../models/user.model.js";
 import { createError } from "../utils/error.js";
+import path from "path";
+import fs from "fs";
 
 export const updateProfile = async (req, res, next) => {
   try {
     const { userId } = req.params;
-    const { firstName, lastName, image, color, profileSetup } = req.body;
+    const { firstName, lastName, color, profileSetup } = req.body;
 
+    const image = req.file ? `/uploads/${req.file.filename}` : undefined;
     const updateData = {};
 
     if (firstName) updateData.firstName = firstName;
     if (lastName) updateData.lastName = lastName;
     if (image !== undefined) updateData.image = image;
-    if (color) updateData.color = color;
+    if (color) updateData.color = JSON.parse(color);
     if (profileSetup) updateData.profileSetup = true;
 
     if (Object.keys(updateData).length === 0) {
@@ -28,7 +31,41 @@ export const updateProfile = async (req, res, next) => {
     );
 
     if (!updatedUser) return next(createError(400, "User Not Found!"));
-    return res.status(200).json(updatedUser);
+    return res.status(200).json({
+      id: updatedUser._id,
+      email: updatedUser.email,
+      profileSetup: updatedUser.profileSetup,
+      firstName: updatedUser.firstName,
+      lastName: updatedUser.lastName,
+      color: updatedUser.color,
+      image: updatedUser.image,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const deleteProfileImage = async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId);
+    if (!user) return next(createError(404, "User not found"));
+
+    if (!user.image)
+      return next(createError(400, "No profile picture to remove."));
+
+    const imagePath = path.join(process.cwd(), user.image);
+    if (fs.existsSync(imagePath)) {
+      fs.unlinkSync(imagePath);
+    }
+
+    user.image = null;
+    await user.save();
+
+    return res
+      .status(200)
+      .json({ message: "Profile picture removed successfully!" });
   } catch (error) {
     next(error);
   }

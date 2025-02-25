@@ -34,6 +34,7 @@ function App() {
         setUser(null);
       } finally {
         setIsLoading(false);
+        console.log(useAppStore.getState().user);
       }
     };
 

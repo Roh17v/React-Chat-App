@@ -21,6 +21,7 @@ const Profile = () => {
     bgColor: "#ff007f",
     textColor: "#ff006e",
   });
+  const [selectedFile, setSelectedFile] = useState(null);
   const user = useAppStore((state) => state.user);
   const setUser = useAppStore((state) => state.setUser);
 
@@ -42,34 +43,86 @@ const Profile = () => {
 
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!firstName) {
-      return toast.error("Enter your First name.");
-    }
+    if (!firstName) return toast.error("First Name is required.");
+    if (!lastName) return toast.error("Last Name is required.");
 
-    if (!lastName) {
-      return toast.error("Enter your Last name.");
-    }
-    const reqData = { firstName, lastName };
+    const formData = new FormData();
+    formData.append("firstName", firstName);
+    formData.append("lastName", lastName);
+    formData.append("color", JSON.stringify(selectedColor));
+    formData.append("profileSetup", "true");
 
-    if (image) reqData.image = image;
-    if (selectedColor) reqData.color = selectedColor;
-    reqData.profileSetup = true;
+    if (selectedFile) {
+      formData.append("image", selectedFile);
+    }
 
     try {
       const response = await axios.patch(
         `${HOST}${USER_ROUTES}/${user.id}/profile`,
-        reqData
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        }
       );
 
       console.log(response);
 
       if (response.status === 200) {
-        return toast.success("Profile updated Successfully.");
+        console.log(response.data);
+        setUser(response.data);
+        console.log(user);
+        toast.success("Profile updated Successfully.");
+        navigate("/chats");
       }
     } catch (error) {
       toast(error.response.data.message);
     }
   };
+
+  const handleImageChange = async (e) => {
+    const file = e.target.files[0];
+    console.log(file);
+
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setImage(e.target.result);
+    };
+    reader.readAsDataURL(file);
+
+    setSelectedFile(file);
+  };
+
+  const handleRemoveImage = async () => {
+    if (!user.image) {
+      setImage(null);
+      setSelectedFile(null);
+      return;
+    }
+
+    try {
+      const response = await axios.delete(
+        `${HOST}${USER_ROUTES}/${user.id}/profile/image`,
+        {
+          withCredentials: true,
+        }
+      );
+
+      if (response.status === 200) {
+        toast.success("Profile picture removed successfully!");
+
+        setUser({ ...user, image: null });
+        setImage(null);
+        setSelectedFile(null);
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.message);
+    }
+  };
+
   return (
     <div className="flex items-center justify-center bg-[#1b1c24] w-full h-[100vh] relative">
       {/* Profile Setup Card */}
@@ -87,15 +140,16 @@ const Profile = () => {
             onMouseLeave={() => setHovered(false)}
           >
             <Avatar
-              className={`h-32 w-32 md:w-48 md:h-48 rounded-full overflow-hidden border-2 border-[#ff007f] opacity-50 cursor-pointer`}
+              className={`h-32 w-32 md:w-48 md:h-48 rounded-full overflow-hidden opacity-70 border-2 cursor-pointer`}
               style={{
                 backgroundColor: `${selectedColor.bgColor}80`,
                 color: `${selectedColor.textColor}`,
+                borderColor: image ? " " : `${selectedColor.textColor}`,
               }}
             >
               {image ? (
                 <AvatarImage
-                  src={image}
+                  src={selectedFile ? image : `${HOST}${user.image}`}
                   alt="profile"
                   className="object-cover w-full h-full bg-black"
                 />
@@ -112,16 +166,26 @@ const Profile = () => {
               <div
                 className={`absolute right-0 left-0 h-32 w-32 md:w-48 md:h-48 flex items-center justify-center bg-black/20 rounded-full ring-1 ring-white overflow-hidden transition-opacity duration-300`}
               >
+                <input
+                  type="file"
+                  id="profile-update"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleImageChange}
+                />
                 {image ? (
                   <FaTrash
+                    onClick={handleRemoveImage}
                     aria-label="Add image"
                     className="text-white text-3xl lg:text-3xl cursor-pointer"
                   />
                 ) : (
-                  <FaPlus
-                    aria-label="Delete image"
-                    className="text-white text-3xl lg:text-3xl cursor-pointer"
-                  />
+                  <label htmlFor="profile-update" className="cursor-pointer">
+                    <FaPlus
+                      aria-label="Delete image"
+                      className="text-white text-3xl lg:text-3xl"
+                    />
+                  </label>
                 )}
               </div>
             )}
@@ -172,6 +236,11 @@ const Profile = () => {
           Save Changes
         </Button>
       </div>
+      {!user.profileSetup && (
+        <div className="absolute bottom-8 text-white">
+          Please Setup your profile to continue.
+        </div>
+      )}
     </div>
   );
 };
