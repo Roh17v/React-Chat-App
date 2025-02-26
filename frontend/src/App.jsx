@@ -1,7 +1,7 @@
 import "./App.css";
 import { Navigate, Route, Routes } from "react-router-dom";
 import Auth from "./pages/auth/Auth";
-import Chats from "./pages/chats/Chats";
+import Chats from "./pages/chats";
 import ProtectedRoute from "./components/ProtectedRoutes.jsx";
 import Profile from "./pages/profile/Profile";
 import useAppStore from "./store";

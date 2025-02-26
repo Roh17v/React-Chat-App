@@ -140,7 +140,7 @@ const Profile = () => {
             onMouseLeave={() => setHovered(false)}
           >
             <Avatar
-              className={`h-32 w-32 md:w-48 md:h-48 rounded-full overflow-hidden opacity-70 border-2 cursor-pointer`}
+              className={`h-32 w-32 md:w-48 md:h-48 rounded-full overflow-hidden border-2 cursor-pointer`}
               style={{
                 backgroundColor: `${selectedColor.bgColor}80`,
                 color: `${selectedColor.textColor}`,
