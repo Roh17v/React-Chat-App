@@ -128,7 +128,7 @@ const Profile = () => {
       {/* Profile Setup Card */}
       <div className="flex flex-col gap-10 w-full max-w-xl p-6 rounded-md shadow-lg">
         <button
-          onClick={() => navigate(-1)}
+          onClick={() => navigate("/chats")}
           className="text-white hover:text-gray-400"
         >
           <FaArrowLeft size={26} />

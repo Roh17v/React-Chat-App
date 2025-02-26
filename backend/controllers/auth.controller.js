@@ -85,3 +85,18 @@ export const sendUser = async (req, res, next) => {
     next(error);
   }
 };
+
+export const logout = async (req, res, next) => {
+  try {
+    res.cookie("authToken", "", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      maxAge: 1,
+    });
+
+    return res.status(200).send("Logout Successfull.");
+  } catch (error) {
+    next(error);
+  }
+};
