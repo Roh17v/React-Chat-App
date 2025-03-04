@@ -43,7 +43,7 @@ const ProfileInfo = () => {
     <div className="absolute bottom-0 w-full bg-[#2a2b33] h-16 flex items-center justify-between px-6">
       <div className="flex items-center gap-3 mx-auto">
         <Avatar
-          className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500"
+          className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border flex items-center justify-center border-gray-500"
           style={{
             backgroundColor: `${user.color.bgColor}80`,
             color: `${user.color.textColor}`,

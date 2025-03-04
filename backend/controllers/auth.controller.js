@@ -82,7 +82,7 @@ export const sendUser = async (req, res, next) => {
       image: userInfo.image,
     });
   } catch (error) {
-    next(error);
+    next(error); 
   }
 };
 

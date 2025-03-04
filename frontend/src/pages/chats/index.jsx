@@ -8,7 +8,7 @@ const Chats = () => {
     <div className="flex overflow-hidden h-[100vh] w-full text-white">
       <ContactContainer />
       {/* <EmptyChatContainer /> */}
-      <ChatContainer />
+      {/* <ChatContainer /> */}
     </div>
   );
 };
