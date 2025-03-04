@@ -1,11 +1,10 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
 import createAuthSlice from "./slices/AuthSlice.js";
+import { createChatSlice } from "./slices/ChatSlice.js";
 
-const useAppStore = create((set, get) => ({
-  ...createAuthSlice(set, get),
-  }
-)
-);
+export const useAppStore = create()((...a) => ({
+  ...createAuthSlice(...a),
+  ...createChatSlice(...a),
+}));
 
 export default useAppStore;

@@ -70,3 +70,30 @@ export const deleteProfileImage = async (req, res, next) => {
     next(error);
   }
 };
+
+export const searchUsers = async (req, res, next) => {
+  try {
+    const { q } = req.query;
+
+    const currUserId = req.user._id;
+
+    if (q === undefined || q === null)
+      return next(createError(400, "searchTerm is required."));
+    const users = await User.find({
+      $and: [
+        { _id: { $ne: currUserId } },
+        {
+          $or: [
+            { firstName: { $regex: q, $options: "i" } },
+            { lastName: { $regex: q, $options: "i" } },
+            { email: { $regex: q, $options: "i" } },
+          ],
+        },
+      ],
+    }).select("firstName lastName email image color");
+
+    res.status(200).json(users);
+  } catch (error) {
+    next(error);
+  }
+};
