@@ -137,7 +137,7 @@ const NewDm = () => {
                 </div>
               ))
             ) : (
-              <div className="flex-1 md:bg-[#1c1d25] md:flex flex-col justify-center items-center duration-1000 transition-all mt-5 py-5">
+              <div className="flex-1  md:flex flex-col justify-center items-center duration-1000 transition-all mt-5 py-5">
                 <Lottie
                   isClickToPauseDisabled
                   height={100}

@@ -5,9 +5,9 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRouter from "./routes/auth.routes.js";
 import userRouter from "./routes/user.router.js";
-import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
+import setupSocket from "./socket.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,9 +48,15 @@ app.use((err, req, res, next) => {
 
 connectDB()
   .then(() => {
-    app.listen(process.env.PORT || 5000, () => {
+    const server = app.listen(process.env.PORT || 5000, () => {
       console.log(`Listening on PORT: ${process.env.PORT}...`);
     });
+
+    try {
+      setupSocket(server);
+    } catch (error) {
+      console.log("Failed to set up WebSocket: ", error);
+    }
   })
   .catch((error) => {
     console.log("Failed to Connect to MongoDB...", error);
