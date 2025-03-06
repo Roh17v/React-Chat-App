@@ -6,34 +6,57 @@ import { createContext, useContext } from "react";
 
 const SocketContext = createContext(null);
 
-export const useSocketContext = () => {
+export const useSocket = () => {
   return useContext(SocketContext);
 };
 
 export const SocketProvider = ({ children }) => {
-  const socket = useRef();
+  const socket = useRef(null);
   const { user } = useAppStore();
+  const { selectedChatData, selectedChatType, addMessage } = useAppStore();
 
   useEffect(() => {
-    if (user) {
+    if (user && !socket.current) {
       socket.current = io(HOST, {
         withCredentials: true,
         query: { userId: user.id },
       });
 
       socket.current.on("connect", () => {
-        console.log("Connect to socket server");
+        console.log("Connected to socket server");
       });
 
       return () => {
         if (socket.current) {
-          socket.current.off();
           socket.current.disconnect();
           socket.current = null;
         }
       };
     }
-  }, [user]);
+  }, [user]); 
+
+
+  useEffect(() => {
+    if (!socket.current) return;
+
+    const handleReceiveMessage = (message) => {
+      if (
+        selectedChatData &&
+        selectedChatType !== undefined &&
+        (selectedChatData._id === message.sender._id ||
+          selectedChatData._id === message.receiver._id)
+      ) {
+        addMessage(message);
+      }
+      console.log("Message Received: ", message);
+    };
+
+    socket.current.on("receiveMessage", handleReceiveMessage);
+
+    return () => {
+      socket.current.off("receiveMessage", handleReceiveMessage);
+    };
+  }, [selectedChatData, selectedChatType]);
 
   return (
     <SocketContext.Provider value={socket.current}>
