@@ -5,7 +5,9 @@ export const createChatSlice = (set, get) => ({
 
   setSelectedChatData: (selectedChatData) => set({ selectedChatData }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
-  setSelectedChatMessages: (selectedChatMessages) => set(selectedChatMessages),
+  setSelectedChatMessages: (messages) =>
+    set({ selectedChatMessages: messages }),
+
   closeChat: () =>
     set({
       selectedChatData: undefined,

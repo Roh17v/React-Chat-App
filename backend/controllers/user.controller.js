@@ -97,3 +97,4 @@ export const searchUsers = async (req, res, next) => {
     next(error);
   }
 };
+

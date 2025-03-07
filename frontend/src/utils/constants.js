@@ -9,3 +9,5 @@ export const LOGIN_ROUTE = `${AUTH_ROUTES}/login`;
 export const USER_ROUTES = "/api/users";
 
 export const LOGOUT_ROUTE = `${AUTH_ROUTES}/logout`;
+
+export const MESSAGES_ROUTE = "/api/messages";
