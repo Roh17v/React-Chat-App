@@ -1,7 +1,7 @@
 import useAppStore from "@/store";
 import { HOST } from "@/utils/constants";
 import { io } from "socket.io-client";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState, useMemo } from "react";
 import { createContext, useContext } from "react";
 
 const SocketContext = createContext(null);
@@ -13,6 +13,7 @@ export const useSocket = () => {
 export const SocketProvider = ({ children }) => {
   const socket = useRef(null);
   const { user } = useAppStore();
+  const [onlineUsers, setOnlineUsers] = useState([]);
   const { selectedChatData, selectedChatType, addMessage } = useAppStore();
 
   useEffect(() => {
@@ -26,6 +27,10 @@ export const SocketProvider = ({ children }) => {
         console.log("Connected to socket server");
       });
 
+      socket.current.on("onlineUsers", (users) => {
+        setOnlineUsers(users);
+      });
+
       return () => {
         if (socket.current) {
           socket.current.disconnect();
@@ -33,8 +38,7 @@ export const SocketProvider = ({ children }) => {
         }
       };
     }
-  }, [user]); 
-
+  }, [user]);
 
   useEffect(() => {
     if (!socket.current) return;
@@ -58,8 +62,9 @@ export const SocketProvider = ({ children }) => {
     };
   }, [selectedChatData, selectedChatType]);
 
+
   return (
-    <SocketContext.Provider value={socket.current}>
+    <SocketContext.Provider value={{ socket: socket.current, onlineUsers }}>
       {children}
     </SocketContext.Provider>
   );

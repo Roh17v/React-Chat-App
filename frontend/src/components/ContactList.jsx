@@ -2,6 +2,7 @@ import useAppStore from "@/store";
 import React from "react";
 import { Avatar, AvatarImage } from "./ui/avatar";
 import { HOST } from "@/utils/constants";
+import { useSocket } from "@/context/SocketContext";
 
 const ContactList = ({ contacts, isChannel = false }) => {
   const {
@@ -11,6 +12,8 @@ const ContactList = ({ contacts, isChannel = false }) => {
     selectedChatType,
     setSelectedChatMessages,
   } = useAppStore();
+
+  const { onlineUsers } = useSocket();
 
   const handleClick = (contact) => {
     if (isChannel) setSelectedChatType("channel");
@@ -48,7 +51,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
                   className="object-cover w-full h-full"
                 />
               ) : (
-                <span className="uppercase text-lg sm:text-xl font-semibold">
+                <span className="uppercase text-lg sm:text-xl font-semibold truncate">
                   {contact.firstName
                     ? contact.firstName.charAt(0)
                     : contact.email.charAt(0)}
@@ -56,14 +59,14 @@ const ContactList = ({ contacts, isChannel = false }) => {
               )}
             </Avatar>
           )}
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-neutral-200">
               {contact.firstName} {contact.lastName}
             </p>
-            <p className="text-xs text-neutral-400">{contact.email}</p>
+            <p className="text-xs text-neutral-400 truncate">{contact.email}</p>
           </div>
-          {selectedChatData && selectedChatData._id === contact._id && (
-            <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+          {onlineUsers.includes(contact._id) && (
+            <div className="w-2 h-2 bg-green-500 rounded-full flex-shrink-0"></div>
           )}
         </div>
       ))}

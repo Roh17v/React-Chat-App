@@ -13,7 +13,7 @@ const MessageBar = () => {
   const emojiRef = useRef();
   const { selectedChatType, selectedChatData, user, addMessage } =
     useAppStore();
-  const socket = useSocket();
+  const { socket } = useSocket();
 
   const handleSendMessage = async () => {
     if (message.trim() === "") return;

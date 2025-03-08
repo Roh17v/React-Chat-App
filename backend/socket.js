@@ -55,6 +55,7 @@ const setupSocket = (server) => {
 
     if (userId) {
       addUserSocket(userId, socket.id);
+      io.emit("onlineUsers", Array.from(userSocketMap.keys()));
       console.log(`User Connected: ${userId} with socket ID: ${socket.id}`);
     } else {
       console.log("User ID not present.");
@@ -63,8 +64,9 @@ const setupSocket = (server) => {
     socket.on("sendMessage", (message) => sendMessage(message, socket));
 
     socket.on("disconnect", () => {
-      console.log(`Client Disconnected: ${socket.id}`);
       removeUserSocket(userId, socket.id);
+      io.emit("onlineUsers", Array.from(userSocketMap.keys()));
+      console.log(`Client Disconnected: ${socket.id}`);
     });
   });
 };

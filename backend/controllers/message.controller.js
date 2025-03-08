@@ -14,7 +14,7 @@ export const getMessages = async (req, res, next) => {
         { sender: userId, receiver: contactId },
         { sender: contactId, receiver: userId },
       ],
-    }).sort({ timestamp: 1 });
+    }).sort({ createdAt: 1 });
 
     res.status(200).json(messages);
   } catch (error) {
