@@ -2,6 +2,8 @@ import { User } from "../models/user.model.js";
 import { createError } from "../utils/error.js";
 import path from "path";
 import fs from "fs";
+import Message from "../models/message.model.js";
+import { timeStamp } from "console";
 
 export const updateProfile = async (req, res, next) => {
   try {
@@ -98,3 +100,30 @@ export const searchUsers = async (req, res, next) => {
   }
 };
 
+export const dmContacts = async (req, res, next) => {
+  const userId = req.user._id;
+
+  try {
+    const messages = await Message.find({
+      $or: [{ sender: userId }, { receiver: userId }],
+    })
+      .populate("sender receiver", "firstName lastName email image color _id")
+      .sort({ timeStamp: -1 });
+
+    const contactsMap = new Map();
+
+    messages.forEach((msg) => {
+      const contact =
+        msg.sender._id.toString() === userId.toString()
+          ? msg.receiver
+          : msg.sender;
+      contactsMap.set(contact._id.toString(), contact);
+    });
+
+    const contacts = Array.from(contactsMap.values());
+
+    res.status(200).json(contacts);
+  } catch (error) {
+    next(error);
+  }
+};
