@@ -13,8 +13,14 @@ const MessageBar = () => {
   const [message, setMessage] = useState("");
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiRef = useRef();
-  const { selectedChatType, selectedChatData, user, addMessage } =
-    useAppStore();
+  const {
+    selectedChatType,
+    selectedChatData,
+    user,
+    addMessage,
+    setFileUploadingProgress,
+    setIsUploading,
+  } = useAppStore();
   const { socket } = useSocket();
 
   const fileInputRef = useRef();
@@ -52,15 +58,22 @@ const MessageBar = () => {
     try {
       if (file) {
         const formData = new FormData();
+        setIsUploading(true);
+        setFileUploadingProgress(0);
         formData.append("file", file);
 
         const response = await axios.post(UPLOAD_FILE_ROUTE, formData, {
           withCredentials: true,
+          onUploadProgress: (data) =>
+            setFileUploadingProgress(
+              Math.round((100 * data.loaded) / data.total)
+            ),
         });
 
         console.log(response);
 
         if (response.status === 201 && response.data) {
+          setIsUploading(false);
           if (selectedChatType === "contact") {
             console.log("User Id: ", user);
             socket.emit("sendMessage", {
@@ -75,6 +88,7 @@ const MessageBar = () => {
       }
     } catch (error) {
       console.log("Error sending file: ", error);
+      setIsUploading(false);
     }
   };
 

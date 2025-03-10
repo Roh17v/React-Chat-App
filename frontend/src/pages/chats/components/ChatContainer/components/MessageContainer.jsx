@@ -15,6 +15,8 @@ const MessageContainer = () => {
     selectedChatMessages,
     setSelectedChatData,
     setSelectedChatMessages,
+    setIsDownloading,
+    setFileDownloadingProgress,
   } = useAppStore();
 
   const [showImage, setShowImage] = useState(false);
@@ -66,9 +68,15 @@ const MessageContainer = () => {
 
   const downloadFile = async (url) => {
     try {
+      setIsDownloading(true);
+      setFileDownloadingProgress(0);
       const response = await axios.get(`${HOST}/${url}`, {
         responseType: "blob",
+        onDownloadProgress: (data) =>
+          setFileDownloadingProgress((100 * data.loaded) / data.total),
       });
+
+      setIsDownloading(false);
 
       const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement("a");
@@ -81,6 +89,7 @@ const MessageContainer = () => {
       window.URL.revokeObjectURL(urlBlob);
     } catch (error) {
       console.log("Error downloading file: ", error);
+      setIsDownloading(false);
     }
   };
 
