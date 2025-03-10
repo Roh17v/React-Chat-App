@@ -3,14 +3,13 @@ import { createError } from "../utils/error.js";
 import path from "path";
 import fs from "fs";
 import Message from "../models/message.model.js";
-import { timeStamp } from "console";
 
 export const updateProfile = async (req, res, next) => {
   try {
     const { userId } = req.params;
     const { firstName, lastName, color, profileSetup } = req.body;
 
-    const image = req.file ? `/uploads/${req.file.filename}` : undefined;
+    const image = req.file ? `/uploads/profiles/${req.file.filename}` : undefined;
     const updateData = {};
 
     if (firstName) updateData.firstName = firstName;

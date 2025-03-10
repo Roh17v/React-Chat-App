@@ -163,6 +163,9 @@ const Auth = () => {
                     placeholder="Password"
                     type="password"
                     value={password}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleLogin(e);
+                    }}
                     onChange={(e) => setPassword(e.target.value)}
                     className="rounded-full"
                     required
@@ -194,6 +197,9 @@ const Auth = () => {
                   <Input
                     placeholder="Confirm Password"
                     type="password"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSignup(e);
+                    }}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     className="rounded-full"

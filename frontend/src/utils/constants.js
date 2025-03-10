@@ -13,3 +13,5 @@ export const LOGOUT_ROUTE = `${AUTH_ROUTES}/logout`;
 export const MESSAGES_ROUTE = "/api/messages";
 
 export const DM_CONTACTS_ROUTE = `${USER_ROUTES}/dm-contacts`;
+
+export const UPLOAD_FILE_ROUTE = `${HOST}${MESSAGES_ROUTE}/upload-file`;

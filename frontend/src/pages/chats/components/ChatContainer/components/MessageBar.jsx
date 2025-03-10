@@ -6,6 +6,8 @@ import { IoSend } from "react-icons/io5";
 import EmojiPicker from "emoji-picker-react";
 import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
+import axios from "axios";
+import { UPLOAD_FILE_ROUTE } from "@/utils/constants";
 
 const MessageBar = () => {
   const [message, setMessage] = useState("");
@@ -14,6 +16,8 @@ const MessageBar = () => {
   const { selectedChatType, selectedChatData, user, addMessage } =
     useAppStore();
   const { socket } = useSocket();
+
+  const fileInputRef = useRef();
 
   const handleSendMessage = async () => {
     if (message.trim() === "") return;
@@ -37,6 +41,43 @@ const MessageBar = () => {
     setMessage((mssg) => mssg + emoji.emoji);
   };
 
+  const handleAttachmentClick = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleAttachmentChange = async (e) => {
+    const file = e.target.files[0];
+    try {
+      if (file) {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await axios.post(UPLOAD_FILE_ROUTE, formData, {
+          withCredentials: true,
+        });
+
+        console.log(response);
+
+        if (response.status === 201 && response.data) {
+          if (selectedChatType === "contact") {
+            console.log("User Id: ", user);
+            socket.emit("sendMessage", {
+              sender: user.id,
+              content: undefined,
+              receiver: selectedChatData._id,
+              messageType: "file",
+              fileUrl: response.data.filePath,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.log("Error sending file: ", error);
+    }
+  };
+
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (emojiRef.current && !emojiRef.current.contains(e.target)) {
@@ -57,14 +98,26 @@ const MessageBar = () => {
       <div className="flex-1 flex bg-[#2a2b33] rounded-md items-center gap-5 pr-5">
         <input
           type="text"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSendMessage();
+            }
+          }}
           className="flex-1 p-5 bg-transparent rounded-md focus:border-none focus:outline-none"
           placeholder="Enter message..."
           onChange={(e) => setMessage(e.target.value)}
           value={message}
         />
         <button className="text-neutral-500 focus:border-none focus:outline-none focus:text-white duration-300 transition-all">
-          <CgAttachment />
+          <CgAttachment onClick={handleAttachmentClick} />
         </button>
+        <input
+          type="file"
+          className="hidden"
+          ref={fileInputRef}
+          onChange={handleAttachmentChange}
+        />
         <div className="relative" ref={emojiRef}>
           <button
             className="text-neutral-500 focus:border-none focus:outline-none focus:text-white duration-300 transition-all"

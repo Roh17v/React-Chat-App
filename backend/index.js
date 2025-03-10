@@ -32,7 +32,14 @@ app.use("/api/users", userRouter);
 app.use("/api/messages", messageRouter);
 
 //middleware to server static files
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use(
+  "/uploads/profiles",
+  express.static(path.join(__dirname, "uploads", "profiles"))
+);
+app.use(
+  "/uploads/files",
+  express.static(path.join(__dirname, "uploads", "files"))
+);
 
 //Error Handler
 app.use((err, req, res, next) => {

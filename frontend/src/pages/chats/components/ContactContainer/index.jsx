@@ -7,7 +7,7 @@ import { DM_CONTACTS_ROUTE, HOST } from "@/utils/constants";
 import ContactList from "@/components/ContactList.jsx";
 
 const ContactContainer = () => {
-  const { directMessagesContacs, setDirectMessagesContacts } = useAppStore();
+  const { directMessagesContacts, setDirectMessagesContacts } = useAppStore();
 
   useEffect(() => {
     const fetchDMContacts = async () => {
@@ -36,7 +36,7 @@ const ContactContainer = () => {
           <NewDm />
         </div>
         <div className="max-h-[30vh] overflow-y-auto scrollbar-hidden px-5">
-          <ContactList contacts={directMessagesContacs} />
+          <ContactList contacts={directMessagesContacts} />
         </div>
       </div>
       <div className="my-5">
