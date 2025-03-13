@@ -36,11 +36,17 @@ const MessageBar = () => {
         messageType: "text",
         fileUrl: undefined,
       };
-
       socket.emit("sendMessage", newMessage);
-
-      setMessage("");
+    } else if (selectedChatType === "channel") {
+      socket.emit("send-channel-message", {
+        sender: user.id,
+        content: message,
+        messageType: "text",
+        fileUrl: undefined,
+        channelId: selectedChatData._id,
+      });
     }
+    setMessage("");
   };
 
   const handleAddEmoji = (emoji) => {
@@ -75,13 +81,20 @@ const MessageBar = () => {
         if (response.status === 201 && response.data) {
           setIsUploading(false);
           if (selectedChatType === "contact") {
-            console.log("User Id: ", user);
             socket.emit("sendMessage", {
               sender: user.id,
               content: undefined,
               receiver: selectedChatData._id,
               messageType: "file",
               fileUrl: response.data.filePath,
+            });
+          } else if (selectedChatType === "channel") {
+            socket.emit("send-channel-message", {
+              sender: user.id,
+              content: message,
+              messageType: "file",
+              fileUrl: response.data.filePath,
+              channelId: selectedChatData._id,
             });
           }
         }

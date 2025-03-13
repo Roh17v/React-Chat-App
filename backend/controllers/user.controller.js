@@ -9,7 +9,9 @@ export const updateProfile = async (req, res, next) => {
     const { userId } = req.params;
     const { firstName, lastName, color, profileSetup } = req.body;
 
-    const image = req.file ? `/uploads/profiles/${req.file.filename}` : undefined;
+    const image = req.file
+      ? `/uploads/profiles/${req.file.filename}`
+      : undefined;
     const updateData = {};
 
     if (firstName) updateData.firstName = firstName;
@@ -105,6 +107,7 @@ export const dmContacts = async (req, res, next) => {
   try {
     const messages = await Message.find({
       $or: [{ sender: userId }, { receiver: userId }],
+      receiver: { $ne: null },
     })
       .populate("sender receiver", "firstName lastName email image color _id")
       .sort({ timeStamp: -1 });
@@ -122,6 +125,36 @@ export const dmContacts = async (req, res, next) => {
     const contacts = Array.from(contactsMap.values());
 
     res.status(200).json(contacts);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getAllContacts = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const messages = await Message.find({
+      $or: [{ sender: userId }, { receiver: userId }],
+      receiver: { $ne: null },
+    })
+      .populate("sender receiver", "firstName lastName email _id")
+      .sort({ timeStamp: -1 });
+
+    const contactMap = new Map();
+
+    messages.forEach((msg) => {
+      const contact =
+        msg.sender._id.toString() === userId ? msg.receiver : msg.sender;
+      contactMap.set(contact._id.toString(), contact);
+    });
+
+    const contacts = Array.from(contactMap.values());
+
+    const allContacts = contacts.map((user) => ({
+      label: user.firstName ? `${user.firstName} ${user.lastName}` : user.email,
+      value: user._id,
+    }));
+    return res.status(200).json({ contacts: allContacts });
   } catch (error) {
     next(error);
   }

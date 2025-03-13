@@ -1,5 +1,8 @@
 import { Server as SocketIoServer } from "socket.io";
 import Message from "./models/message.model.js";
+import { populate } from "dotenv";
+import { Channel } from "./models/channel.model.js";
+import { set } from "mongoose";
 
 const setupSocket = (server) => {
   const io = new SocketIoServer(server, {
@@ -50,6 +53,53 @@ const setupSocket = (server) => {
     }
   };
 
+  const sendChannelMessage = async (message, socket) => {
+    try {
+      const { channelId, messageType, content, sender, fileUrl } = message;
+
+      const newMessage = await Message.create({
+        sender,
+        content,
+        messageType,
+        receiver: null,
+        fileUrl,
+      });
+
+      const messageData = await Message.findById(newMessage._id)
+        .populate("sender")
+        .exec();
+
+      await Channel.findByIdAndUpdate(channelId, {
+        $push: { message: newMessage._id },
+      });
+
+      const channel = await Channel.findById(channelId).populate("members");
+
+      const finalData = { ...messageData._doc, channelId: channel._id };
+
+      if (channel && channel.members) {
+        channel.members.forEach((contact) => {
+          const memberSocketId =
+            userSocketMap.get(contact._id.toString()) || new Set();
+          if (memberSocketId.size > 0) {
+            memberSocketId.forEach((socketId) => {
+              io.to(socketId).emit("receive-channel-message", finalData);
+            });
+          }
+        });
+        const adminSocketId =
+          userSocketMap.get(channel.admin.toString()) || new Set();
+        if (adminSocketId.size > 0) {
+          adminSocketId.forEach((socketId) => {
+            io.to(socketId).emit("receive-channel-message", finalData);
+          });
+        }
+      }
+    } catch (error) {
+      console.log("Error sending messsage: ", error);
+    }
+  };
+
   io.on("connection", (socket) => {
     const userId = socket.handshake.query.userId;
 
@@ -60,6 +110,10 @@ const setupSocket = (server) => {
     } else {
       console.log("User ID not present.");
     }
+
+    socket.on("send-channel-message", (message) =>
+      sendChannelMessage(message, socket)
+    );
 
     socket.on("sendMessage", (message) => sendMessage(message, socket));
 

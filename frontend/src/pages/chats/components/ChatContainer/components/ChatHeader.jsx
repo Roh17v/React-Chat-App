@@ -11,33 +11,57 @@ const ChatHeader = () => {
       <div className="flex gap-5 items-center w-full justify-between mx-5">
         <div className="flex gap-4 items-center justify-between ">
           <div className="w-12 h-12 relative">
-            <Avatar
-              className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500 flex items-center justify-center"
-              style={{
-                backgroundColor: `${
-                  selectedChatData.color?.bgColor || "#ccc"
-                }80`,
-                color: `${selectedChatData.color?.textColor || "#fff"}`,
-              }}
-            >
-              {selectedChatData.image ? (
-                <AvatarImage
-                  src={`${HOST}${selectedChatData.image}`}
-                  alt="profile"
-                  className="object-cover w-full h-full"
-                />
-              ) : (
-                <span className="uppercase text-lg sm:text-xl font-semibold">
-                  {selectedChatData.firstName
-                    ? selectedChatData.firstName.charAt(0)
-                    : selectedChatData.email.charAt(0)}
-                </span>
-              )}
-            </Avatar>
+            {selectedChatType === "contact" ? (
+              <Avatar
+                className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500 flex items-center justify-center"
+                style={{
+                  backgroundColor: `${
+                    selectedChatData.color?.bgColor || "#ccc"
+                  }80`,
+                  color: `${selectedChatData.color?.textColor || "#fff"}`,
+                }}
+              >
+                {selectedChatData.image ? (
+                  <AvatarImage
+                    src={`${HOST}${selectedChatData.image}`}
+                    alt="profile"
+                    className="object-cover w-full h-full"
+                  />
+                ) : (
+                  <span className="uppercase text-lg sm:text-xl font-semibold">
+                    {selectedChatData.firstName
+                      ? selectedChatData.firstName.charAt(0)
+                      : selectedChatData.email.charAt(0)}
+                  </span>
+                )}
+              </Avatar>
+            ) : (
+              <Avatar
+                className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500 flex items-center justify-center"
+                style={{
+                  backgroundColor: "#ffffff22",
+                  color: `#e5e5e5`,
+                }}
+              >
+                {selectedChatData.image ? (
+                  <AvatarImage
+                    src={`${HOST}${selectedChatData.image}`}
+                    alt="profile"
+                    className="object-cover w-full h-full"
+                  />
+                ) : (
+                  <span className="uppercase text-lg sm:text-xl font-semibold">
+                    {selectedChatData.channelName &&
+                      selectedChatData.channelName.charAt(0)}
+                  </span>
+                )}
+              </Avatar>
+            )}
           </div>
           <div>
             {selectedChatType === "contact" &&
               `${selectedChatData.firstName} ${selectedChatData.lastName}`}
+            {selectedChatType === "channel" && selectedChatData.channelName}
           </div>
         </div>
         <div className="flex items-center justify-center gap-5">

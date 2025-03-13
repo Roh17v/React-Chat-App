@@ -9,15 +9,13 @@ const ContactList = ({ contacts, isChannel = false }) => {
     selectedChatData,
     setSelectedChatData,
     setSelectedChatType,
-    selectedChatType,
     setSelectedChatMessages,
   } = useAppStore();
 
   const { onlineUsers } = useSocket();
 
   const handleClick = (contact) => {
-    if (isChannel) setSelectedChatType("channel");
-    else setSelectedChatType("contact");
+    setSelectedChatType(isChannel ? "channel" : "contact");
     setSelectedChatData(contact);
     if (selectedChatData && selectedChatData._id !== contact._id) {
       setSelectedChatMessages([]);
@@ -59,13 +57,43 @@ const ContactList = ({ contacts, isChannel = false }) => {
               )}
             </Avatar>
           )}
+
+          {isChannel && (
+            <Avatar
+              className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500 flex items-center justify-center"
+              style={{
+                backgroundColor: "#ffffff22",
+                color: `#e5e5e5`,
+              }}
+            >
+              {contact.image ? (
+                <AvatarImage
+                  src={`${HOST}${contact.image}`}
+                  alt="profile"
+                  className="object-cover w-full h-full"
+                />
+              ) : (
+                <span className="uppercase text-lg sm:text-xl font-semibold">
+                  {contact.channelName && contact.channelName.charAt(0)}
+                </span>
+              )}
+            </Avatar>
+          )}
+
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-neutral-200">
-              {contact.firstName} {contact.lastName}
+              {isChannel
+                ? contact.channelName
+                : `${contact.firstName} ${contact.lastName}`}
             </p>
-            <p className="text-xs text-neutral-400 truncate">{contact.email}</p>
+            {!isChannel && (
+              <p className="text-xs text-neutral-400 truncate">
+                {contact.email}
+              </p>
+            )}
           </div>
-          {onlineUsers.includes(contact._id) && (
+
+          {!isChannel && onlineUsers.includes(contact._id) && (
             <div className="w-2 h-2 bg-green-500 rounded-full flex-shrink-0"></div>
           )}
         </div>

@@ -3,11 +3,21 @@ import ProfileInfo from "./components/ProfileInfo";
 import NewDm from "./components/NewDm/NewDm";
 import useAppStore from "@/store";
 import axios from "axios";
-import { DM_CONTACTS_ROUTE, HOST } from "@/utils/constants";
+import {
+  DM_CONTACTS_ROUTE,
+  GET_USER_CHANNELS_ROUTE,
+  HOST,
+} from "@/utils/constants";
 import ContactList from "@/components/ContactList.jsx";
+import CreateChannel from "./components/CreateChannel";
 
 const ContactContainer = () => {
-  const { directMessagesContacts, setDirectMessagesContacts } = useAppStore();
+  const {
+    directMessagesContacts,
+    setDirectMessagesContacts,
+    channels,
+    setChannels,
+  } = useAppStore();
 
   useEffect(() => {
     const fetchDMContacts = async () => {
@@ -17,13 +27,31 @@ const ContactContainer = () => {
         });
 
         setDirectMessagesContacts(response.data);
+        console.log(response.data);
       } catch (error) {
         console.log(error);
       }
     };
 
+    const userChannels = async () => {
+      try {
+        const response = await axios.get(GET_USER_CHANNELS_ROUTE, {
+          withCredentials: true,
+        });
+
+        if (response.status === 200) {
+          setChannels(response.data);
+          console.log(channels);
+        }
+      } catch (error) {
+        console.log(error);
+      }
+    };
+
+    userChannels();
+
     fetchDMContacts();
-  }, []);
+  }, [setChannels, setDirectMessagesContacts]);
 
   return (
     <div className="relative md:w-[35vw] lg:w-[30vw] xl:w-[20vw] bg-[#1b1c24] border-r-2 border-[#2f303b] w-full">
@@ -42,6 +70,10 @@ const ContactContainer = () => {
       <div className="my-5">
         <div className="flex items-center justify-between pr-10">
           <Title text="Channels" />
+          <CreateChannel />
+        </div>
+        <div className="max-h-[30vh] overflow-y-auto scrollbar-hidden px-5">
+          <ContactList contacts={channels} isChannel />
         </div>
       </div>
       <ProfileInfo />

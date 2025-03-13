@@ -9,6 +9,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import setupSocket from "./socket.js";
 import messageRouter from "./routes/message.routes.js";
+import channelRouter from "./routes/channel.routes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +31,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api/auth", authRouter);
 app.use("/api/users", userRouter);
 app.use("/api/messages", messageRouter);
+app.use("/api/channels", channelRouter);
 
 //middleware to server static files
 app.use(

@@ -15,3 +15,11 @@ export const MESSAGES_ROUTE = "/api/messages";
 export const DM_CONTACTS_ROUTE = `${USER_ROUTES}/dm-contacts`;
 
 export const UPLOAD_FILE_ROUTE = `${HOST}${MESSAGES_ROUTE}/upload-file`;
+
+export const GET_ALL_CONTACTS_ROUTE = `${HOST}${USER_ROUTES}/contacts`;
+
+export const CHANNEL_ROUTE = `/api/channels`;
+
+export const CREATE_NEW_CHANNEL_ROUTE = `${HOST}${CHANNEL_ROUTE}`;
+
+export const GET_USER_CHANNELS_ROUTE = `${HOST}${CHANNEL_ROUTE}`;

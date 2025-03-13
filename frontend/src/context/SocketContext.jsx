@@ -55,13 +55,25 @@ export const SocketProvider = ({ children }) => {
       console.log("Message Received: ", message);
     };
 
+    const handleChannelReceiveMessage = (message) => {
+      if (selectedChatData && selectedChatType !== undefined) {
+        addMessage(message);
+      }
+      console.log("Channel Message Recieved: ", message);
+    };
+
+    socket.current.on("receive-channel-message", handleChannelReceiveMessage);
+
     socket.current.on("receiveMessage", handleReceiveMessage);
 
     return () => {
       socket.current.off("receiveMessage", handleReceiveMessage);
+      socket.current.off(
+        "receive-channel-message",
+        handleChannelReceiveMessage
+      );
     };
   }, [selectedChatData, selectedChatType]);
-
 
   return (
     <SocketContext.Provider value={{ socket: socket.current, onlineUsers }}>

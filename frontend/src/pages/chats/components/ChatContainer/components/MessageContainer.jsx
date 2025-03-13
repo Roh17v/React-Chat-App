@@ -55,6 +55,7 @@ const MessageContainer = () => {
             </div>
           )}
           {selectedChatType === "contact" && renderDMMessages(message)}
+          {selectedChatType === "channel" && renderChannelMessage(message)}
         </div>
       );
     });
@@ -73,7 +74,9 @@ const MessageContainer = () => {
       const response = await axios.get(`${HOST}/${url}`, {
         responseType: "blob",
         onDownloadProgress: (data) =>
-          setFileDownloadingProgress((100 * data.loaded) / data.total),
+          setFileDownloadingProgress(
+            Math.round((100 * data.loaded) / data.total)
+          ),
       });
 
       setIsDownloading(false);
@@ -150,6 +153,29 @@ const MessageContainer = () => {
         <div className="text-xs text-gray-500 ">
           {moment(message.createdAt).format("LT")}
         </div>
+      </div>
+    );
+  };
+
+  const renderChannelMessage = (message) => {
+    console.log(message.sender._id, user.id);
+    return (
+      <div
+        className={`mt-5 ${
+          message.sender._id === user.id ? "text-right" : "text-left"
+        }`}
+      >
+        {message.messageType === "text" && (
+          <div
+            className={`${
+              message.sender._id === user.id
+                ? "bg-[#8427ff]/5 text-[#8427ff]/90 border-[#8427ff]/50"
+                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
+            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
+          >
+            {message.content}
+          </div>
+        )}
       </div>
     );
   };
