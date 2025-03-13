@@ -1,7 +1,7 @@
-import { response } from "express";
 import Message from "../models/message.model.js";
 import { createError } from "../utils/error.js";
 import { mkdirSync, renameSync } from "fs";
+import { Channel } from "../models/channel.model.js";
 
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
@@ -38,6 +38,33 @@ export const uploadFile = async (req, res, next) => {
     renameSync(req.file.path, fileName);
 
     return res.status(201).json({ filePath: fileName });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getChannelMessages = async (req, res, next) => {
+  const { channelId } = req.params;
+  const userId = req.user?._id;
+
+  if (!channelId || !userId) {
+    return next(createError(400, "ChannelId and userId are required."));
+  }
+
+  try {
+    const channelMessages = await Channel.findById(channelId).populate({
+      path: "message",
+      populate: {
+        path: "sender",
+        select: "id email firstName lastName image color",
+      },
+    });
+
+    if (!channelMessages) {
+      return next(createError(404, "Channel not found."));
+    }
+
+    res.status(200).json(channelMessages.message);
   } catch (error) {
     next(error);
   }

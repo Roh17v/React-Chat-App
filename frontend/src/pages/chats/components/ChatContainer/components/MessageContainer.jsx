@@ -1,5 +1,10 @@
 import useAppStore from "@/store";
-import { HOST, MESSAGES_ROUTE } from "@/utils/constants";
+import {
+  CHANNEL_MESSAGES_ROUTE,
+  HOST,
+  MESSAGES_ROUTE,
+  PRIVATE_CONTACT_MESSAGES_ROUTE,
+} from "@/utils/constants";
 import moment from "moment";
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
@@ -25,7 +30,22 @@ const MessageContainer = () => {
     const getMessages = async () => {
       try {
         const response = await axios.get(
-          `${HOST}${MESSAGES_ROUTE}/${selectedChatData._id}`,
+          `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatData._id}`,
+          {
+            withCredentials: true,
+          }
+        );
+        console.log(response.data);
+        setSelectedChatMessages(response.data);
+      } catch (error) {
+        console.log(error);
+      }
+    };
+
+    const getChannelMessages = async () => {
+      try {
+        const response = await axios.get(
+          `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatData._id}`,
           {
             withCredentials: true,
           }
@@ -38,6 +58,7 @@ const MessageContainer = () => {
     };
     if (selectedChatData._id) {
       if (selectedChatType === "contact") getMessages();
+      if (selectedChatType === "channel") getChannelMessages();
     }
   }, [selectedChatData, selectedChatType, setSelectedChatMessages]);
 
