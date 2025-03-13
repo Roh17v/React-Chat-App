@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { HOST } from "./utils/constants";
 import { AUTH_ROUTES } from "./utils/constants";
+import Loader from "./components/Loader";
 
 function App() {
   const checkAuth = useAppStore((state) => state.checkAuth);
@@ -25,7 +26,6 @@ function App() {
 
         if (response.status === 200 && response.data) {
           setUser(response.data);
-          4;
         } else {
           setUser(null);
         }
@@ -41,7 +41,7 @@ function App() {
     checkAuth();
   }, []);
 
-  if (isLoading) return <div>Loading...</div>;
+  if (isLoading) return <Loader />;
 
   return (
     <Routes>
