@@ -197,6 +197,43 @@ const MessageContainer = () => {
             {message.content}
           </div>
         )}
+        {message.messageType === "file" && (
+          <div
+            className={`${
+              message.sender._id === user.id
+                ? "bg-[#8427ff]/5 text-[#8427ff]/90 border-[#8427ff]/50"
+                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
+            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
+          >
+            {checkIfImage(message.fileUrl.split("/").pop()) ? (
+              <div
+                className="cursor-pointer"
+                onClick={() => {
+                  setShowImage(true);
+                  setImageURL(message.fileUrl);
+                }}
+              >
+                <img
+                  src={`${HOST}/${message.fileUrl}`}
+                  height={300}
+                  width={300}
+                />
+              </div>
+            ) : (
+              <div className="flex items-center justify-center gap-4">
+                <span className="text-white text-3xl bg-black/20 rounded-full p-3">
+                  <MdFolderZip />
+                </span>
+                <span>{message.fileUrl.split("/").pop()}</span>
+                <span className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
+                  <IoArrowDownCircle
+                    onClick={() => downloadFile(message.fileUrl)}
+                  />
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   };
