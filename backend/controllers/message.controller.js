@@ -6,19 +6,27 @@ import { Channel } from "../models/channel.model.js";
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
   const userId = req.user._id;
+  let { page = 1, limit = 20 } = req.query;
 
   if (!contactId || !userId)
     return next(createError(400, "ContactId and userId is required."));
 
   try {
+    page = parseInt(page);
+    limit = parseInt(limit);
+
     const messages = await Message.find({
       $or: [
         { sender: userId, receiver: contactId },
         { sender: contactId, receiver: userId },
       ],
-    }).sort({ createdAt: 1 });
+    })
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
 
-    res.status(200).json(messages);
+    res.status(200).json(messages.reverse());
   } catch (error) {
     next(error);
   }

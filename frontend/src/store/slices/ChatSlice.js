@@ -8,7 +8,13 @@ export const createChatSlice = (set, get) => ({
   fileUploadingProgress: 0,
   fileDownloadingProgress: 0,
   channels: [],
+  messageContainerRef: null,
+  page: 1,
 
+  setPage: (pageNo) => set({ page: pageNo }),
+  setMessageContainerRef: (ref) => {
+    set({ messageContainerRef: ref });
+  },
   setChannels: (channels) => set({ channels }),
   setIsUploading: (isUploading) => set({ isUploading }),
   setIsDownloading: (isDownloading) => set({ isDownloading }),
@@ -20,8 +26,18 @@ export const createChatSlice = (set, get) => ({
     set({ directMessagesContacts: contacts }),
   setSelectedChatData: (selectedChatData) => set({ selectedChatData }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
-  setSelectedChatMessages: (messages) =>
-    set({ selectedChatMessages: messages || [] }),
+  setSelectedChatMessages: (newMessages, reset = false) =>
+    set((state) => {
+      const allMessages = reset
+        ? newMessages
+        : [...newMessages, ...state.selectedChatMessages];
+
+      const uniqueMessages = Array.from(
+        new Map(allMessages.map((msg) => [msg._id, msg])).values()
+      );
+
+      return { selectedChatMessages: uniqueMessages };
+    }),
 
   addChannel: (channel) => {
     console.log("Inside Add channel");

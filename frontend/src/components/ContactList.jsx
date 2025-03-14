@@ -10,6 +10,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
     setSelectedChatData,
     setSelectedChatType,
     setSelectedChatMessages,
+    setPage,
   } = useAppStore();
 
   const { onlineUsers } = useSocket();
@@ -18,7 +19,8 @@ const ContactList = ({ contacts, isChannel = false }) => {
     setSelectedChatType(isChannel ? "channel" : "contact");
     setSelectedChatData(contact);
     if (selectedChatData && selectedChatData._id !== contact._id) {
-      setSelectedChatMessages([]);
+      setSelectedChatMessages([], true);
+      setPage(1);
     }
   };
 

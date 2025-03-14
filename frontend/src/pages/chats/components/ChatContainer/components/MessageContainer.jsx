@@ -22,26 +22,62 @@ const MessageContainer = () => {
     setSelectedChatMessages,
     setIsDownloading,
     setFileDownloadingProgress,
+    page,
+    setPage,
   } = useAppStore();
 
   const [showImage, setShowImage] = useState(false);
   const [imageURL, setImageURL] = useState(null);
-  useEffect(() => {
-    const getMessages = async () => {
-      try {
-        const response = await axios.get(
-          `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatData._id}`,
-          {
-            withCredentials: true,
-          }
-        );
-        console.log(response.data);
-        setSelectedChatMessages(response.data);
-      } catch (error) {
-        console.log(error);
-      }
-    };
+  const [loading, setLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const containerRef = useRef(null);
+  const newMessageRef = useRef(null);
 
+  const getMessages = async (pageNumber = 1) => {
+    if (!selectedChatData?._id || loading || !hasMore) return;
+
+    const container = containerRef.current;
+    const previousScrollHeight = container?.scrollHeight;
+
+    setLoading(true);
+    try {
+      const response = await axios.get(
+        `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatData._id}?page=${pageNumber}&limit=20`,
+        {
+          withCredentials: true,
+        }
+      );
+
+      if (response.data.length === 0) setHasMore(false);
+      console.log(response.data);
+
+      setSelectedChatMessages(response.data, false);
+
+      if (containerRef.current && pageNumber === 1) {
+        containerRef.current.scrollTo({
+          top: containerRef.current.scrollHeight,
+          behavior: "smooth",
+        });
+      }
+
+      setTimeout(() => {
+        if (container) {
+          const newScrollHeight = container.scrollHeight;
+          container.scrollTop = newScrollHeight - previousScrollHeight;
+        }
+      }, 0);
+
+      console.log(selectedChatMessages);
+
+      setPage(pageNumber);
+    } catch (error) {
+      console.log(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
     const getChannelMessages = async () => {
       try {
         const response = await axios.get(
@@ -57,19 +93,34 @@ const MessageContainer = () => {
       }
     };
     if (selectedChatData._id) {
-      if (selectedChatType === "contact") getMessages();
+      if (selectedChatType === "contact") {
+        setPage(1);
+        setHasMore(true);
+        setSelectedChatMessages([]);
+        getMessages(1, true);
+      }
       if (selectedChatType === "channel") getChannelMessages();
     }
   }, [selectedChatData, selectedChatType, setSelectedChatMessages]);
 
+  const messagesRef = useRef(new Map());
+
   const renderMessages = () => {
     let lastDate = null;
-    return selectedChatMessages.map((message) => {
+    return selectedChatMessages.map((message, index) => {
       const messageDate = moment(message.createdAt).format("YYYY-MM-DD");
       const showDate = messageDate !== lastDate;
       lastDate = messageDate;
+
+      if (!messagesRef.current.has(message._id)) {
+        messagesRef.current.set(message._id, message);
+      }
+
       return (
-        <div key={message._id}>
+        <div
+          key={message._id}
+          ref={index === selectedChatMessages.length - 1 ? newMessageRef : null}
+        >
           {showDate && (
             <div className="text-center text-gray-500 my-2">
               {moment(message.createdAt).format("LL")}
@@ -238,13 +289,48 @@ const MessageContainer = () => {
     );
   };
 
+  const handleScroll = () => {
+    if (!containerRef.current || loading || !hasMore) return;
+
+    const scrollYBeforeFetch = containerRef.current.scrollHeight;
+
+    if (containerRef.current.scrollTop < 50) {
+      getMessages(page + 1).then(() => {
+        requestAnimationFrame(() => {
+          containerRef.current.scrollTop =
+            containerRef.current.scrollHeight - scrollYBeforeFetch;
+        });
+      });
+    }
+  };
+
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (newMessageRef.current) {
+      newMessageRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
     }
   }, [selectedChatMessages]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (container) {
+      container.addEventListener("scroll", handleScroll);
+    }
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [handleScroll]);
+
   return (
-    <div className="flex-1 overflow-y-auto h-[calc(100vh-10rem)] scrollbar-hidden p-4 px-8 md:w-[65vw] lg:w-[70vw] xl:w-[80vw] w-full">
+    <div
+      ref={containerRef}
+      className="flex-1 overflow-y-auto h-[calc(100vh-10rem)] scrollbar-hidden p-4 px-8 md:w-[65vw] lg:w-[70vw] xl:w-[80vw] w-full"
+    >
+      {loading && page > 1 && (
+        <div className="text-center py-2">
+          <span className="animate-spin inline-block w-6 h-6 border-4 border-purple-500 border-t-transparent rounded-full"></span>
+        </div>
+      )}
       {renderMessages()}
       <div ref={scrollRef}></div>
       {showImage && (
