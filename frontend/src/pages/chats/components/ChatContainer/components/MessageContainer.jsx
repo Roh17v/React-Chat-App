@@ -54,18 +54,13 @@ const MessageContainer = () => {
       setSelectedChatMessages(response.data, false);
 
       if (containerRef.current && pageNumber === 1) {
-        containerRef.current.scrollTo({
-          top: containerRef.current.scrollHeight,
-          behavior: "smooth",
+        requestAnimationFrame(() => {
+          containerRef.current.scrollTo({
+            top: containerRef.current.scrollHeight,
+            behavior: "smooth",
+          });
         });
       }
-
-      setTimeout(() => {
-        if (container) {
-          const newScrollHeight = container.scrollHeight;
-          container.scrollTop = newScrollHeight - previousScrollHeight;
-        }
-      }, 0);
 
       console.log(selectedChatMessages);
 
