@@ -305,7 +305,14 @@ const MessageContainer = () => {
   };
 
   useEffect(() => {
-    if (newMessageRef.current) {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const isNearBottom =
+      container.scrollTop + container.clientHeight >=
+      container.scrollHeight - 200;
+
+    if (isNearBottom && newMessageRef.current) {
       newMessageRef.current.scrollIntoView({
         behavior: "smooth",
         block: "end",
