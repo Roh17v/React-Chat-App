@@ -29,6 +29,11 @@ const messageSchema = new mongoose.Schema(
         return this.messageType === "file";
       },
     },
+    channelId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Channel",
+      default: null,
+    },
   },
   { timestamps: true }
 );

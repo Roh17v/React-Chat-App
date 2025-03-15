@@ -2,6 +2,8 @@ import Message from "../models/message.model.js";
 import { createError } from "../utils/error.js";
 import { mkdirSync, renameSync } from "fs";
 import { Channel } from "../models/channel.model.js";
+import { populate } from "dotenv";
+import path from "path";
 
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
@@ -52,27 +54,20 @@ export const uploadFile = async (req, res, next) => {
 };
 
 export const getChannelMessages = async (req, res, next) => {
-  const { channelId } = req.params;
-  const userId = req.user?._id;
-
-  if (!channelId || !userId) {
-    return next(createError(400, "ChannelId and userId are required."));
-  }
-
   try {
-    const channelMessages = await Channel.findById(channelId).populate({
-      path: "message",
-      populate: {
-        path: "sender",
-        select: "id email firstName lastName image color",
-      },
-    });
+    const { channelId } = req.params;
+    const { page = 1, limit = 20 } = req.query;
 
-    if (!channelMessages) {
-      return next(createError(404, "Channel not found."));
-    }
+    if (!channelId) return next(createError(400, "Channel ID is required"));
 
-    res.status(200).json(channelMessages.message);
+    const messages = await Message.find({ channelId })
+      .sort({ createdAt: -1 })
+      .populate("sender", "_id email color firstName lastName")
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit))
+      .lean();
+
+    res.status(200).json(messages.reverse());
   } catch (error) {
     next(error);
   }

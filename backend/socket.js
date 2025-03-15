@@ -1,8 +1,6 @@
 import { Server as SocketIoServer } from "socket.io";
 import Message from "./models/message.model.js";
-import { populate } from "dotenv";
 import { Channel } from "./models/channel.model.js";
-import { set } from "mongoose";
 
 const setupSocket = (server) => {
   const io = new SocketIoServer(server, {
@@ -63,6 +61,7 @@ const setupSocket = (server) => {
         messageType,
         receiver: null,
         fileUrl,
+        channelId,
       });
 
       const messageData = await Message.findById(newMessage._id)
