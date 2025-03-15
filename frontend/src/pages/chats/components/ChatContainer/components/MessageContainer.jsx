@@ -95,6 +95,8 @@ const MessageContainer = () => {
           });
         });
       }
+
+      setPage(pageNumber);
     } catch (error) {
       console.log(error);
     } finally {
@@ -246,7 +248,6 @@ const MessageContainer = () => {
   };
 
   const renderChannelMessage = (message) => {
-    console.log(message.sender._id, user.id);
     return (
       <div
         className={`mt-5 ${
@@ -261,6 +262,11 @@ const MessageContainer = () => {
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
             } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
           >
+            {message.sender && (
+              <p className="text-xs text-gray-400 font-medium mb-1 text-left">
+                {message.sender?.firstName} {message.sender?.lastName}
+              </p>
+            )}
             {message.content}
           </div>
         )}
@@ -272,6 +278,11 @@ const MessageContainer = () => {
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
             } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
           >
+            {message.sender && (
+              <p className="text-xs text-gray-400 font-medium mb-1 text-left">
+                {message.sender?.firstName} {message.sender?.lastName}
+              </p>
+            )}
             {checkIfImage(message.fileUrl.split("/").pop()) ? (
               <div
                 className="cursor-pointer"
@@ -301,6 +312,9 @@ const MessageContainer = () => {
             )}
           </div>
         )}
+        <div className="text-xs text-gray-500 ">
+          {moment(message.createdAt).format("LT")}
+        </div>
       </div>
     );
   };
@@ -335,7 +349,7 @@ const MessageContainer = () => {
 
     const isNearBottom =
       container.scrollTop + container.clientHeight >=
-      container.scrollHeight - 200;
+      container.scrollHeight - 400;
 
     if (isNearBottom && newMessageRef.current) {
       newMessageRef.current.scrollIntoView({
