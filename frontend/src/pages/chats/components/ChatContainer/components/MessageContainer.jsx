@@ -194,7 +194,7 @@ const MessageContainer = () => {
           <div
             className={`${
               message.sender !== selectedChatData._id
-                ? "bg-[#8427ff]/5 text-[#8427ff]/90 border-[#8427ff]/50"
+                ? "bg-[#8427ff]/5 text-[#A78BFA] /90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
             } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
           >
@@ -205,7 +205,7 @@ const MessageContainer = () => {
           <div
             className={`${
               message.sender !== selectedChatData._id
-                ? "bg-[#8427ff]/5 text-[#8427ff]/90 border-[#8427ff]/50"
+                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
             } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
           >
@@ -257,7 +257,7 @@ const MessageContainer = () => {
           <div
             className={`${
               message.sender._id === user.id
-                ? "bg-[#8427ff]/5 text-[#8427ff]/90 border-[#8427ff]/50"
+                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
             } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
           >
@@ -268,7 +268,7 @@ const MessageContainer = () => {
           <div
             className={`${
               message.sender._id === user.id
-                ? "bg-[#8427ff]/5 text-[#8427ff]/90 border-[#8427ff]/50"
+                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
             } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
           >
