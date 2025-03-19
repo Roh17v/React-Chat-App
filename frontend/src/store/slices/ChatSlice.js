@@ -39,6 +39,11 @@ export const createChatSlice = (set, get) => ({
       return { selectedChatMessages: uniqueMessages };
     }),
 
+  addContact: (contact) => {
+    const contacts = get().directMessagesContacts || [];
+    set({ directMessagesContacts: [...contacts, contact] });
+  },
+
   addChannel: (channel) => {
     console.log("Inside Add channel");
     const channels = get().channels || [];

@@ -17,12 +17,6 @@ const channelSchema = new mongoose.Schema({
     ref: "User",
     required: true,
   },
-  message: [
-    {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Message",
-    },
-  ],
   createdAt: {
     type: Date,
     default: Date.now,

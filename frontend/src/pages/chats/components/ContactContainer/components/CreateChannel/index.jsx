@@ -31,8 +31,7 @@ import MultipleSelector from "@/components/ui/multiselect";
 import { toast } from "sonner";
 
 const CreateChannel = () => {
-  const { addChannel, channels } =
-    useAppStore();
+  const { addChannel, channels, directMessagesContacts } = useAppStore();
   const [newChannelModal, setNewChannelModal] = useState(false);
   const [allContacts, setAllContacts] = useState([]);
   const [selectedContacts, setSelectedContacts] = useState([]);
@@ -52,7 +51,7 @@ const CreateChannel = () => {
     };
 
     getData();
-  }, []);
+  }, [directMessagesContacts, channels]);
 
   const createChannel = async () => {
     if (!channelName) return toast.error("Enter a Channel Name.");

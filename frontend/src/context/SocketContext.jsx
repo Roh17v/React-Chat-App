@@ -14,7 +14,13 @@ export const SocketProvider = ({ children }) => {
   const socket = useRef(null);
   const { user } = useAppStore();
   const [onlineUsers, setOnlineUsers] = useState([]);
-  const { selectedChatData, selectedChatType, addMessage } = useAppStore();
+  const {
+    selectedChatData,
+    selectedChatType,
+    addMessage,
+    addChannel,
+    addContact,
+  } = useAppStore();
 
   useEffect(() => {
     if (user && !socket.current) {
@@ -31,14 +37,25 @@ export const SocketProvider = ({ children }) => {
         setOnlineUsers(users);
       });
 
+      socket.current.on("new-dm-contact", (contact) => {
+        addContact(contact);
+      });
+      socket.current.on("new-channel-contact", (channel) => {
+        addChannel(channel);
+      });
+
       return () => {
         if (socket.current) {
+          socket.current.off("new-dm-contact");
+          socket.current.off("new-channel-contact");
+          socket.current.off("onlineUsers");
+
           socket.current.disconnect();
           socket.current = null;
         }
       };
     }
-  }, [user]);
+  }, [user, addContact, addChannel]);
 
   useEffect(() => {
     if (!socket.current) return;

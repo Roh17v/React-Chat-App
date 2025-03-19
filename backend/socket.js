@@ -1,6 +1,7 @@
 import { Server as SocketIoServer } from "socket.io";
 import Message from "./models/message.model.js";
 import { Channel } from "./models/channel.model.js";
+import { User } from "./models/user.model.js";
 
 const setupSocket = (server) => {
   const io = new SocketIoServer(server, {
@@ -39,6 +40,28 @@ const setupSocket = (server) => {
       const receiverSockets = userSocketMap.get(message.receiver) || new Set();
       const senderSockets = userSocketMap.get(message.sender) || new Set();
 
+      const receiver = await User.findById(message.receiver);
+      if (!receiver.contacts.includes(message.sender)) {
+        await User.findByIdAndUpdate(message.receiver, {
+          $addToSet: { contacts: message.sender },
+        });
+
+        receiverSockets.forEach((socketId) =>
+          io.to(socketId).emit("new-dm-contact", messageData.sender)
+        );
+      }
+
+      const sender = await User.findById(message.sender);
+      if (!sender.contacts.includes(message.receiver)) {
+        await User.findByIdAndUpdate(message.sender, {
+          $addToSet: { contacts: message.receiver },
+        });
+
+        senderSockets.forEach((socketId) =>
+          io.to(socketId).emit("new-dm-contact", messageData.receiver)
+        );
+      }
+
       receiverSockets.forEach((socketId) =>
         io.to(socketId).emit("receiveMessage", messageData)
       );
@@ -68,18 +91,28 @@ const setupSocket = (server) => {
         .populate("sender", "_id firstName email lastName color")
         .exec();
 
-      await Channel.findByIdAndUpdate(channelId, {
-        $push: { message: newMessage._id },
-      });
-
       const channel = await Channel.findById(channelId).populate("members");
 
       const finalData = { ...messageData._doc, channelId: channel._id };
 
       if (channel && channel.members) {
-        channel.members.forEach((contact) => {
+        channel.members.forEach(async (contact) => {
           const memberSocketId =
             userSocketMap.get(contact._id.toString()) || new Set();
+
+          const user = await User.findById(contact._id);
+          if (!user.channels.includes(channelId)) {
+            await User.findByIdAndUpdate(contact._id, {
+              $addToSet: { contacts: channelId },
+            });
+
+            if (memberSocketId) {
+              memberSocketId.forEach((socketId) =>
+                io.to(socketId).emit("new-channel-contact", channel)
+              );
+            }
+          }
+
           if (memberSocketId.size > 0) {
             memberSocketId.forEach((socketId) => {
               io.to(socketId).emit("receive-channel-message", finalData);
