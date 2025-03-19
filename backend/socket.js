@@ -3,8 +3,11 @@ import Message from "./models/message.model.js";
 import { Channel } from "./models/channel.model.js";
 import { User } from "./models/user.model.js";
 
+let io;
+let userSocketMap;
+
 const setupSocket = (server) => {
-  const io = new SocketIoServer(server, {
+  io = new SocketIoServer(server, {
     cors: {
       origin: process.env.ORIGIN,
       methods: ["GET", "POST"],
@@ -12,7 +15,7 @@ const setupSocket = (server) => {
     },
   });
 
-  const userSocketMap = new Map();
+  userSocketMap = new Map();
 
   const addUserSocket = (userId, socketId) => {
     if (!userSocketMap.has(userId)) {
@@ -88,31 +91,21 @@ const setupSocket = (server) => {
       });
 
       const messageData = await Message.findById(newMessage._id)
-        .populate("sender", "_id firstName email lastName color")
+        .populate("sender")
         .exec();
+
+      await Channel.findByIdAndUpdate(channelId, {
+        $push: { message: newMessage._id },
+      });
 
       const channel = await Channel.findById(channelId).populate("members");
 
       const finalData = { ...messageData._doc, channelId: channel._id };
 
       if (channel && channel.members) {
-        channel.members.forEach(async (contact) => {
+        channel.members.forEach((contact) => {
           const memberSocketId =
             userSocketMap.get(contact._id.toString()) || new Set();
-
-          const user = await User.findById(contact._id);
-          if (!user.channels.includes(channelId)) {
-            await User.findByIdAndUpdate(contact._id, {
-              $addToSet: { contacts: channelId },
-            });
-
-            if (memberSocketId) {
-              memberSocketId.forEach((socketId) =>
-                io.to(socketId).emit("new-channel-contact", channel)
-              );
-            }
-          }
-
           if (memberSocketId.size > 0) {
             memberSocketId.forEach((socketId) => {
               io.to(socketId).emit("receive-channel-message", finalData);
@@ -157,4 +150,4 @@ const setupSocket = (server) => {
   });
 };
 
-export default setupSocket;
+export { io, setupSocket, userSocketMap };

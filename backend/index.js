@@ -7,7 +7,7 @@ import authRouter from "./routes/auth.routes.js";
 import userRouter from "./routes/user.router.js";
 import path from "path";
 import { fileURLToPath } from "url";
-import setupSocket from "./socket.js";
+import { setupSocket } from "./socket.js";
 import messageRouter from "./routes/message.routes.js";
 import channelRouter from "./routes/channel.routes.js";
 

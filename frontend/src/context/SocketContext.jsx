@@ -41,6 +41,7 @@ export const SocketProvider = ({ children }) => {
         addContact(contact);
       });
       socket.current.on("new-channel-contact", (channel) => {
+        console.log("New Channel Received: ", channel);
         addChannel(channel);
       });
 

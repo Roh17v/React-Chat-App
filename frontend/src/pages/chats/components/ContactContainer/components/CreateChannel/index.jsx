@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
   Tooltip,
   TooltipContent,
@@ -6,26 +6,19 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { FaPlus } from "react-icons/fa6";
-import { useState } from "react";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-
-import axios, { all } from "axios";
+import axios from "axios";
 import {
   CREATE_NEW_CHANNEL_ROUTE,
   GET_ALL_CONTACTS_ROUTE,
-  USER_ROUTES,
 } from "@/utils/constants";
-
 import useAppStore from "@/store";
-import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import MultipleSelector from "@/components/ui/multiselect";
 import { toast } from "sonner";
@@ -43,10 +36,9 @@ const CreateChannel = () => {
         const response = await axios.get(GET_ALL_CONTACTS_ROUTE, {
           withCredentials: true,
         });
-
         setAllContacts(response.data.contacts);
       } catch (error) {
-        console.log(error);
+        console.error("Error fetching contacts:", error);
       }
     };
 
@@ -54,32 +46,29 @@ const CreateChannel = () => {
   }, [directMessagesContacts, channels]);
 
   const createChannel = async () => {
-    if (!channelName) return toast.error("Enter a Channel Name.");
-    if (selectedContacts.length <= 0)
-      return toast.error("Select Contacts to Create Channel");
+    if (!channelName.trim()) return toast.error("Enter a valid Channel Name.");
+    if (selectedContacts.length === 0)
+      return toast.error("Select at least one contact.");
 
-    console.log(selectedContacts);
     try {
       const response = await axios.post(
         CREATE_NEW_CHANNEL_ROUTE,
         {
-          channelName: channelName,
+          channelName,
           members: selectedContacts.map((contact) => contact.value),
         },
-        {
-          withCredentials: true,
-        }
+        { withCredentials: true }
       );
 
       if (response.status === 201) {
         setChannelName("");
         setSelectedContacts([]);
         setNewChannelModal(false);
-        addChannel(response.data.channel);
-        console.log(channels);
+        toast.success("Channel created successfully!");
       }
     } catch (error) {
-      console.log(error);
+      console.error("Error creating channel:", error);
+      toast.error("Failed to create channel.");
     }
   };
 
@@ -103,23 +92,23 @@ const CreateChannel = () => {
         open={newChannelModal}
         onOpenChange={(open) => {
           setNewChannelModal(open);
-          if (!open) setSearchedContacts([]);
-          setSearchTerm("");
+          if (!open) {
+            setSelectedContacts([]);
+            setChannelName("");
+          }
         }}
       >
         <DialogContent className="bg-[#181920] border-none w-[400px] h-[400px] text-white flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center">
-              Please Select Contacts
+              Create a New Channel
             </DialogTitle>
           </DialogHeader>
           <div>
             <Input
               placeholder="Channel Name"
               className="rounded-lg p-6 bg-[#2c2a3b] border-none"
-              onChange={(e) => {
-                setChannelName(e.target.value);
-              }}
+              onChange={(e) => setChannelName(e.target.value)}
               value={channelName}
             />
           </div>
