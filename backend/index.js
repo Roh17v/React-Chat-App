@@ -18,13 +18,33 @@ const app = express();
 dotenv.config();
 
 //middlewares
+const allowedOrigins = [
+  process.env.ORIGIN, 
+  "http://localhost:5173", 
+];
+
 app.use(
   cors({
-    origin: [process.env.ORIGIN],
-    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
-    credentials: true,
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true, 
   })
 );
+
+
+app.options("*", cors({ 
+  origin: allowedOrigins,
+  credentials: true
+}));
+
+
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
