@@ -18,10 +18,14 @@ const app = express();
 dotenv.config();
 
 //middlewares
-const allowedOrigins = [process.env.origin, "http://localhost:5173"];
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  "http://localhost:5173",
+];
 
 const corsOptions = {
   origin: function (origin, callback) {
+    console.log("Origin:", origin); 
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -29,13 +33,16 @@ const corsOptions = {
     }
   },
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
   credentials: true,
 };
 
 app.use(cors(corsOptions));
-
 app.options("*", cors(corsOptions));
+
+app.options("*", (req, res) => {
+  res.sendStatus(200);
+});
 
 app.use(cookieParser());
 app.use(express.json());
