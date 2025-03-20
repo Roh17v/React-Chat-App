@@ -77,7 +77,7 @@ const Profile = () => {
         navigate("/chats");
       }
     } catch (error) {
-      toast(error.response.data.message);
+      toast(error.response?.data?.message || "Something went wrong");
     }
   };
 
@@ -119,7 +119,7 @@ const Profile = () => {
         setSelectedFile(null);
       }
     } catch (error) {
-      toast.error(error.response?.data?.message);
+      toast.error(error.response?.data?.message || "Something went wrong");
     }
   };
 

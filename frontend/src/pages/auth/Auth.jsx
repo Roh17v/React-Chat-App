@@ -83,7 +83,7 @@ const Auth = () => {
           }, 2000);
         }
       } catch (error) {
-        toast.error(error.response.data.message);
+        toast.error(error.response?.data?.message || "Something went wrong");
         console.log(error);
       }
     }
@@ -112,7 +112,7 @@ const Auth = () => {
 
         console.log(response.data);
       } catch (error) {
-        toast.error(error.response.data.message);
+        toast.error(error.response?.data?.message || "Something went wrong");
         console.log(error);
       }
     }
