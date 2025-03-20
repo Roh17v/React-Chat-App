@@ -9,7 +9,7 @@ let userSocketMap;
 const setupSocket = (server) => {
   io = new SocketIoServer(server, {
     cors: {
-      origin: process.env.ORIGIN,
+      origin: process.env.FRONTEND_URL,
       methods: ["GET", "POST"],
       credentials: true,
     },
