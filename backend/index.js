@@ -20,7 +20,7 @@ dotenv.config();
 //middlewares
 app.use(
   cors({
-    origin: "*",
+    origin: [process.env.ORIGIN],
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     credentials: true,
   })
@@ -32,6 +32,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/users", userRouter);
 app.use("/api/messages", messageRouter);
 app.use("/api/channels", channelRouter);
+app.get("/api/data", (req, res) => res.json({ message: "Secret Data" }));
 
 //middleware to server static files
 app.use(
