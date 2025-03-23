@@ -14,7 +14,7 @@
 ---
 
 ## Tech Stack  
-- **Frontend**: React, Tailwind CSS, Context API  ShadCN
+- **Frontend**: React, Tailwind CSS, Context API, ShadCN  
 - **Backend**: Node.js, Express, Socket.io  
 - **Database**: MongoDB  
 - **Authentication**: JWT, Bcrypt  
@@ -24,28 +24,27 @@
 
 ## Screenshots  
 
-### 1. Login Page
- ![Login page](screenshots/auth page chat app.png)
- Secure login and registration with JWT authentication.
- 
- ### 2. Profile Page
- ![Profile page](screenshots/profile page chat app.png)
- Create and update your profile
- 
- ### 3. Chat page UI
- ![Chat page](screenshots/chat page chat app.png)
- Real-time messaging with a clean and intuitive UI.
+### 1. Login Page  
+![Login Page](https://github.com/Roh17v/React-Chat-App/blob/main/screenshots/auth%20page%20chat%20app.png?raw=true)  
+*Secure login and registration with JWT authentication.*  
 
+### 2. Profile Page  
+![Profile Page](https://github.com/Roh17v/React-Chat-App/blob/main/screenshots/profile%20page%20chat%20app.png?raw=true)  
+*Create and update your profile.*  
+
+### 3. Chat Page UI  
+![Chat Page](https://github.com/Roh17v/React-Chat-App/blob/main/screenshots/chat%20page%20chat%20app.png?raw=true)  
+*Real-time messaging with a clean and intuitive UI.*  
 
 ---
 
-## Live Demo
-[Check out the live demo here](https://react-chat-app-blush-tau.vercel.app)
+## Live Demo  
+[Check out the live demo here](https://react-chat-app-blush-tau.vercel.app)  
 
+---
 
-## Connect with Me
-Let’s connect and collaborate!
+## Connect with Me  
+Let’s connect and collaborate!  
 
-[LinkedIn](https://www.linkedin.com/in/r04hitverma/)
-
-[Email](rohitverma272727@gmail.com)
+- [LinkedIn](https://www.linkedin.com/in/r04hitverma/)  
+- [Email](mailto:rohitverma272727@gmail.com)  
