@@ -23,38 +23,19 @@
 ---
 
 ## Screenshots  
-*(Add screenshots here with captions)*  
-
-### 1. Login Page  
-![Login Page](screenshots/login.png)  
-*Secure login and registration with JWT authentication.*  
-
-### 2. Chat Interface  
-![Chat Interface](screenshots/chat.png)  
-*Real-time messaging with a clean and intuitive UI.*  
-
-### 3. Admin Dashboard  
-![Admin Dashboard](screenshots/admin.png)  
-*Role-based access control for admin functionalities.*  
-
----
-
-## Installation  
-Follow these steps to run the project locally:  
-
-## Screenshots
 
 ### 1. Login Page
-![Login page](screenshots/auth page chat app.png)
-Secure login and registration with JWT authentication.
+ ![Login page](screenshots/auth page chat app.png)
+ Secure login and registration with JWT authentication.
+ 
+ ### 2. Profile Page
+ ![Profile page](screenshots/profile page chat app.png)
+ Create and update your profile
+ 
+ ### 3. Chat page UI
+ ![Chat page](screenshots/chat page chat app.png)
+ Real-time messaging with a clean and intuitive UI.
 
-### 2. Profile Page
-![Profile page](screenshots/profile page chat app.png)
-Create and update your profile
-
-### 3. Chat page UI
-![Chat page](screenshots/chat page chat app.png)
-Real-time messaging with a clean and intuitive UI.
 
 ---
 
@@ -62,9 +43,9 @@ Real-time messaging with a clean and intuitive UI.
 [Check out the live demo here](https://react-chat-app-blush-tau.vercel.app)
 
 
-##Connect with Me
+## Connect with Me
 Let’s connect and collaborate!
 
-###[LinkedIn](https://www.linkedin.com/in/r04hitverma/)
+[LinkedIn](https://www.linkedin.com/in/r04hitverma/)
 
-###[Email](rohitverma272727@gmail.com)
+[Email](rohitverma272727@gmail.com)
