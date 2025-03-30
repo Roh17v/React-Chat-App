@@ -121,8 +121,8 @@ const MessageBar = () => {
     };
   }, [emojiPickerOpen]);
   return (
-    <div className="h-[10vh] bg-[#1c1d25] flex justify-center items-center px-8 gap-6 mb-6">
-      <div className="flex-1 flex bg-[#2a2b33] rounded-md items-center gap-5 pr-5">
+    <div className="min-h-[60px] sm:h-[10vh] w-full bg-[#1c1d25] flex justify-center items-center px-4 sm:px-8 gap-2 sm:gap-6 mb-4 sm:mb-6">
+      <div className="flex-1 flex bg-[#2a2b33] rounded-md items-center gap-2 sm:gap-5 pr-3 sm:pr-5 flex-wrap">
         <input
           type="text"
           onKeyDown={(e) => {
@@ -131,7 +131,7 @@ const MessageBar = () => {
               handleSendMessage();
             }
           }}
-          className="flex-1 p-5 bg-transparent rounded-md focus:border-none focus:outline-none"
+          className="flex-1 p-3 sm:p-5 bg-transparent rounded-md focus:border-none focus:outline-none"
           placeholder="Enter message..."
           onChange={(e) => setMessage(e.target.value)}
           value={message}
@@ -152,7 +152,7 @@ const MessageBar = () => {
           >
             <RiEmojiStickerLine />
           </button>
-          <div className="absolute bottom-16 right-8">
+          <div className="absolute bottom-14 sm:bottom-16 right-4 sm:right-8">
             <EmojiPicker
               theme="dark"
               open={emojiPickerOpen}
@@ -164,9 +164,9 @@ const MessageBar = () => {
       </div>
       <button
         onClick={handleSendMessage}
-        className="bg-[#8417ff] rounded-md flex items-center justify-center focus:border-none p-5 hover:bg-[#741bda] focus:bg-[#741bda] duration-300 transition-all"
+        className="bg-[#8417ff] rounded-md flex items-center justify-center focus:border-none p-3 sm:p-5 hover:bg-[#741bda] focus:bg-[#741bda] duration-300 transition-all"
       >
-        <IoSend className="text-2xl" />
+        <IoSend className="text-xl sm:text-2xl" />
       </button>
     </div>
   );
