@@ -34,6 +34,11 @@ const messageSchema = new mongoose.Schema(
       ref: "Channel",
       default: null,
     },
+    status: {
+      type: String,
+      enum: ["sending", "sent", "delivered", "read"],
+      default: "sending",
+    },
   },
   { timestamps: true }
 );
