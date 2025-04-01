@@ -404,8 +404,11 @@ const MessageContainer = () => {
       <div ref={scrollRef}></div>
       {showImage && (
         <div className="fixed z-[1000] top-0 left-0 h-[100vh] w-[100vw] flex items-center justify-center backdrop-blur-lg flex-col">
-          <div>
-            <img src={`${HOST}/${imageURL}`} />
+          <div className="max-w-[90vw] max-h-[90vh] overflow-hidden flex items-center justify-center">
+            <img
+              src={`${HOST}/${imageURL}`}
+              className="max-w-full max-h-full object-contain rounded"
+            />
           </div>
           <div className="flex gap-5 fixed top-0 mt-5">
             <button className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
