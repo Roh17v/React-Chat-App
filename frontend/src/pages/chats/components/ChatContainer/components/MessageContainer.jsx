@@ -10,6 +10,8 @@ import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
+import { IoMdDoneAll } from "react-icons/io";
+import { MdDone } from "react-icons/md";
 
 const MessageContainer = () => {
   const scrollRef = useRef();
@@ -48,7 +50,6 @@ const MessageContainer = () => {
       );
 
       if (response.data.length === 0) setHasMore(false);
-      console.log(response.data);
 
       setSelectedChatMessages(response.data, false);
 
@@ -60,8 +61,6 @@ const MessageContainer = () => {
           });
         });
       }
-
-      console.log(selectedChatMessages);
 
       setPage(pageNumber);
     } catch (error) {
@@ -83,7 +82,6 @@ const MessageContainer = () => {
         }
       );
       if (response.data.length === 0) setHasMore(false);
-      console.log(response.data);
 
       setSelectedChatMessages(response.data, false);
 
@@ -194,22 +192,34 @@ const MessageContainer = () => {
       >
         {message.messageType === "text" && (
           <div
-            className={`${
-              message.sender !== selectedChatData._id
-                ? "bg-[#8427ff]/5 text-[#A78BFA] /90 border-[#A78BFA]/50"
-                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
-          >
-            {message.content}
-          </div>
-        )}
-        {message.messageType === "file" && (
-          <div
-            className={`${
+            className={`relative ${
               message.sender !== selectedChatData._id
                 ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
+            } border inline-block rounded my-1 max-w-[50%] break-words p-3`}
+          >
+            {message.content}
+            {message.sender === user.id && (
+              <span className="absolute bottom-[2px] right-[2px] text-xs text-gray-400 flex items-center gap-[1px]">
+                {message.status === "sent" && <MdDone className="text-base" />}
+                {message.status === "delivered" && (
+                  <IoMdDoneAll className="text-base" />
+                )}
+                {message.status === "read" && (
+                  <IoMdDoneAll className="text-blue-500 text-base" />
+                )}
+              </span>
+            )}
+          </div>
+        )}
+
+        {message.messageType === "file" && (
+          <div
+            className={`relative ${
+              message.sender !== selectedChatData._id
+                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
+                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
+            } border inline-block rounded my-1 w-full max-w-xs sm:max-w-sm md:max-w-md lg:max-w-lg break-words p-3`}
           >
             {checkIfImage(message.fileUrl.split("/").pop()) ? (
               <div
@@ -221,26 +231,39 @@ const MessageContainer = () => {
               >
                 <img
                   src={`${HOST}/${message.fileUrl}`}
-                  height={300}
-                  width={300}
+                  className="w-full h-auto max-h-80 object-cover rounded"
                 />
               </div>
             ) : (
-              <div className="flex items-center justify-center gap-4">
-                <span className="text-white text-3xl bg-black/20 rounded-full p-3">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <span className="text-white text-2xl sm:text-3xl bg-black/20 rounded-full p-2 sm:p-3">
                   <MdFolderZip />
                 </span>
-                <span>{message.fileUrl.split("/").pop()}</span>
-                <span className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
+                <span className="truncate max-w-[70%]">
+                  {message.fileUrl.split("/").pop()}
+                </span>
+                <span className="bg-black/20 p-2 sm:p-3 text-xl sm:text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
                   <IoArrowDownCircle
                     onClick={() => downloadFile(message.fileUrl)}
                   />
                 </span>
               </div>
             )}
+            {message.sender === user.id && (
+              <span className="absolute bottom-[2px] right-[2px] text-xs text-gray-400 flex items-center gap-[1px]">
+                {message.status === "sent" && <MdDone className="text-base" />}
+                {message.status === "delivered" && (
+                  <IoMdDoneAll className="text-base" />
+                )}
+                {message.status === "read" && (
+                  <IoMdDoneAll className="text-blue-500 text-base" />
+                )}
+              </span>
+            )}
           </div>
         )}
-        <div className="text-xs text-gray-500 ">
+
+        <div className="text-xs text-gray-500">
           {moment(message.createdAt).format("LT")}
         </div>
       </div>
@@ -381,8 +404,11 @@ const MessageContainer = () => {
       <div ref={scrollRef}></div>
       {showImage && (
         <div className="fixed z-[1000] top-0 left-0 h-[100vh] w-[100vw] flex items-center justify-center backdrop-blur-lg flex-col">
-          <div>
-            <img src={`${HOST}/${imageURL}`} />
+          <div className="max-w-[90vw] max-h-[90vh] overflow-hidden flex items-center justify-center">
+            <img
+              src={`${HOST}/${imageURL}`}
+              className="max-w-full max-h-full object-contain rounded"
+            />
           </div>
           <div className="flex gap-5 fixed top-0 mt-5">
             <button className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">

@@ -20,6 +20,9 @@ export const SocketProvider = ({ children }) => {
     addMessage,
     addChannel,
     addContact,
+    updatedMessageStatus,
+    directMessagesContacts,
+    setDirectMessagesContacts,
   } = useAppStore();
 
   useEffect(() => {
@@ -40,6 +43,12 @@ export const SocketProvider = ({ children }) => {
       socket.current.on("new-dm-contact", (contact) => {
         addContact(contact);
       });
+
+      socket.current.on("message-status-update", ({ receiverId, status }) => {
+        console.log("Message Status Update!", ` status: ${status}`);
+        updatedMessageStatus(receiverId, status);
+      });
+
       socket.current.on("new-channel-contact", (channel) => {
         console.log("New Channel Received: ", channel);
         addChannel(channel);
@@ -62,13 +71,41 @@ export const SocketProvider = ({ children }) => {
     if (!socket.current) return;
 
     const handleReceiveMessage = (message) => {
+      console.log("Inside handle receive message");
       if (
         selectedChatData &&
         selectedChatType !== undefined &&
         (selectedChatData._id === message.sender._id ||
           selectedChatData._id === message.receiver._id)
       ) {
+        if (selectedChatData._id === message.sender._id) {
+          socket.current.emit("confirm-read", {
+            userId: user.id,
+            senderId: selectedChatData._id,
+          });
+        }
         addMessage(message);
+      }
+
+      if (directMessagesContacts) {
+        console.log(directMessagesContacts.length);
+        const contactIndex = directMessagesContacts.findIndex((contact) => {
+          console.log(contact._id, message.sender._id);
+          return contact._id === message.sender._id;
+        });
+        console.log(contactIndex);
+
+        if (
+          contactIndex !== -1 &&
+          (!selectedChatData || selectedChatData._id !== message.sender._id)
+        ) {
+          const updatedContacts = [...directMessagesContacts];
+          updatedContacts[contactIndex].unreadCount =
+            (updatedContacts[contactIndex].unreadCount || 0) + 1;
+
+          setDirectMessagesContacts(updatedContacts);
+          console.log(updatedContacts[contactIndex].unreadCount);
+        }
       }
       console.log("Message Received: ", message);
     };
@@ -85,13 +122,15 @@ export const SocketProvider = ({ children }) => {
     socket.current.on("receiveMessage", handleReceiveMessage);
 
     return () => {
-      socket.current.off("receiveMessage", handleReceiveMessage);
-      socket.current.off(
-        "receive-channel-message",
-        handleChannelReceiveMessage
-      );
+      if (socket.current) {
+        socket.current.off("receiveMessage", handleReceiveMessage);
+        socket.current.off(
+          "receive-channel-message",
+          handleChannelReceiveMessage
+        );
+      }
     };
-  }, [selectedChatData, selectedChatType]);
+  }, [selectedChatData, selectedChatType, user, directMessagesContacts]);
 
   return (
     <SocketContext.Provider value={{ socket: socket.current, onlineUsers }}>

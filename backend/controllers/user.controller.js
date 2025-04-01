@@ -114,17 +114,27 @@ export const dmContacts = async (req, res, next) => {
 
     const contactsMap = new Map();
 
-    messages.forEach((msg) => {
+    for (const msg of messages) {
       const contact =
         msg.sender._id.toString() === userId.toString()
           ? msg.receiver
           : msg.sender;
-      contactsMap.set(contact._id.toString(), contact);
-    });
 
-    const contacts = Array.from(contactsMap.values());
+      const contactId = contact._id.toString();
 
-    res.status(200).json(contacts);
+      if (!contactsMap.has(contactId)) {
+        contactsMap.set(contactId, { ...contact._doc, unreadCount: 0 });
+      }
+
+      if (
+        msg.receiver._id.toString() === userId.toString() &&
+        msg.status !== "read"
+      ) {
+        contactsMap.get(contactId).unreadCount += 1;
+      }
+    }
+
+    res.status(200).json(Array.from(contactsMap.values()));
   } catch (error) {
     next(error);
   }

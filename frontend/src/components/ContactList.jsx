@@ -5,12 +5,14 @@ import { HOST } from "@/utils/constants";
 import { useSocket } from "@/context/SocketContext";
 
 const ContactList = ({ contacts, isChannel = false }) => {
+  const { socket } = useSocket();
   const {
     selectedChatData,
     setSelectedChatData,
     setSelectedChatType,
     setSelectedChatMessages,
     setPage,
+    user,
   } = useAppStore();
 
   const { onlineUsers } = useSocket();
@@ -18,6 +20,8 @@ const ContactList = ({ contacts, isChannel = false }) => {
   const handleClick = (contact) => {
     setSelectedChatType(isChannel ? "channel" : "contact");
     setSelectedChatData(contact);
+    contact.unreadCount = 0;
+    socket.emit("confirm-read", { userId: user.id, senderId: contact._id });
     if (selectedChatData && selectedChatData._id !== contact._id) {
       setSelectedChatMessages([], true);
       setPage(1);
@@ -25,7 +29,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
   };
 
   return (
-    <div className="mt-5 space-y-2">
+    <div className="mt-5 space-y-2 relative">
       {contacts.map((contact) => (
         <div
           key={contact._id}
@@ -94,6 +98,12 @@ const ContactList = ({ contacts, isChannel = false }) => {
               </p>
             )}
           </div>
+
+          {!isChannel && contact?.unreadCount > 0 && (
+            <div className=" bg-purple-500 text-white text-xs font-semibold rounded-full w-6 h-6 flex items-center justify-center">
+              {contact.unreadCount}
+            </div>
+          )}
 
           {!isChannel && onlineUsers.includes(contact._id) && (
             <div className="w-2 h-2 bg-green-500 rounded-full flex-shrink-0"></div>

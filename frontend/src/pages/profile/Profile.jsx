@@ -70,7 +70,7 @@ const Profile = () => {
       console.log(response);
 
       if (response.status === 200) {
-        console.log(response.data);
+
         setUser(response.data);
         console.log(user);
         toast.success("Profile updated Successfully.");
