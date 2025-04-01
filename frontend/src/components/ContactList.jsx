@@ -5,12 +5,14 @@ import { HOST } from "@/utils/constants";
 import { useSocket } from "@/context/SocketContext";
 
 const ContactList = ({ contacts, isChannel = false }) => {
+  const { socket } = useSocket();
   const {
     selectedChatData,
     setSelectedChatData,
     setSelectedChatType,
     setSelectedChatMessages,
     setPage,
+    user,
   } = useAppStore();
 
   const { onlineUsers } = useSocket();
@@ -18,6 +20,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
   const handleClick = (contact) => {
     setSelectedChatType(isChannel ? "channel" : "contact");
     setSelectedChatData(contact);
+    socket.emit("confirm-read", { userId: user.id, senderId: contact._id });
     if (selectedChatData && selectedChatData._id !== contact._id) {
       setSelectedChatMessages([], true);
       setPage(1);

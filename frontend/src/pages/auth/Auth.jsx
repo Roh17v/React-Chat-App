@@ -73,7 +73,7 @@ const Auth = () => {
           },
           { withCredentials: true }
         );
-        console.log(response.data);
+
 
         if (response.status === 200) {
           setUser(response.data);
@@ -110,7 +110,7 @@ const Auth = () => {
           }, 2000);
         }
 
-        console.log(response.data);
+ 
       } catch (error) {
         toast.error(error.response?.data?.message || "Something went wrong");
         console.log(error);

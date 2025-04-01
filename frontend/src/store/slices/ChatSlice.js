@@ -76,4 +76,18 @@ export const createChatSlice = (set, get) => ({
       ],
     });
   },
+  updatedMessageStatus: (receiverId, status) => {
+    console.log(receiverId, status);
+    set((state) => {
+      if (state.selectedChatData?._id === receiverId) {
+        return {
+          selectedChatMessages: state.selectedChatMessages.map((message) => ({
+            ...message,
+            status,
+          })),
+        };
+      }
+      return {};
+    });
+  },
 });

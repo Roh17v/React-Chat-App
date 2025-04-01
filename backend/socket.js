@@ -35,7 +35,7 @@ const setupSocket = (server) => {
   const sendMessage = async (message, socket) => {
     try {
       const createdMessage = await Message.create({
-        message,
+        ...message,
         status: "sent",
       });
 
@@ -144,24 +144,25 @@ const setupSocket = (server) => {
         { receiver: userId, sender: senderId, status: "delivered" },
         { $set: { status: "read" } }
       );
-
-      const senderSockets = userSocketMap.get(senderId) || new Set();
-      senderSockets.forEach((socketId) => {
-        io.to(socketId).emit("message-status-update", {
-          senderId,
-          receiverId: userId,
-          status: "read",
+      if (updatedMessages.modifiedCount > 0) {
+        const senderSockets = userSocketMap.get(senderId) || new Set();
+        senderSockets.forEach((socketId) => {
+          io.to(socketId).emit("message-status-update", {
+            senderId,
+            receiverId: userId,
+            status: "read",
+          });
         });
-      });
 
-      const receiverSockets = userSocketMap.get(userId) || new Set();
-      receiverSockets.forEach((socketId) => {
-        io.to(socketId).emit("message-status-update", {
-          senderId,
-          receiverId: userId,
-          status: "read",
+        const receiverSocket = userSocketMap.get(userId) || new Set();
+        receiverSocket.forEach((socketId) => {
+          io.to(socketId).emit("message-status-update", {
+            senderId,
+            receiverId: userId,
+            status: "read",
+          });
         });
-      });
+      }
     } catch (error) {
       console.error("Error updating message status to read:", error);
     }
@@ -193,7 +194,10 @@ const setupSocket = (server) => {
         senderIds.forEach((senderId) => {
           const senderSockets = userSocketMap.get(senderId) || new Set();
           senderSockets.forEach((sockId) =>
-            io.to(sockId).emit("message-delivered", { receiverId: userId })
+            io.to(sockId).emit("message-status-update", {
+              receiverId: userId,
+              status: "delivered",
+            })
           );
         });
       }

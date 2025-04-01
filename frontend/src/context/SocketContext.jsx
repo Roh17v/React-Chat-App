@@ -20,6 +20,7 @@ export const SocketProvider = ({ children }) => {
     addMessage,
     addChannel,
     addContact,
+    updatedMessageStatus,
   } = useAppStore();
 
   useEffect(() => {
@@ -40,6 +41,12 @@ export const SocketProvider = ({ children }) => {
       socket.current.on("new-dm-contact", (contact) => {
         addContact(contact);
       });
+
+      socket.current.on("message-status-update", ({ receiverId, status }) => {
+        console.log("Message Status Update!", ` status: ${status}`);
+        updatedMessageStatus(receiverId, status);
+      });
+
       socket.current.on("new-channel-contact", (channel) => {
         console.log("New Channel Received: ", channel);
         addChannel(channel);
@@ -68,6 +75,12 @@ export const SocketProvider = ({ children }) => {
         (selectedChatData._id === message.sender._id ||
           selectedChatData._id === message.receiver._id)
       ) {
+        if (selectedChatData._id === message.sender._id) {
+          socket.current.emit("confirm-read", {
+            userId: user.id,
+            senderId: selectedChatData._id,
+          });
+        }
         addMessage(message);
       }
       console.log("Message Received: ", message);

@@ -10,6 +10,8 @@ import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
+import { IoMdDoneAll } from "react-icons/io";
+import { MdDone } from "react-icons/md";
 
 const MessageContainer = () => {
   const scrollRef = useRef();
@@ -48,7 +50,6 @@ const MessageContainer = () => {
       );
 
       if (response.data.length === 0) setHasMore(false);
-      console.log(response.data);
 
       setSelectedChatMessages(response.data, false);
 
@@ -60,8 +61,6 @@ const MessageContainer = () => {
           });
         });
       }
-
-      console.log(selectedChatMessages);
 
       setPage(pageNumber);
     } catch (error) {
@@ -83,7 +82,6 @@ const MessageContainer = () => {
         }
       );
       if (response.data.length === 0) setHasMore(false);
-      console.log(response.data);
 
       setSelectedChatMessages(response.data, false);
 
@@ -194,22 +192,34 @@ const MessageContainer = () => {
       >
         {message.messageType === "text" && (
           <div
-            className={`${
-              message.sender !== selectedChatData._id
-                ? "bg-[#8427ff]/5 text-[#A78BFA] /90 border-[#A78BFA]/50"
-                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
-          >
-            {message.content}
-          </div>
-        )}
-        {message.messageType === "file" && (
-          <div
-            className={`${
+            className={`relative ${
               message.sender !== selectedChatData._id
                 ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
+            } border inline-block rounded my-1 max-w-[50%] break-words p-3`}
+          >
+            {message.content}
+            {message.sender === user.id && (
+              <span className="absolute bottom-[2px] right-[2px] text-xs text-gray-400 flex items-center gap-[1px]">
+                {message.status === "sent" && <MdDone className="text-base" />}
+                {message.status === "delivered" && (
+                  <IoMdDoneAll className="text-base" />
+                )}
+                {message.status === "read" && (
+                  <IoMdDoneAll className="text-blue-500 text-base" />
+                )}
+              </span>
+            )}
+          </div>
+        )}
+
+        {message.messageType === "file" && (
+          <div
+            className={`relative ${
+              message.sender !== selectedChatData._id
+                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
+                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
+            } border inline-block rounded my-1 max-w-[50%] break-words p-3`}
           >
             {checkIfImage(message.fileUrl.split("/").pop()) ? (
               <div
@@ -238,9 +248,21 @@ const MessageContainer = () => {
                 </span>
               </div>
             )}
+            {message.sender === user.id && (
+              <span className="absolute bottom-[2px] right-[2px] text-xs text-gray-400 flex items-center gap-[1px]">
+                {message.status === "sent" && <MdDone className="text-base" />}
+                {message.status === "delivered" && (
+                  <IoMdDoneAll className="text-base" />
+                )}
+                {message.status === "read" && (
+                  <IoMdDoneAll className="text-blue-500 text-base" />
+                )}
+              </span>
+            )}
           </div>
         )}
-        <div className="text-xs text-gray-500 ">
+
+        <div className="text-xs text-gray-500">
           {moment(message.createdAt).format("LT")}
         </div>
       </div>
