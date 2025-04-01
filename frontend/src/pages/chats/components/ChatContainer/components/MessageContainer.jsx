@@ -219,7 +219,7 @@ const MessageContainer = () => {
               message.sender !== selectedChatData._id
                 ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
                 : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-3`}
+            } border inline-block rounded my-1 w-full max-w-xs sm:max-w-sm md:max-w-md lg:max-w-lg break-words p-3`}
           >
             {checkIfImage(message.fileUrl.split("/").pop()) ? (
               <div
@@ -231,17 +231,18 @@ const MessageContainer = () => {
               >
                 <img
                   src={`${HOST}/${message.fileUrl}`}
-                  height={300}
-                  width={300}
+                  className="w-full h-auto max-h-80 object-cover rounded"
                 />
               </div>
             ) : (
-              <div className="flex items-center justify-center gap-4">
-                <span className="text-white text-3xl bg-black/20 rounded-full p-3">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <span className="text-white text-2xl sm:text-3xl bg-black/20 rounded-full p-2 sm:p-3">
                   <MdFolderZip />
                 </span>
-                <span>{message.fileUrl.split("/").pop()}</span>
-                <span className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
+                <span className="truncate max-w-[70%]">
+                  {message.fileUrl.split("/").pop()}
+                </span>
+                <span className="bg-black/20 p-2 sm:p-3 text-xl sm:text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
                   <IoArrowDownCircle
                     onClick={() => downloadFile(message.fileUrl)}
                   />
