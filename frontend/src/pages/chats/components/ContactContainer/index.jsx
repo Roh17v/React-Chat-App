@@ -27,7 +27,9 @@ const ContactContainer = () => {
         });
 
         setDirectMessagesContacts(response.data);
-
+        setTimeout(() => {
+          console.log(directMessagesContacts);
+        }, 2000);
       } catch (error) {
         console.log(error);
       }

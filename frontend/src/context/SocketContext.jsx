@@ -21,6 +21,8 @@ export const SocketProvider = ({ children }) => {
     addChannel,
     addContact,
     updatedMessageStatus,
+    directMessagesContacts,
+    setDirectMessagesContacts,
   } = useAppStore();
 
   useEffect(() => {
@@ -69,6 +71,7 @@ export const SocketProvider = ({ children }) => {
     if (!socket.current) return;
 
     const handleReceiveMessage = (message) => {
+      console.log("Inside handle receive message");
       if (
         selectedChatData &&
         selectedChatType !== undefined &&
@@ -82,6 +85,27 @@ export const SocketProvider = ({ children }) => {
           });
         }
         addMessage(message);
+      }
+
+      if (directMessagesContacts) {
+        console.log(directMessagesContacts.length);
+        const contactIndex = directMessagesContacts.findIndex((contact) => {
+          console.log(contact._id, message.sender._id);
+          return contact._id === message.sender._id;
+        });
+        console.log(contactIndex);
+
+        if (
+          contactIndex !== -1 &&
+          (!selectedChatData || selectedChatData._id !== message.sender._id)
+        ) {
+          const updatedContacts = [...directMessagesContacts];
+          updatedContacts[contactIndex].unreadCount =
+            (updatedContacts[contactIndex].unreadCount || 0) + 1;
+
+          setDirectMessagesContacts(updatedContacts);
+          console.log(updatedContacts[contactIndex].unreadCount);
+        }
       }
       console.log("Message Received: ", message);
     };
@@ -98,13 +122,15 @@ export const SocketProvider = ({ children }) => {
     socket.current.on("receiveMessage", handleReceiveMessage);
 
     return () => {
-      socket.current.off("receiveMessage", handleReceiveMessage);
-      socket.current.off(
-        "receive-channel-message",
-        handleChannelReceiveMessage
-      );
+      if (socket.current) {
+        socket.current.off("receiveMessage", handleReceiveMessage);
+        socket.current.off(
+          "receive-channel-message",
+          handleChannelReceiveMessage
+        );
+      }
     };
-  }, [selectedChatData, selectedChatType]);
+  }, [selectedChatData, selectedChatType, user, directMessagesContacts]);
 
   return (
     <SocketContext.Provider value={{ socket: socket.current, onlineUsers }}>
