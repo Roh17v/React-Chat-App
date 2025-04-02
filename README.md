@@ -7,9 +7,11 @@
 ## Features  
 ✅ **Real-Time Messaging**: Instant message delivery using **Socket.io**.  
 ✅ **User Authentication**: Secure login and registration with **JWT** and **Bcrypt**.  
-✅ **Role-Based Access Control**: Different permissions for users and admins.  
 ✅ **Responsive UI**: Modern and mobile-friendly design using **Tailwind CSS**.  
 ✅ **Optimized Performance**: Achieved **90%+ Lighthouse score** with Vite and lazy loading.  
+✅ **Real-Time Message Status**: Messages update as **delivered** and **read** dynamically.  
+✅ **Unread Message Count**: Shows unread messages per contact, updating in real time.  
+✅ **Priority Sorting**: Contacts with unread messages automatically move to the top.  
 
 ---
 
@@ -48,3 +50,4 @@ Let’s connect and collaborate!
 
 - [LinkedIn](https://www.linkedin.com/in/r04hitverma/)  
 - [Email](mailto:rohitverma272727@gmail.com)  
+
