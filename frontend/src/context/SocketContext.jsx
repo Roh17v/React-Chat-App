@@ -88,12 +88,9 @@ export const SocketProvider = ({ children }) => {
       }
 
       if (directMessagesContacts) {
-        console.log(directMessagesContacts.length);
         const contactIndex = directMessagesContacts.findIndex((contact) => {
-          console.log(contact._id, message.sender._id);
           return contact._id === message.sender._id;
         });
-        console.log(contactIndex);
 
         if (
           contactIndex !== -1 &&
@@ -103,6 +100,9 @@ export const SocketProvider = ({ children }) => {
           updatedContacts[contactIndex].unreadCount =
             (updatedContacts[contactIndex].unreadCount || 0) + 1;
 
+          const [contact] = updatedContacts.splice(contactIndex, 1);
+
+          updatedContacts.unshift(contact);
           setDirectMessagesContacts(updatedContacts);
           console.log(updatedContacts[contactIndex].unreadCount);
         }

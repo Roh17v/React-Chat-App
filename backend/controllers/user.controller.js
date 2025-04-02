@@ -110,7 +110,7 @@ export const dmContacts = async (req, res, next) => {
       receiver: { $ne: null },
     })
       .populate("sender receiver", "firstName lastName email image color _id")
-      .sort({ timeStamp: -1 });
+      .sort({ createdAt: -1 });
 
     const contactsMap = new Map();
 
