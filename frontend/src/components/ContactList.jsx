@@ -1,7 +1,6 @@
 import useAppStore from "@/store";
 import React from "react";
 import { Avatar, AvatarImage } from "./ui/avatar";
-import { HOST } from "@/utils/constants";
 import { useSocket } from "@/context/SocketContext";
 
 const ContactList = ({ contacts, isChannel = false }) => {
@@ -50,7 +49,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
             >
               {contact.image ? (
                 <AvatarImage
-                  src={`${HOST}${contact.image}`}
+                  src={`${contact.image}`}
                   alt="profile"
                   className="object-cover w-full h-full"
                 />
@@ -74,7 +73,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
             >
               {contact.image ? (
                 <AvatarImage
-                  src={`${HOST}${contact.image}`}
+                  src={`${contact.image}`}
                   alt="profile"
                   className="object-cover w-full h-full"
                 />

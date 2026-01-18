@@ -4,7 +4,7 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRouter from "./routes/auth.routes.js";
-import userRouter from "./routes/user.router.js";
+import userRouter from "./routes/user.routes.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import { setupSocket } from "./socket.js";

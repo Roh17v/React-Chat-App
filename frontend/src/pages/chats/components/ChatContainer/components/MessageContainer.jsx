@@ -159,7 +159,7 @@ const MessageContainer = () => {
     try {
       setIsDownloading(true);
       setFileDownloadingProgress(0);
-      const response = await axios.get(`${HOST}/${url}`, {
+      const response = await axios.get(`${url}`, {
         responseType: "blob",
         onDownloadProgress: (data) =>
           setFileDownloadingProgress(
@@ -230,7 +230,7 @@ const MessageContainer = () => {
                 }}
               >
                 <img
-                  src={`${HOST}/${message.fileUrl}`}
+                  src={`${message.fileUrl}`}
                   className="w-full h-auto max-h-80 object-cover rounded"
                 />
               </div>
@@ -315,7 +315,7 @@ const MessageContainer = () => {
                 }}
               >
                 <img
-                  src={`${HOST}/${message.fileUrl}`}
+                  src={`${message.fileUrl}`}
                   height={300}
                   width={300}
                 />
@@ -406,7 +406,7 @@ const MessageContainer = () => {
         <div className="fixed z-[1000] top-0 left-0 h-[100vh] w-[100vw] flex items-center justify-center backdrop-blur-lg flex-col">
           <div className="max-w-[90vw] max-h-[90vh] overflow-hidden flex items-center justify-center">
             <img
-              src={`${HOST}/${imageURL}`}
+              src={`${imageURL}`}
               className="max-w-full max-h-full object-contain rounded"
             />
           </div>

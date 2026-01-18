@@ -149,7 +149,7 @@ const Profile = () => {
             >
               {image ? (
                 <AvatarImage
-                  src={selectedFile ? image : `${HOST}${user.image}`}
+                  src={selectedFile ? image : `${user.image}`}
                   alt="profile"
                   className="object-cover w-full h-full bg-black"
                 />

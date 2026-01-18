@@ -6,8 +6,8 @@ import {
   dmContacts,
   getAllContacts,
 } from "../controllers/user.controller.js";
-import upload from "../utils/multerConfig.js";
 import { validateToken } from "../middlewares/auth.js";
+import upload from "../middlewares/upload.middleware.js";
 
 const userRouter = Router();
 
