@@ -3,22 +3,28 @@ import { createError } from "../utils/error.js";
 import path from "path";
 import fs from "fs";
 import Message from "../models/message.model.js";
+import { uploadToStorage } from "../middlewares/upload.middleware.js";
 
 export const updateProfile = async (req, res, next) => {
   try {
     const { userId } = req.params;
     const { firstName, lastName, color, profileSetup } = req.body;
 
-    const image = req.file
-      ? `/uploads/profiles/${req.file.filename}`
-      : undefined;
     const updateData = {};
 
     if (firstName) updateData.firstName = firstName;
     if (lastName) updateData.lastName = lastName;
-    if (image !== undefined) updateData.image = image;
     if (color) updateData.color = JSON.parse(color);
     if (profileSetup) updateData.profileSetup = true;
+
+    // Upload profile image to cloudflare R2
+    if (req.file) {
+      const imageUrl = await uploadToStorage(
+        req.file,
+        "profile-images"
+      );
+      updateData.image = imageUrl;
+    }
 
     if (Object.keys(updateData).length === 0) {
       return next(createError(400, "No valid fields to update."));
@@ -33,7 +39,10 @@ export const updateProfile = async (req, res, next) => {
       }
     );
 
-    if (!updatedUser) return next(createError(400, "User Not Found!"));
+    if (!updatedUser) {
+      return next(createError(404, "User not found"));
+    }
+
     return res.status(200).json({
       id: updatedUser._id,
       email: updatedUser.email,
@@ -41,7 +50,7 @@ export const updateProfile = async (req, res, next) => {
       firstName: updatedUser.firstName,
       lastName: updatedUser.lastName,
       color: updatedUser.color,
-      image: updatedUser.image,
+      image: updatedUser.image, // ✅ public URL
     });
   } catch (error) {
     next(error);

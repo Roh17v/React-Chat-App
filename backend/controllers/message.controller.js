@@ -1,9 +1,7 @@
 import Message from "../models/message.model.js";
 import { createError } from "../utils/error.js";
-import { mkdirSync, renameSync } from "fs";
 import { Channel } from "../models/channel.model.js";
-import { populate } from "dotenv";
-import path from "path";
+import { uploadToStorage } from "../middlewares/upload.middleware.js";
 
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
@@ -35,21 +33,22 @@ export const getMessages = async (req, res, next) => {
 };
 
 export const uploadFile = async (req, res, next) => {
-  const userId = req.user._id;
-
   try {
-    if (!req.file) return next(createError(400, "File is Required."));
-    const date = Date.now();
-    let fileDir = `uploads/files/${date}`;
-    let fileName = `${fileDir}/${req.file.originalname}`;
+    if (!req.file) {
+      return next(createError(400, "File is required."));
+    }
 
-    mkdirSync(fileDir, { recursive: true });
+    // Upload to object storage (Cloudflare R2)
+    const fileUrl = await uploadToStorage(req.file, "chat-files");
 
-    renameSync(req.file.path, fileName);
-
-    return res.status(201).json({ filePath: fileName });
+    return res.status(201).json({
+      success: true,
+      message: "File uploaded successfully",
+      fileUrl,
+    });
   } catch (error) {
-    next(error);
+    console.error("Upload file error:", error);
+    next(createError(500, "File upload failed."));
   }
 };
 
