@@ -2,6 +2,7 @@ import { Server as SocketIoServer } from "socket.io";
 import Message from "./models/message.model.js";
 import { Channel } from "./models/channel.model.js";
 import { User } from "./models/user.model.js";
+import Call from "./models/call.model.js";
 
 let io;
 let userSocketMap;
@@ -53,7 +54,7 @@ const setupSocket = (server) => {
         });
 
         receiverSockets.forEach((socketId) =>
-          io.to(socketId).emit("new-dm-contact", messageData.sender)
+          io.to(socketId).emit("new-dm-contact", messageData.sender),
         );
       }
 
@@ -64,7 +65,7 @@ const setupSocket = (server) => {
         });
 
         senderSockets.forEach((socketId) =>
-          io.to(socketId).emit("new-dm-contact", messageData.receiver)
+          io.to(socketId).emit("new-dm-contact", messageData.receiver),
         );
       }
 
@@ -73,15 +74,15 @@ const setupSocket = (server) => {
         await messageData.save();
 
         senderSockets.forEach((socketId) =>
-          io.to(socketId).emit("receiveMessage", messageData)
+          io.to(socketId).emit("receiveMessage", messageData),
         );
 
         receiverSockets.forEach((socketId) =>
-          io.to(socketId).emit("receiveMessage", messageData)
+          io.to(socketId).emit("receiveMessage", messageData),
         );
       } else {
         senderSockets.forEach((socketId) =>
-          io.to(socketId).emit("receiveMessage", messageData)
+          io.to(socketId).emit("receiveMessage", messageData),
         );
       }
     } catch (error) {
@@ -142,7 +143,7 @@ const setupSocket = (server) => {
     try {
       const updatedMessages = await Message.updateMany(
         { receiver: userId, sender: senderId, status: "delivered" },
-        { $set: { status: "read" } }
+        { $set: { status: "read" } },
       );
       if (updatedMessages.modifiedCount > 0) {
         const senderSockets = userSocketMap.get(senderId) || new Set();
@@ -168,6 +169,22 @@ const setupSocket = (server) => {
     }
   };
 
+  const emitToUser = (userId, event, payload) => {
+    const sockets = userSocketMap.get(userId);
+    if (sockets && sockets.size > 0) {
+      console.log(
+        `[⬆️ SENDING] '${event}' to User ${userId} (Socket IDs: ${Array.from(sockets).join(", ")})`,
+      );
+      sockets.forEach((socketId) => {
+        io.to(socketId).emit(event, payload);
+      });
+    } else {
+      console.warn(
+        `[⚠️ FAILED SEND] '${event}' to User ${userId} - User is OFFLINE or ID mismatch`,
+      );
+    }
+  };
+
   io.on("connection", async (socket) => {
     const userId = socket.handshake.query.userId;
 
@@ -176,6 +193,7 @@ const setupSocket = (server) => {
       io.emit("onlineUsers", Array.from(userSocketMap.keys()));
       console.log(`User Connected: ${userId} with socket ID: ${socket.id}`);
 
+      // Handle undelivered messages
       const undeliveredMessages = await Message.find({
         receiver: userId,
         status: "sent",
@@ -184,7 +202,7 @@ const setupSocket = (server) => {
       if (undeliveredMessages.length > 0) {
         await Message.updateMany(
           { receiver: userId, status: "sent" },
-          { $set: { status: "delivered" } }
+          { $set: { status: "delivered" } },
         );
 
         const senderIds = [
@@ -197,7 +215,7 @@ const setupSocket = (server) => {
             io.to(sockId).emit("message-status-update", {
               receiverId: userId,
               status: "delivered",
-            })
+            }),
           );
         });
       }
@@ -208,7 +226,7 @@ const setupSocket = (server) => {
     socket.on("confirm-read", updateMessageStatusToRead);
 
     socket.on("send-channel-message", (message) =>
-      sendChannelMessage(message, socket)
+      sendChannelMessage(message, socket),
     );
 
     socket.on("sendMessage", (message) => sendMessage(message, socket));
@@ -217,6 +235,125 @@ const setupSocket = (server) => {
       removeUserSocket(userId, socket.id);
       io.emit("onlineUsers", Array.from(userSocketMap.keys()));
       console.log(`Client Disconnected: ${socket.id}`);
+    });
+
+    // Initiate Call
+    socket.on("call:initiate", async ({ receiverId, callType }) => {
+      console.log(
+        `[⬇️ RECEIVE] 'call:initiate' from ${userId} --> to ${receiverId}`,
+      );
+      try {
+        const callerId = userId;
+
+        // Fetch Caller Details from DB
+        const caller = await User.findById(
+          callerId,
+          "firstName lastName image email",
+        );
+
+        if (!caller) {
+          console.error(`[❌ ERROR] Caller ${callerId} not found in database!`);
+          return;
+        }
+
+        console.log(
+          `[🔍 DB LOOKUP] Found caller: ${caller.firstName} ${caller.lastName}`,
+        );
+
+        const call = await Call.create({
+          callId: crypto.randomUUID(),
+          callerId,
+          receiverId,
+          callType,
+          status: "ongoing",
+          startedAt: new Date(),
+        });
+
+        const payload = {
+          callId: call._id,
+          callerId,
+          callType,
+          callerName:
+            `${caller.firstName || "Unknown"} ${caller.lastName || ""}`.trim(),
+          callerImage: caller.image || "",
+          callerEmail: caller.email,
+        };
+
+        // Send formatted data to Receiver
+        emitToUser(receiverId, "incoming-call", payload);
+      } catch (err) {
+        console.error("Call initiate error:", err);
+      }
+    });
+    // Accept Call
+    socket.on("call:accept", async ({ callId }) => {
+      const call = await Call.findByIdAndUpdate(
+        callId,
+        { connectedAt: new Date() },
+        { new: true },
+      );
+      if (call) {
+        emitToUser(call.callerId.toString(), "call-accepted", { callId });
+      }
+    });
+
+    // Reject Call
+    socket.on("call:reject", async ({ callId }) => {
+      const call = await Call.findByIdAndUpdate(
+        callId,
+        { status: "rejected", endedAt: new Date() },
+        { new: true },
+      );
+      if (call) {
+        emitToUser(call.callerId.toString(), "call-rejected", { callId });
+      }
+    });
+
+    // End Call
+    socket.on("call:end", async ({ to, callId }) => {
+      if (to) {
+        emitToUser(to, "call:end", { from: userId });
+      }
+
+      // Update the Database Log
+      if (callId) {
+        const call = await Call.findById(callId);
+        if (call) {
+          call.endedAt = new Date();
+          call.status = "completed";
+          await call.save();
+
+          const duration =
+            call.connectedAt && call.endedAt
+              ? Math.floor((call.endedAt - call.connectedAt) / 1000)
+              : 0;
+
+          await Message.create({
+            sender: call.callerId,
+            receiver: call.receiverId,
+            messageType: "call",
+            callId: call._id,
+            callMeta: {
+              callType: call.callType,
+              status: call.status,
+              duration,
+            },
+          });
+        }
+      }
+    });
+
+    // WebRTC Signaling
+    socket.on("call:offer", ({ to, offer }) => {
+      emitToUser(to, "call:offer", { offer, from: userId });
+    });
+
+    socket.on("call:answer", ({ to, answer }) => {
+      emitToUser(to, "call:answer", { answer, from: userId });
+    });
+
+    socket.on("call:ice-candidate", ({ to, candidate }) => {
+      emitToUser(to, "call:ice-candidate", { candidate, from: userId });
     });
   });
 };
