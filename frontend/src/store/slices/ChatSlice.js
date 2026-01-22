@@ -10,6 +10,9 @@ export const createChatSlice = (set, get) => ({
   channels: [],
   messageContainerRef: null,
   page: 1,
+  incomingCall: null,   // { callId, callerId, callType }
+  activeCall: null,     // { callId, otherUserId, callType }
+
 
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
@@ -90,4 +93,11 @@ export const createChatSlice = (set, get) => ({
       return {};
     });
   },
+
+  setIncomingCall: (call) => set({ incomingCall: call }),
+  clearIncomingCall: () => set({ incomingCall: null }),
+
+  setActiveCall: (call) => set({ activeCall: call }),
+  clearActiveCall: () => set({ activeCall: null }),
+
 });

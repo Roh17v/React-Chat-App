@@ -27,3 +27,7 @@ export const CHANNEL_ROUTE = `/api/channels`;
 export const CREATE_NEW_CHANNEL_ROUTE = `${HOST}${CHANNEL_ROUTE}`;
 
 export const GET_USER_CHANNELS_ROUTE = `${HOST}${CHANNEL_ROUTE}`;
+
+export const TURN_CREDENTIALS_ROUTE = `/api/turn`;
+
+export const GET_TURN_CREDENTIALS = `${HOST}${TURN_CREDENTIALS_ROUTE}/credentials`;
