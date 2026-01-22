@@ -3,6 +3,7 @@ import { HOST } from "@/utils/constants";
 import { io } from "socket.io-client";
 import { useRef, useEffect, useState, useMemo } from "react";
 import { createContext, useContext } from "react";
+import useMediaStream from "@/hooks/useMediaStream";
 
 const SocketContext = createContext(null);
 
@@ -23,7 +24,13 @@ export const SocketProvider = ({ children }) => {
     updatedMessageStatus,
     directMessagesContacts,
     setDirectMessagesContacts,
+    setIncomingCall,
+    clearIncomingCall,
+    setActiveCall,
+    clearActiveCall,
   } = useAppStore();
+
+  const { stopMedia } = useMediaStream();
 
   useEffect(() => {
     if (user && !socket.current) {
@@ -54,19 +61,45 @@ export const SocketProvider = ({ children }) => {
         addChannel(channel);
       });
 
+      socket.current.on("incoming-call", (data) => {
+        console.log("📞 Incoming Call Data in Provider:", data);
+        setIncomingCall(data);
+      });
+
+      socket.current.on("call-rejected", () => {
+        clearIncomingCall();
+        clearActiveCall();
+      });
+
+      socket.current.on("call-ended", () => {
+        stopMedia();
+        clearIncomingCall();
+        clearActiveCall();
+      });
+
       return () => {
         if (socket.current) {
           socket.current.off("new-dm-contact");
           socket.current.off("new-channel-contact");
           socket.current.off("onlineUsers");
+          socket.current.off("incoming-call");
+          socket.current.off("call-rejected");
+          socket.current.off("call-ended");
 
           socket.current.disconnect();
           socket.current = null;
         }
       };
     }
-  }, [user, addContact, addChannel]);
-
+  }, [
+    user,
+    addContact,
+    addChannel,
+    setIncomingCall,
+    clearIncomingCall,
+    setActiveCall,
+    clearActiveCall,
+  ]);
   useEffect(() => {
     if (!socket.current) return;
 
@@ -126,7 +159,7 @@ export const SocketProvider = ({ children }) => {
         socket.current.off("receiveMessage", handleReceiveMessage);
         socket.current.off(
           "receive-channel-message",
-          handleChannelReceiveMessage
+          handleChannelReceiveMessage,
         );
       }
     };
