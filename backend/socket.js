@@ -237,32 +237,19 @@ const setupSocket = (server) => {
       console.log(`Client Disconnected: ${socket.id}`);
     });
 
-    // Initiate Call
+    // Initiate Call 
     socket.on("call:initiate", async ({ receiverId, callType }) => {
-      console.log(
-        `[⬇️ RECEIVE] 'call:initiate' from ${userId} --> to ${receiverId}`,
-      );
       try {
-        const callerId = userId;
-
-        // Fetch Caller Details from DB
         const caller = await User.findById(
-          callerId,
+          userId,
           "firstName lastName image email",
         );
+        if (!caller) return;
 
-        if (!caller) {
-          console.error(`[❌ ERROR] Caller ${callerId} not found in database!`);
-          return;
-        }
-
-        console.log(
-          `[🔍 DB LOOKUP] Found caller: ${caller.firstName} ${caller.lastName}`,
-        );
-
+        // Create initial call record
         const call = await Call.create({
           callId: crypto.randomUUID(),
-          callerId,
+          callerId: userId,
           receiverId,
           callType,
           status: "ongoing",
@@ -271,7 +258,7 @@ const setupSocket = (server) => {
 
         const payload = {
           callId: call._id,
-          callerId,
+          callerId: userId,
           callType,
           callerName:
             `${caller.firstName || "Unknown"} ${caller.lastName || ""}`.trim(),
@@ -279,43 +266,45 @@ const setupSocket = (server) => {
           callerEmail: caller.email,
         };
 
-        // Send formatted data to Receiver
+        // Notify Receiver
         emitToUser(receiverId, "incoming-call", payload);
       } catch (err) {
         console.error("Call initiate error:", err);
       }
     });
-    // Accept Call
-    socket.on("call:accept", async ({ callId }) => {
+
+    // 2. Accept Call
+    socket.on("call:accept", async ({ callId, callerId }) => {
       const call = await Call.findByIdAndUpdate(
         callId,
         { connectedAt: new Date() },
         { new: true },
       );
-      if (call) {
-        emitToUser(call.callerId.toString(), "call-accepted", { callId });
-      }
+      emitToUser(callerId || call?.callerId.toString(), "call-accepted", {
+        callId,
+      });
     });
 
     // Reject Call
-    socket.on("call:reject", async ({ callId }) => {
+    socket.on("call:reject", async ({ callId, callerId }) => {
       const call = await Call.findByIdAndUpdate(
         callId,
         { status: "rejected", endedAt: new Date() },
         { new: true },
       );
-      if (call) {
-        emitToUser(call.callerId.toString(), "call-rejected", { callId });
-      }
+      emitToUser(callerId || call?.callerId.toString(), "call-rejected", {
+        callId,
+      });
     });
 
-    // End Call
+    // End Call (Hangup)
     socket.on("call:end", async ({ to, callId }) => {
+      // Notify the other user immediately to stop their streams
       if (to) {
         emitToUser(to, "call:end", { from: userId });
       }
 
-      // Update the Database Log
+      // Clean up Database
       if (callId) {
         const call = await Call.findById(callId);
         if (call) {
@@ -323,11 +312,11 @@ const setupSocket = (server) => {
           call.status = "completed";
           await call.save();
 
-          const duration =
-            call.connectedAt && call.endedAt
-              ? Math.floor((call.endedAt - call.connectedAt) / 1000)
-              : 0;
+          const duration = call.connectedAt
+            ? Math.floor((call.endedAt - call.connectedAt) / 1000)
+            : 0;
 
+          // Log as a chat message
           await Message.create({
             sender: call.callerId,
             receiver: call.receiverId,
@@ -335,7 +324,7 @@ const setupSocket = (server) => {
             callId: call._id,
             callMeta: {
               callType: call.callType,
-              status: call.status,
+              status: "completed",
               duration,
             },
           });
@@ -343,17 +332,30 @@ const setupSocket = (server) => {
       }
     });
 
-    // WebRTC Signaling
-    socket.on("call:offer", ({ to, offer }) => {
-      emitToUser(to, "call:offer", { offer, from: userId });
+
+    // Offer (Handling "Polite" vs "Impolite")
+    // Note: We use 'description' now instead of just 'offer' to be generic
+    socket.on("call:offer", ({ to, description }) => {
+      emitToUser(to, "call:offer", {
+        description,
+        from: userId, 
+      });
     });
 
-    socket.on("call:answer", ({ to, answer }) => {
-      emitToUser(to, "call:answer", { answer, from: userId });
+    // Answer
+    socket.on("call:answer", ({ to, description }) => {
+      emitToUser(to, "call:answer", {
+        description,
+        from: userId,
+      });
     });
 
+    // ICE Candidates
     socket.on("call:ice-candidate", ({ to, candidate }) => {
-      emitToUser(to, "call:ice-candidate", { candidate, from: userId });
+      emitToUser(to, "call:ice-candidate", {
+        candidate,
+        from: userId,
+      });
     });
   });
 };
