@@ -630,37 +630,30 @@ const VideoCallScreen = () => {
           </div>
         </div>
 
-        <div
+        <div 
           onClick={(e) => e.stopPropagation()}
           className={`absolute bottom-6 left-0 right-0 flex justify-center z-40 transition-transform duration-300 ${showControls ? "translate-y-0" : "translate-y-32"}`}
         >
-          <div className="flex items-center gap-3 md:gap-6 px-5 py-3 md:px-8 md:py-4 bg-slate-900/80 backdrop-blur-xl rounded-full border border-white/10 shadow-2xl">
-            <button
+          <div className="flex items-center gap-3 md:gap-5 px-5 py-3 md:px-6 bg-slate-900/80 backdrop-blur-xl rounded-full border border-white/10 shadow-2xl">
+             
+             <button
               onClick={toggleAudio}
-              className={`p-3 md:p-4 rounded-full transition-all duration-200 ${isMuted ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20"}`}
+              className={`p-3 rounded-full transition-all duration-200 ${isMuted ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20"}`}
             >
-              {isMuted ? (
-                <IoMicOff size={20} className="md:w-6 md:h-6" />
-              ) : (
-                <IoMic size={20} className="md:w-6 md:h-6" />
-              )}
+              {isMuted ? <IoMicOff size={22} /> : <IoMic size={22} />}
             </button>
-
+            
             <button
               onClick={endCall}
-              className="p-4 md:p-5 rounded-full bg-red-500 text-white shadow-lg shadow-red-500/30 hover:bg-red-600 active:scale-95 transition-all mx-1"
+              className="p-4 rounded-full bg-red-500 text-white shadow-lg shadow-red-500/30 hover:bg-red-600 active:scale-95 transition-all mx-1"
             >
-              <IoCall size={24} className="rotate-[135deg] md:w-8 md:h-8" />
+              <IoCall size={28} className="rotate-[135deg]" />
             </button>
             <button
               onClick={toggleVideo}
-              className={`p-3 md:p-4 rounded-full transition-all duration-200 ${isVideoOff ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20"}`}
+              className={`p-3 rounded-full transition-all duration-200 ${isVideoOff ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20"}`}
             >
-              {isVideoOff ? (
-                <IoVideocamOff size={20} className="md:w-6 md:h-6" />
-              ) : (
-                <IoVideocam size={20} className="md:w-6 md:h-6" />
-              )}
+               {isVideoOff ? <IoVideocamOff size={22} /> : <IoVideocam size={22} />}
             </button>
           </div>
         </div>
