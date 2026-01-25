@@ -7,418 +7,459 @@ import {
   IoVolumeMute,
   IoChevronDown,
   IoExpand,
+  IoPerson,
 } from "react-icons/io5";
 import useAppStore from "@/store";
-import useMediaStream from "@/hooks/useMediaStream";
-import usePeerConnection from "@/hooks/usePeerConnection";
 import { useSocket } from "@/context/SocketContext";
+import axios from "axios";
+import { GET_TURN_CREDENTIALS } from "@/utils/constants";
+
+// Default STUN servers (Fallback)
+const DEFAULT_ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:global.stun.twilio.com:3478" },
+  ],
+};
 
 const AudioCallScreen = () => {
   const { activeCall, clearActiveCall } = useAppStore();
+  const { socket } = useSocket();
+
+  // UI states
   const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [isSpeakerOn, setIsSpeakerOn] = useState(false);
-  const [pulse, setPulse] = useState(true);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(true); // Default to speaker for calls
   const [isMinimized, setIsMinimized] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState("initializing"); // initializing, connected, disconnected, failed
 
-  // LOGIC STATE
-  const [localStream, setLocalStream] = useState(null);
-  const [remoteStream, setRemoteStream] = useState(null);
-  const [isCallAccepted, setIsCallAccepted] = useState(false);
+  // Call State
+  const [callStatus, setCallStatus] = useState(
+    activeCall.isCaller ? "ringing" : "connected",
+  );
 
-  const { socket } = useSocket();
+  const pc = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(new MediaStream());
   const remoteAudioRef = useRef(null);
-  const callInitiated = useRef(false);
+  const connectionTimeout = useRef(null);
+  const wakeLockRef = useRef(null);
 
-  const { startMedia, stopMedia, localStreamRef } = useMediaStream();
-  const { createPeerConnection, addLocalTracks, closeConnection, pcRef } =
-    usePeerConnection();
+  const pendingOffer = useRef(null);
+  const pendingCandidates = useRef([]);
+  const makingOffer = useRef(false);
+  const ignoreOffer = useRef(false);
+  const isPolite = useRef(!activeCall.isCaller);
 
-  // End Call Logic
-  const endCall = useCallback(() => {
-    const targetId = activeCall?.otherUserId || activeCall?.callerId;
+  if (!activeCall || activeCall.callType !== "audio") return null;
 
-    if (targetId) {
-      socket.emit("call:end", { to: targetId });
-    }
-    closeConnection();
-    stopMedia();
-    clearActiveCall();
-    callInitiated.current = false;
-    setLocalStream(null);
-    setRemoteStream(null);
-    setIsCallAccepted(false);
-  }, [activeCall, closeConnection, stopMedia, clearActiveCall, socket]);
-
-  if (!activeCall) return null;
-
-  // Setup Media
+  // waake lock screen
   useEffect(() => {
-    let mounted = true;
-    startMedia("audio").then((stream) => {
-      if (!mounted) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
+    const requestWakeLock = async () => {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLockRef.current = await navigator.wakeLock.request("screen");
+        }
+      } catch (err) {
+        console.warn("Wake Lock failed:", err);
       }
-      setLocalStream(stream);
-    });
+    };
+    requestWakeLock();
+
+    // Handle Tab Close (Ghost Call Prevention)
+    const handleBeforeUnload = (e) => {
+      if (activeCall) {
+        const targetId = activeCall.otherUserId || activeCall.callerId;
+        socket.emit("call:end", { to: targetId });
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
-      mounted = false;
-      stopMedia();
+      if (wakeLockRef.current) wakeLockRef.current.release();
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      cleanup();
     };
   }, []);
 
+  // Initialize Media
   useEffect(() => {
-    if (!socket) return;
+    const startMedia = async () => {
+      try {
+        // Audio only
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
 
-    const handleCallAccepted = () => setIsCallAccepted(true);
-    const handleRemoteEnd = () => {
-      console.log("🛑 Remote user hung up.");
-      endCall();
+        localStreamRef.current = stream;
+
+        // Handle Hardware Failure (Mic unplugged)
+        stream.getAudioTracks()[0].onended = () => {
+          console.warn("Mic ended unexpectedly. Restarting...");
+          handleDeviceChange();
+        };
+
+        if (!activeCall.isCaller) initializePeerConnection(stream);
+      } catch (err) {
+        console.error("Media Error:", err);
+        setConnectionStatus("failed"); // Update UI to show error
+      }
     };
 
-    if (!activeCall.isCaller) setIsCallAccepted(true);
+    startMedia();
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
 
+    return () => {
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        handleDeviceChange,
+      );
+    };
+  }, []);
+
+  //Restart Media on device change
+  const handleDeviceChange = async () => {
+    console.log("Device change (e.g. headphones). Refreshing stream...");
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
+      localStreamRef.current = newStream;
+
+      // Replace track in existing connection seamlessly
+      if (pc.current) {
+        const senders = pc.current.getSenders();
+        const sender = senders.find((s) => s.track?.kind === "audio");
+        if (sender) sender.replaceTrack(newStream.getAudioTracks()[0]);
+      }
+    } catch (err) {
+      console.error("Device switch failed", err);
+    }
+  };
+
+  // Caller Trigger
+  useEffect(() => {
+    if (!socket || !activeCall.isCaller) return;
+    const handleCallAccepted = () => {
+      setCallStatus("connected");
+      if (localStreamRef.current)
+        initializePeerConnection(localStreamRef.current);
+    };
     socket.on("call-accepted", handleCallAccepted);
-    socket.on("call:end", handleRemoteEnd);
+    return () => socket.off("call-accepted", handleCallAccepted);
+  }, [socket, activeCall.isCaller]);
 
-    return () => {
-      socket.off("call-accepted", handleCallAccepted);
-      socket.off("call:end", handleRemoteEnd);
+  // Robust Peer Connection Logic
+  const initializePeerConnection = async (stream) => {
+    if (pc.current) return;
+
+    let config = { ...DEFAULT_ICE_SERVERS };
+
+    // Fetch TURN Credentials
+    try {
+      const response = await axios.get(GET_TURN_CREDENTIALS, {
+        withCredentials: true,
+      });
+      if (response.data.success && response.data.iceServers) {
+        config.iceServers = response.data.iceServers;
+      }
+    } catch (error) {
+      console.error("TURN Fetch Failed, using STUN:", error);
+    }
+
+    console.log("Init Audio PC");
+    pc.current = new RTCPeerConnection(config);
+
+    // Add Audio Track
+    stream.getTracks().forEach((track) => pc.current.addTrack(track, stream));
+
+    // Handle Remote Audio
+    pc.current.ontrack = ({ track, streams }) => {
+      remoteStreamRef.current = streams[0] || new MediaStream([track]);
+
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = remoteStreamRef.current;
+        remoteAudioRef.current
+          .play()
+          .catch((e) => console.error("Audio Play Error", e));
+      }
     };
-  }, [socket, activeCall.isCaller, endCall]);
 
-  useEffect(() => {
-    if (!activeCall.isCaller || !socket || !localStream || !isCallAccepted)
-      return;
-    if (callInitiated.current) return;
-    callInitiated.current = true;
+    // ICE Candidates
+    pc.current.onicecandidate = ({ candidate }) => {
+      if (candidate)
+        socket.emit("call:ice-candidate", {
+          to: activeCall.otherUserId || activeCall.callerId,
+          candidate,
+        });
+    };
 
-    const startCall = async () => {
-      const pc = await createPeerConnection(
-        (candidate) => {
-          socket.emit("call:ice-candidate", {
-            to: activeCall.otherUserId,
-            candidate,
-          });
-        },
-        (stream) => {
-          setRemoteStream(stream);
-        },
+    // Robust Connection Health & Aggressive Reconnection
+    pc.current.oniceconnectionstatechange = () => {
+      const state = pc.current.iceConnectionState;
+      setConnectionStatus(state);
+
+      if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
+
+      if (state === "disconnected") {
+        // Aggressive Restart after 2s
+        connectionTimeout.current = setTimeout(() => {
+          if (pc.current?.iceConnectionState === "disconnected") {
+            console.log("Restarting ICE...");
+            pc.current.restartIce();
+          }
+        }, 2000);
+      } else if (state === "failed") {
+        pc.current.restartIce();
+      }
+    };
+
+    // Perfect Negotiation
+    pc.current.onnegotiationneeded = async () => {
+      try {
+        makingOffer.current = true;
+        await pc.current.setLocalDescription();
+        socket.emit("call:offer", {
+          to: activeCall.otherUserId || activeCall.callerId,
+          description: pc.current.localDescription,
+        });
+      } catch (err) {
+        console.error(err);
+      } finally {
+        makingOffer.current = false;
+      }
+    };
+
+    // Flush Buffer
+    if (pendingOffer.current) {
+      await handleDescription(
+        pendingOffer.current.description,
+        pendingOffer.current.from,
       );
+      pendingOffer.current = null;
+    }
+    while (pendingCandidates.current.length > 0) {
+      await pc.current.addIceCandidate(pendingCandidates.current.shift());
+    }
+  };
 
-      addLocalTracks(localStream);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit("call:offer", { to: activeCall.otherUserId, offer });
-    };
+  // Signaling Handler
+  const handleDescription = async (description, from) => {
+    const peer = pc.current;
+    if (!peer) {
+      pendingOffer.current = { description, from };
+      return;
+    }
 
-    startCall();
-  }, [activeCall, socket, localStream, isCallAccepted]);
+    try {
+      const offerCollision =
+        description.type === "offer" &&
+        (makingOffer.current || peer.signalingState !== "stable");
 
-  // RECEIVER LOGIC
+      ignoreOffer.current = !isPolite.current && offerCollision;
+      if (ignoreOffer.current) return;
+
+      if (offerCollision) {
+        await Promise.all([
+          peer.setLocalDescription({ type: "rollback" }),
+          peer.setRemoteDescription(description),
+        ]);
+      } else {
+        await peer.setRemoteDescription(description);
+      }
+
+      if (description.type === "offer") {
+        await peer.setLocalDescription();
+        socket.emit("call:answer", {
+          to: from,
+          description: peer.localDescription,
+        });
+      }
+    } catch (err) {
+      console.error("Signaling Error:", err);
+    }
+  };
+
+  // Socket Listeners
   useEffect(() => {
     if (!socket) return;
-
-    const handleOffer = async ({ offer, from }) => {
-      const pc = await createPeerConnection(
-        (candidate) => {
-          socket.emit("call:ice-candidate", { to: from, candidate });
-        },
-        (stream) => {
-          setRemoteStream(stream);
-        },
-      );
-
-      if (localStreamRef.current) addLocalTracks(localStreamRef.current);
-      await pc.setRemoteDescription(offer);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit("call:answer", { to: from, answer });
+    const onDesc = ({ description, from }) =>
+      handleDescription(description, from);
+    const onCand = async ({ candidate }) => {
+      if (pc.current?.remoteDescription) {
+        try {
+          await pc.current.addIceCandidate(candidate);
+        } catch (e) {}
+      } else {
+        pendingCandidates.current.push(candidate);
+      }
     };
+    const onEnd = () => cleanup();
 
-    const handleAnswer = async ({ answer }) => {
-      if (pcRef.current) await pcRef.current.setRemoteDescription(answer);
-    };
-
-    const handleIce = async ({ candidate }) => {
-      if (pcRef.current) await pcRef.current.addIceCandidate(candidate);
-    };
-
-    socket.on("call:offer", handleOffer);
-    socket.on("call:answer", handleAnswer);
-    socket.on("call:ice-candidate", handleIce);
+    socket.on("call:offer", onDesc);
+    socket.on("call:answer", onDesc);
+    socket.on("call:ice-candidate", onCand);
+    socket.on("call:end", onEnd);
 
     return () => {
-      socket.off("call:offer", handleOffer);
-      socket.off("call:answer", handleAnswer);
-      socket.off("call:ice-candidate", handleIce);
+      socket.off("call:offer", onDesc);
+      socket.off("call:answer", onDesc);
+      socket.off("call:ice-candidate", onCand);
+      socket.off("call:end", onEnd);
     };
   }, [socket]);
 
-  // ATTACH REMOTE AUDIO
-  useEffect(() => {
-    if (remoteStream && remoteAudioRef.current) {
-      remoteAudioRef.current.srcObject = remoteStream;
-      remoteAudioRef.current
-        .play()
-        .catch((e) => console.error("Audio play error", e));
-    }
-  }, [remoteStream]);
+  // Utils
+  const cleanup = useCallback(() => {
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    pc.current?.close();
+    pc.current = null;
+    if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
+    clearActiveCall();
+  }, [clearActiveCall]);
 
-  useEffect(() => {
-    if (!localStreamRef.current) return;
-    localStreamRef.current
-      .getAudioTracks()
-      .forEach((track) => (track.enabled = !isMuted));
-  }, [isMuted]);
-
-  useEffect(() => {
-    if (!isCallAccepted) return;
-    const durationInterval = setInterval(
-      () => setCallDuration((prev) => prev + 1),
-      1000,
-    );
-    const pulseInterval = setInterval(() => setPulse((p) => !p), 2000);
-    return () => {
-      clearInterval(durationInterval);
-      clearInterval(pulseInterval);
-    };
-  }, [isCallAccepted]);
-
-  const formatDuration = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  const endCall = () => {
+    const to = activeCall?.otherUserId || activeCall?.callerId;
+    if (to) socket.emit("call:end", { to });
+    cleanup();
   };
 
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      const track = localStreamRef.current.getAudioTracks()[0];
+      if (track) {
+        track.enabled = !track.enabled;
+        setIsMuted(!track.enabled);
+      }
+    }
+  };
+
+  // Duration Timer
+  useEffect(() => {
+    let t;
+    if (connectionStatus === "connected" || connectionStatus === "completed") {
+      t = setInterval(() => setCallDuration((p) => p + 1), 1000);
+    }
+    return () => clearInterval(t);
+  }, [connectionStatus]);
+
+  const formatDuration = (s) =>
+    `${Math.floor(s / 60)
+      .toString()
+      .padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
   const userInitial = activeCall.otherUserName?.charAt(0).toUpperCase() || "U";
 
-
-  // Minimized view
-  if (isMinimized) {
-    return (
-      <div className="fixed top-4 right-4 z-50 animate-in slide-in-from-top duration-300">
-        <div className="bg-gradient-to-br from-slate-800 to-slate-900 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/10 overflow-hidden">
-          <button
-            onClick={() => setIsMinimized(false)}
-            className="w-full p-3 flex items-center gap-3 hover:bg-white/5 transition-colors"
-          >
-            {/* Avatar */}
-            <div className="relative">
-              <div
-                className={`absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500/30 to-green-500/30 blur-md transition-all duration-2000 ${pulse ? "scale-100" : "scale-110"}`}
-              />
-              <div className="relative w-12 h-12 rounded-full bg-gradient-to-br from-emerald-500 to-green-600 flex items-center justify-center text-lg font-bold text-white">
-                {userInitial}
-              </div>
+  // Render
+  return (
+    <>
+      <audio ref={remoteAudioRef} autoPlay />
+      {isMinimized ? (
+        <div
+          onClick={() => setIsMinimized(false)}
+          className="fixed top-12 right-4 z-50 flex items-center gap-3 bg-slate-900/90 backdrop-blur-md border border-white/10 rounded-2xl p-2 pr-4 shadow-2xl cursor-pointer animate-in fade-in slide-in-from-top-5 duration-300"
+        >
+          <div className="relative w-10 h-10 flex-shrink-0">
+            <div className="absolute inset-0 bg-green-500 rounded-full animate-ping opacity-20" />
+            <div className="relative w-full h-full bg-gradient-to-br from-emerald-500 to-green-600 rounded-full flex items-center justify-center text-white font-bold">
+              {userInitial}
             </div>
+          </div>
 
-            {/* Call info */}
-            <div className="flex-1 text-left">
-              <p className="text-sm font-semibold text-white truncate max-w-[150px]">
-                {activeCall.otherUserName || "Unknown User"}
-              </p>
-              <div className="flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-xs text-slate-400">
-                  {formatDuration(callDuration)}
+          <div className="flex flex-col">
+            <span className="text-white text-sm font-semibold leading-tight">
+              {activeCall.otherUserName}
+            </span>
+            <span className="text-emerald-400 text-xs font-mono">
+              {formatDuration(callDuration)}
+            </span>
+          </div>
+        </div>
+      ) : (
+        // Full Screen View
+        <div className="fixed inset-0 z-50 bg-gradient-to-b from-slate-900 via-slate-800 to-slate-950 flex flex-col items-center justify-between py-12 px-6 overflow-hidden">
+          <div className="absolute inset-0 pointer-events-none overflow-hidden">
+            <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-emerald-500/10 rounded-full blur-[100px]" />
+            <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-500/10 rounded-full blur-[100px]" />
+          </div>
+
+          <div className="w-full flex justify-between items-start z-10">
+             <div className="flex flex-col items-start">
+                 <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/5 backdrop-blur-md">
+                     <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-emerald-500' : 'bg-yellow-500'} animate-pulse`} />
+                     <span className="text-xs text-white/70 font-medium capitalize">
+                        {callStatus === "ringing" ? "Ringing..." : connectionStatus}
+                     </span>
+                 </div>
+             </div>
+             <button 
+                onClick={() => setIsMinimized(true)} 
+                className="p-3 bg-white/5 hover:bg-white/10 rounded-full text-white backdrop-blur-md transition-all"
+             >
+                <IoChevronDown size={24} />
+             </button>
+          </div>
+
+          <div className="flex-1 flex flex-col items-center justify-center w-full z-10 mb-20">
+            <div className="relative mb-8">
+              {connectionStatus === "connected" && (
+                <>
+                  <div
+                    className="absolute inset-0 bg-emerald-500/20 rounded-full animate-ping"
+                    style={{ animationDuration: "3s" }}
+                  />
+                  <div className="absolute inset-[-20px] bg-emerald-500/10 rounded-full animate-pulse" />
+                </>
+              )}
+              <div className="relative w-32 h-32 md:w-40 md:h-40 rounded-full bg-gradient-to-br from-slate-700 to-slate-600 border-4 border-slate-800 shadow-2xl flex items-center justify-center overflow-hidden">
+                <span className="text-5xl md:text-6xl font-bold text-white/90">
+                  {userInitial}
                 </span>
               </div>
             </div>
 
-            <IoExpand className="text-slate-400 text-lg flex-shrink-0" />
-          </button>
-
-          {/* Mini controls */}
-          <div className="flex items-center gap-2 px-3 pb-3">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsMuted(!isMuted);
-              }}
-              className={`flex-1 py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-all ${
-                isMuted
-                  ? "bg-red-500/20 text-red-400"
-                  : "bg-white/10 text-white hover:bg-white/15"
-              }`}
-            >
-              {isMuted ? (
-                <IoMicOff className="text-sm" />
-              ) : (
-                <IoMic className="text-sm" />
-              )}
-              <span className="text-xs">{isMuted ? "Muted" : "Mute"}</span>
-            </button>
-
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                endCall();
-              }}
-              className="py-2 px-4 rounded-lg bg-gradient-to-br from-red-500 to-red-600 text-white hover:shadow-lg hover:shadow-red-500/50 transition-all"
-            >
-              <IoCall className="text-sm rotate-[135deg]" />
-            </button>
-          </div>
-        </div>
-        {/* Hidden Audio Element for Remote Stream */}
-        <audio ref={remoteAudioRef} autoPlay />
-      </div>
-    );
-  }
-
-  // 2. Full screen view
-  return (
-    <div className="fixed inset-0 z-50 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col items-center justify-between py-8 sm:py-12 px-4 overflow-hidden">
-      {/* Hidden Audio Element for Remote Stream */}
-      <audio ref={remoteAudioRef} autoPlay />
-
-      {/* Animated background elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div
-          className={`absolute top-1/4 left-1/2 -translate-x-1/2 w-72 h-72 sm:w-96 sm:h-96 bg-gradient-to-r from-emerald-500/10 to-green-500/10 rounded-full blur-3xl transition-all duration-2000 ${pulse ? "scale-100 opacity-40" : "scale-110 opacity-20"}`}
-        />
-        <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-blue-500/5 to-purple-500/5 rounded-full blur-3xl" />
-        <div className="absolute bottom-0 left-0 w-64 h-64 bg-gradient-to-tr from-pink-500/5 to-rose-500/5 rounded-full blur-3xl" />
-      </div>
-
-      {/* Minimize button */}
-      <button
-        onClick={() => setIsMinimized(true)}
-        className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 backdrop-blur-sm border border-white/10 flex items-center justify-center hover:bg-white/15 transition-all z-20 hover:scale-110 active:scale-95"
-        aria-label="Minimize"
-      >
-        <IoChevronDown className="text-white text-xl" />
-      </button>
-
-      {/* Top info section */}
-      <div className="relative flex flex-col items-center gap-6 mt-8 sm:mt-16 z-10">
-        {/* Avatar with animated rings */}
-        <div className="relative">
-          <div
-            className={`absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500 to-green-500 opacity-20 transition-all duration-2000 ${pulse ? "scale-100" : "scale-110"}`}
-          />
-          <div
-            className={`absolute -inset-2 rounded-full bg-gradient-to-r from-emerald-500/30 to-green-500/30 blur-md transition-all duration-2000 ${pulse ? "scale-100 opacity-50" : "scale-110 opacity-30"}`}
-          />
-          <div className="relative w-32 h-32 sm:w-40 sm:h-40 rounded-full bg-gradient-to-br from-emerald-500 to-green-600 flex items-center justify-center text-5xl sm:text-6xl font-bold text-white shadow-2xl">
-            {userInitial}
-          </div>
-        </div>
-
-        {/* Call info */}
-        <div className="text-center space-y-2">
-          <h2 className="text-2xl sm:text-3xl font-bold text-white">
-            {activeCall.otherUserName || "Unknown User"}
-          </h2>
-          <div className="flex items-center gap-2 justify-center">
-            {isCallAccepted ? (
-              <>
-                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <p className="text-sm sm:text-base text-slate-300 font-medium">
-                  Audio Call
-                </p>
-              </>
-            ) : (
-              <p className="text-sm sm:text-base text-slate-300 font-medium animate-pulse">
-                {activeCall.isCaller ? "Calling..." : "Connecting..."}
-              </p>
-            )}
-          </div>
-
-          {isCallAccepted && (
-            <p className="text-xl sm:text-2xl text-emerald-400 font-mono font-semibold">
+            <h2 className="text-2xl md:text-3xl font-bold text-white mb-2">
+              {activeCall.otherUserName}
+            </h2>
+            <p className="text-emerald-400 font-mono text-lg tracking-wider bg-emerald-500/10 px-4 py-1 rounded-full">
               {formatDuration(callDuration)}
             </p>
-          )}
-        </div>
-
-        {/* Call status indicator */}
-        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border border-white/10">
-          <div
-            className={`w-2 h-2 rounded-full ${isCallAccepted ? "bg-emerald-500" : "bg-yellow-500"} animate-pulse`}
-          />
-          <span className="text-xs sm:text-sm text-slate-400">
-            {isCallAccepted
-              ? "Connected"
-              : activeCall.isCaller
-                ? "Ringing"
-                : "Connecting"}
-          </span>
-        </div>
-      </div>
-
-      {/* Control buttons */}
-      <div className="relative flex items-center justify-center gap-4 sm:gap-6 mb-8 sm:mb-12 z-10">
-        {/* Mute button */}
-        <button
-          onClick={() => setIsMuted(!isMuted)}
-          className={`group relative w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center transition-all duration-300 ${
-            isMuted
-              ? "bg-white/20 backdrop-blur-sm"
-              : "bg-white/10 backdrop-blur-sm hover:bg-white/15"
-          } border border-white/10 hover:scale-110 active:scale-95`}
-          aria-label={isMuted ? "Unmute" : "Mute"}
-        >
-          <div
-            className={`absolute inset-0 rounded-full ${isMuted ? "bg-red-500/20" : "bg-white/5"} blur-lg transition-all duration-300`}
-          />
-          {isMuted ? (
-            <IoMicOff className="text-xl sm:text-2xl text-red-400 relative z-10" />
-          ) : (
-            <IoMic className="text-xl sm:text-2xl text-white relative z-10" />
-          )}
-          <span className="absolute -bottom-6 text-xs text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-            {isMuted ? "Unmute" : "Mute"}
-          </span>
-        </button>
-
-        {/* End call button */}
-        <button
-          onClick={endCall}
-          className="group relative w-16 h-16 sm:w-20 sm:h-20 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-95"
-          aria-label="End call"
-        >
-          <div className="absolute inset-0 bg-red-500/30 rounded-full blur-xl group-hover:bg-red-500/40 transition-all duration-300" />
-          <div className="relative w-full h-full bg-gradient-to-br from-red-500 to-red-600 rounded-full flex items-center justify-center shadow-2xl shadow-red-500/50">
-            <IoCall className="text-2xl sm:text-3xl text-white rotate-[135deg]" />
           </div>
-          <span className="absolute -bottom-6 text-xs text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">
-            End
-          </span>
-        </button>
 
-        {/* Speaker button */}
-        <button
-          onClick={() => setIsSpeakerOn(!isSpeakerOn)}
-          className={`group relative w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center transition-all duration-300 ${
-            isSpeakerOn
-              ? "bg-white/20 backdrop-blur-sm"
-              : "bg-white/10 backdrop-blur-sm hover:bg-white/15"
-          } border border-white/10 hover:scale-110 active:scale-95`}
-          aria-label={isSpeakerOn ? "Speaker off" : "Speaker on"}
-        >
-          <div
-            className={`absolute inset-0 rounded-full ${isSpeakerOn ? "bg-emerald-500/20" : "bg-white/5"} blur-lg transition-all duration-300`}
-          />
-          {isSpeakerOn ? (
-            <IoVolumeHigh className="text-xl sm:text-2xl text-emerald-400 relative z-10" />
-          ) : (
-            <IoVolumeMute className="text-xl sm:text-2xl text-white relative z-10" />
-          )}
-          <span className="absolute -bottom-6 text-xs text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-            {isSpeakerOn ? "Speaker" : "Speaker"}
-          </span>
-        </button>
-      </div>
+          <div className="w-full max-w-md z-20 pb-8">
+            <div className="flex items-center justify-center gap-6">
+              <button
+                onClick={toggleMute}
+                className={`p-4 rounded-full transition-all duration-300 ${isMuted ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20 backdrop-blur-md"}`}
+              >
+                {isMuted ? <IoMicOff size={28} /> : <IoMic size={28} />}
+              </button>
 
-      {/* Bottom hint text */}
-      <div className="relative text-center text-xs sm:text-sm text-slate-500 z-10">
-        <p>End-to-end encrypted</p>
-      </div>
-    </div>
+              <button
+                onClick={endCall}
+                className="p-6 rounded-full bg-red-500 text-white shadow-xl shadow-red-500/30 hover:bg-red-600 hover:scale-105 active:scale-95 transition-all"
+              >
+                <IoCall size={32} className="rotate-[135deg]" />
+              </button>
+
+              <button
+                onClick={() => setIsSpeakerOn(!isSpeakerOn)}
+                className={`p-4 rounded-full transition-all duration-300 ${!isSpeakerOn ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20 backdrop-blur-md"}`}
+              >
+                {isSpeakerOn ? (
+                  <IoVolumeHigh size={28} />
+                ) : (
+                  <IoVolumeMute size={28} />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 
