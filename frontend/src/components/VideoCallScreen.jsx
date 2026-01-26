@@ -7,356 +7,503 @@ import {
   IoVideocam,
   IoChevronDown,
   IoExpand,
-  IoSwapHorizontal,
-  IoResize,
+  IoRefresh,
+  IoPerson,
+  IoWarning,
 } from "react-icons/io5";
 import useAppStore from "@/store";
-import useMediaStream from "@/hooks/useMediaStream";
-import usePeerConnection from "@/hooks/usePeerConnection";
 import { useSocket } from "@/context/SocketContext";
+import axios from "axios";
+import { GET_TURN_CREDENTIALS } from "@/utils/constants";
+
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:global.stun.twilio.com:3478" },
+  ],
+};
 
 const VideoCallScreen = () => {
-  const {
-    activeCall,
-    activeCall: { isCaller },
-    clearActiveCall,
-  } = useAppStore();
+  const { activeCall, clearActiveCall } = useAppStore();
   const { socket } = useSocket();
-  const { startMedia, stopMedia, localStreamRef } = useMediaStream();
-  const { createPeerConnection, addLocalTracks, closeConnection, pcRef } =
-    usePeerConnection();
 
-  // --- UI STATE ---
+  // UI STATE
   const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [pipSize, setPipSize] = useState({ width: 192, height: 288 });
+
+  // Connection State
+  const [callStatus, setCallStatus] = useState(
+    activeCall.isCaller ? "ringing" : "connected",
+  );
+  const [connectionStatus, setConnectionStatus] = useState("initializing");
+  const [mediaError, setMediaError] = useState(null);
+
+  // PiP / Drag State
+  const [pipSize, setPipSize] = useState({ width: 120, height: 180 });
   const [dragPosition, setDragPosition] = useState({ x: 16, y: 16 });
 
-  // --- LOGIC STATE ---
-  const [localStream, setLocalStream] = useState(null);
-  const [remoteStream, setRemoteStream] = useState(null);
-  const [isCallAccepted, setIsCallAccepted] = useState(false);
+  // WEBRTC REFS
+  const pc = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(new MediaStream());
+  const connectionTimeout = useRef(null);
 
-  // --- REFS ---
+  // ROBUSTNESS BUFFERS
+  // These hold signals that arrive BEFORE the camera is ready
+  const pendingOffer = useRef(null);
+  const pendingCandidates = useRef([]);
+
+  const makingOffer = useRef(false);
+  const ignoreOffer = useRef(false);
+  const isPolite = useRef(!activeCall.isCaller);
+
+  // UI Refs
   const remoteVideoFullRef = useRef(null);
   const remoteVideoMiniRef = useRef(null);
   const localVideoPipRef = useRef(null);
   const localVideoMiniRef = useRef(null);
-  const callInitiated = useRef(false);
 
-  // Drag/Resize Refs
+  // Drag Logic Refs
   const isDragging = useRef(false);
-  const isResizing = useRef(false);
+  const hasDragged = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
-  const resizeStart = useRef({ x: 0, y: 0, w: 0, h: 0 });
-
-  // --- 1. END CALL HANDLER ---
-  const endCall = useCallback(() => {
-    const targetId = activeCall?.otherUserId || activeCall?.callerId;
-    if (targetId) socket.emit("call:end", { to: targetId });
-
-    closeConnection();
-    stopMedia();
-    clearActiveCall();
-
-    callInitiated.current = false;
-    setLocalStream(null);
-    setRemoteStream(null);
-    setIsCallAccepted(false);
-  }, [activeCall, closeConnection, stopMedia, clearActiveCall, socket]);
 
   if (!activeCall || activeCall.callType !== "video") return null;
 
-  // --- 2. INITIALIZE MEDIA ---
+  // RESPONSIVE SETUP
   useEffect(() => {
-    let mounted = true;
-    startMedia("video").then((stream) => {
-      if (!mounted) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
+    const handleResize = () => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const newPipSize =
+        width > 768 ? { width: 220, height: 330 } : { width: 130, height: 200 };
+      setPipSize(newPipSize);
+      setDragPosition((prev) => ({
+        x: Math.max(16, Math.min(prev.x, width - newPipSize.width - 16)),
+        y: Math.max(16, Math.min(prev.y, height - newPipSize.height - 16)),
+      }));
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // RESTART MEDIA ON DEVICE CHANGE
+  const handleDeviceChange = async () => {
+    console.log("Device change detected. Refreshing stream...");
+
+    try {
+      // 1. Get a new stream
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      // 2. Update Local Video UI
+      localStreamRef.current = newStream;
+      updateLocalVideoRefs(newStream);
+
+      // 3. Replace Tracks in the existing connection (Seamless Switch)
+      if (pc.current) {
+        const senders = pc.current.getSenders();
+
+        newStream.getTracks().forEach((newTrack) => {
+          const sender = senders.find((s) => s.track?.kind === newTrack.kind);
+          if (sender) {
+            sender.replaceTrack(newTrack);
+          }
+        });
       }
-      setLocalStream(stream);
-    });
+    } catch (err) {
+      console.error("Failed to refresh media on device change", err);
+      setMediaError("Device disconnected. Please check camera/mic.");
+    }
+  };
+
+  //INITIALIZE MEDIA
+  useEffect(() => {
+    const startMedia = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+        localStreamRef.current = stream;
+        updateLocalVideoRefs(stream);
+        setMediaError(null);
+
+        stream.getTracks().forEach((track) => {
+          track.onended = () => {
+            console.warn("Track ended unexpectedly. Restarting media...");
+            handleDeviceChange();
+          };
+        });
+
+        if (!activeCall.isCaller) initializePeerConnection(stream);
+      } catch (err) {
+        console.error("Media Error:", err);
+        setMediaError("Camera/Mic access denied.");
+      }
+    };
+
+    startMedia();
+
+    //  Global Device Change Listener
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+
     return () => {
-      mounted = false;
-      stopMedia();
+      cleanup();
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        handleDeviceChange,
+      );
     };
   }, []);
 
-  // --- 3. CALL STATUS LISTENERS ---
+  // CALLER TRIGGER
   useEffect(() => {
-    if (!socket) return;
-
-    const handleCallAccepted = () => setIsCallAccepted(true);
-    const handleRemoteHangup = () => endCall();
-
-    if (!activeCall.isCaller) setIsCallAccepted(true);
-
+    if (!socket || !activeCall.isCaller) return;
+    const handleCallAccepted = () => {
+      setCallStatus("connected");
+      if (localStreamRef.current)
+        initializePeerConnection(localStreamRef.current);
+    };
     socket.on("call-accepted", handleCallAccepted);
-    socket.on("call:end", handleRemoteHangup);
+    return () => socket.off("call-accepted", handleCallAccepted);
+  }, [socket, activeCall.isCaller]);
 
-    return () => {
-      socket.off("call-accepted", handleCallAccepted);
-      socket.off("call:end", handleRemoteHangup);
-    };
-  }, [socket, activeCall.isCaller, endCall]);
-
-  // --- 4. WEBRTC HANDSHAKE (INITIATOR) ---
+  // HANDLE TAB CLOSE
   useEffect(() => {
-    if (
-      !activeCall.isCaller ||
-      !socket ||
-      !localStream ||
-      !isCallAccepted ||
-      callInitiated.current
-    )
-      return;
+    const handleBeforeUnload = (e) => {
+      // Emit sync event to server (Best effort)
+      if (activeCall) {
+        const targetId = activeCall.otherUserId || activeCall.callerId;
+        socket.emit("call:end", { to: targetId });
+      }
 
-    callInitiated.current = true;
+      // Browser standard confirmation (Optional, usually ignored by modern browsers for custom text)
+      e.preventDefault();
+      e.returnValue = "";
+    };
 
-    const startCall = async () => {
-      const pc = await createPeerConnection(
-        (candidate) =>
-          socket.emit("call:ice-candidate", {
-            to: activeCall.otherUserId,
-            candidate,
-          }),
-        (stream) => setRemoteStream(stream),
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [activeCall, socket]);
+
+  // ROBUST PEER CONNECTION LOGIC
+  const initializePeerConnection = async (stream) => {
+    if (pc.current) return;
+
+    // Default Configuration (STUN only fallback)
+    let config = {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:global.stun.twilio.com:3478" },
+      ],
+    };
+
+    // Fetch TURN Credentials
+    try {
+      const response = await axios.get(GET_TURN_CREDENTIALS, {
+        withCredentials: true,
+      });
+      if (response.data.success && response.data.iceServers) {
+        config.iceServers = response.data.iceServers;
+        console.log("TURN credentials loaded successfully");
+      }
+    } catch (error) {
+      console.error(
+        "Failed to fetch TURN credentials, falling back to STUN:",
+        error,
       );
+    }
 
-      addLocalTracks(localStream);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit("call:offer", { to: activeCall.otherUserId, offer });
+    console.log("Initializing Peer Connection with config:", config);
+    pc.current = new RTCPeerConnection(config);
+
+    // Add Local Tracks
+    stream.getTracks().forEach((track) => pc.current.addTrack(track, stream));
+
+    // Handle Remote Stream
+    pc.current.ontrack = ({ track }) => {
+      console.log("Track received:", track.kind);
+      remoteStreamRef.current.addTrack(track);
+      const refresh = (el) => {
+        if (el && el.srcObject !== remoteStreamRef.current) {
+          el.srcObject = remoteStreamRef.current;
+          el.play().catch((e) => console.log("Autoplay error", e));
+        }
+      };
+      refresh(remoteVideoFullRef.current);
+      refresh(remoteVideoMiniRef.current);
     };
 
-    startCall();
-  }, [
-    activeCall,
-    socket,
-    localStream,
-    isCallAccepted,
-    createPeerConnection,
-    addLocalTracks,
-  ]);
-
-  // --- 5. WEBRTC SIGNALING (OFFER/ANSWER/ICE) ---
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleOffer = async ({ offer, from }) => {
-      const pc = await createPeerConnection(
-        (candidate) =>
-          socket.emit("call:ice-candidate", { to: from, candidate }),
-        (stream) => setRemoteStream(stream),
-      );
-
-      if (localStreamRef.current) addLocalTracks(localStreamRef.current);
-
-      await pc.setRemoteDescription(offer);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit("call:answer", { to: from, answer });
+    // ICE Candidates
+    pc.current.onicecandidate = ({ candidate }) => {
+      if (candidate)
+        socket.emit("call:ice-candidate", {
+          to: activeCall.otherUserId || activeCall.callerId,
+          candidate,
+        });
     };
 
-    const handleAnswer = async ({ answer }) => {
-      if (pcRef.current) await pcRef.current.setRemoteDescription(answer);
-    };
+    // Connection Health & Aggressive Recovery
+    pc.current.oniceconnectionstatechange = () => {
+      const state = pc.current.iceConnectionState;
+      console.log("Connection State Changed:", state);
+      setConnectionStatus(state);
 
-    const handleIce = async ({ candidate }) => {
-      if (pcRef.current) await pcRef.current.addIceCandidate(candidate);
-    };
+      // Clear any existing timeout when state changes
+      if (connectionTimeout.current) {
+        clearTimeout(connectionTimeout.current);
+        connectionTimeout.current = null;
+      }
 
-    socket.on("call:offer", handleOffer);
-    socket.on("call:answer", handleAnswer);
-    socket.on("call:ice-candidate", handleIce);
-
-    return () => {
-      socket.off("call:offer", handleOffer);
-      socket.off("call:answer", handleAnswer);
-      socket.off("call:ice-candidate", handleIce);
-    };
-  }, [socket, createPeerConnection, addLocalTracks, localStreamRef, pcRef]);
-
-  // --- 6. ATTACH STREAMS TO VIDEO ELEMENTS ---
-  useEffect(() => {
-    const attachMediaStream = (element, stream) => {
-      if (element && stream && element.srcObject !== stream) {
-        element.srcObject = stream;
+      if (state === "disconnected") {
+        // If disconnected, wait 2 seconds. If still disconnected, restart.
+        console.warn("Connection disconnected. waiting to recover...");
+        connectionTimeout.current = setTimeout(() => {
+          if (pc.current && pc.current.iceConnectionState === "disconnected") {
+            console.log("Aggressively restarting ICE...");
+            pc.current.restartIce();
+          }
+        }, 2000); // 2 second aggressive timeout
+      } else if (state === "failed") {
+        // If failed, restart immediately
+        console.error("Connection failed. Restarting ICE now.");
+        pc.current.restartIce();
       }
     };
 
-    attachMediaStream(localVideoPipRef.current, localStream);
-    attachMediaStream(localVideoMiniRef.current, localStream);
-    attachMediaStream(remoteVideoFullRef.current, remoteStream);
-    attachMediaStream(remoteVideoMiniRef.current, remoteStream);
-  }, [localStream, remoteStream]);
+    // Perfect Negotiation Trigger
+    pc.current.onnegotiationneeded = async () => {
+      try {
+        makingOffer.current = true;
+        await pc.current.setLocalDescription();
+        socket.emit("call:offer", {
+          to: activeCall.otherUserId || activeCall.callerId,
+          description: pc.current.localDescription,
+        });
+      } catch (err) {
+        console.error(err);
+      } finally {
+        makingOffer.current = false;
+      }
+    };
 
-  // --- 7. UTILS & CONTROLS ---
+    // FLUSH BUFFER
+    // If an offer arrived while we were getting the camera, handle it now.
+    if (pendingOffer.current) {
+      console.log("Processing Buffered Offer...");
+      await handleDescription(
+        pendingOffer.current.description,
+        pendingOffer.current.from,
+      );
+      pendingOffer.current = null;
+    }
+    // Flush buffered candidates
+    while (pendingCandidates.current.length > 0) {
+      const candidate = pendingCandidates.current.shift();
+      await pc.current.addIceCandidate(candidate);
+    }
+  };
+
+  // SIGNALING HANDLER (Buffering Logic)
+  // We define this outside useEffect so we can call it from initializePeerConnection
+  const handleDescription = async (description, from) => {
+    const peer = pc.current;
+
+    // If PC is not ready, save the offer for later
+    if (!peer) {
+      console.log("Buffering Offer (PC not ready)");
+      pendingOffer.current = { description, from };
+      return;
+    }
+
+    try {
+      const offerCollision =
+        description.type === "offer" &&
+        (makingOffer.current || peer.signalingState !== "stable");
+
+      ignoreOffer.current = !isPolite.current && offerCollision;
+      if (ignoreOffer.current) return;
+
+      if (offerCollision) {
+        await Promise.all([
+          peer.setLocalDescription({ type: "rollback" }),
+          peer.setRemoteDescription(description),
+        ]);
+      } else {
+        await peer.setRemoteDescription(description);
+      }
+
+      if (description.type === "offer") {
+        await peer.setLocalDescription();
+        socket.emit("call:answer", {
+          to: from,
+          description: peer.localDescription,
+        });
+      }
+    } catch (err) {
+      console.error("Signaling Error:", err);
+    }
+  };
+
   useEffect(() => {
-    if (!localStreamRef.current) return;
-    localStreamRef.current
-      .getAudioTracks()
-      .forEach((track) => (track.enabled = !isMuted));
-    localStreamRef.current
-      .getVideoTracks()
-      .forEach((track) => (track.enabled = !isVideoOff));
-  }, [isMuted, isVideoOff, localStreamRef]);
+    if (!socket) return;
 
+    const onDescription = ({ description, from }) =>
+      handleDescription(description, from);
+
+    const onCandidate = async ({ candidate }) => {
+      if (pc.current && pc.current.remoteDescription) {
+        try {
+          await pc.current.addIceCandidate(candidate);
+        } catch (e) {
+          console.error(e);
+        }
+      } else {
+        console.log("Buffering Candidate");
+        pendingCandidates.current.push(candidate);
+      }
+    };
+
+    const onEnd = () => cleanup();
+
+    socket.on("call:offer", onDescription);
+    socket.on("call:answer", onDescription);
+    socket.on("call:ice-candidate", onCandidate);
+    socket.on("call:end", onEnd);
+
+    return () => {
+      socket.off("call:offer", onDescription);
+      socket.off("call:answer", onDescription);
+      socket.off("call:ice-candidate", onCandidate);
+      socket.off("call:end", onEnd);
+    };
+  }, [socket]);
+
+  // Cleanup
+  const cleanup = useCallback(() => {
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    pc.current?.close();
+    pc.current = null;
+    if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
+    clearActiveCall();
+    setConnectionStatus("disconnected");
+  }, [clearActiveCall]);
+
+  const endCall = () => {
+    const to = activeCall?.otherUserId || activeCall?.callerId;
+    if (to) socket.emit("call:end", { to });
+    cleanup();
+  };
+
+  const updateLocalVideoRefs = (stream) => {
+    [localVideoPipRef.current, localVideoMiniRef.current].forEach((el) => {
+      if (el) {
+        el.srcObject = stream;
+        el.muted = true;
+      }
+    });
+  };
+  const toggleAudio = () => {
+    const t = localStreamRef.current?.getAudioTracks()[0];
+    if (t) {
+      t.enabled = !t.enabled;
+      setIsMuted(!t.enabled);
+    }
+  };
+  const toggleVideo = () => {
+    const t = localStreamRef.current?.getVideoTracks()[0];
+    if (t) {
+      t.enabled = !t.enabled;
+      setIsVideoOff(!t.enabled);
+    }
+  };
   useEffect(() => {
-    if (!isCallAccepted) return;
-    const interval = setInterval(() => setCallDuration((p) => p + 1), 1000);
-    return () => clearInterval(interval);
-  }, [isCallAccepted]);
+    const t = setInterval(() => {
+      if (connectionStatus === "connected") setCallDuration((p) => p + 1);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [connectionStatus]);
+  const formatDuration = (s) =>
+    `${Math.floor(s / 60)
+      .toString()
+      .padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
-  useEffect(() => {
-    if (!showControls || isMinimized) return;
-    const timer = setTimeout(() => setShowControls(false), 3000);
-    return () => clearTimeout(timer);
-  }, [showControls, isMinimized]);
-
-  // --- DRAG & RESIZE HANDLERS ---
-  const handleDragStart = useCallback(
+  const handleDragStart = (e) => {
+    if (e.target.closest("button")) return;
+    isDragging.current = true;
+    hasDragged.current = false;
+    const clientX = e.clientX || e.touches?.[0]?.clientX;
+    const clientY = e.clientY || e.touches?.[0]?.clientY;
+    dragStart.current = {
+      x: clientX - dragPosition.x,
+      y: clientY - dragPosition.y,
+    };
+  };
+  const handleDragMove = useCallback(
     (e) => {
-      if (!isMinimized || isResizing.current) return;
-      e.preventDefault();
-      isDragging.current = true;
-      const clientX =
-        e.type === "touchstart" ? e.touches[0].clientX : e.clientX;
-      const clientY =
-        e.type === "touchstart" ? e.touches[0].clientY : e.clientY;
-      dragStart.current = {
-        x: clientX - dragPosition.x,
-        y: clientY - dragPosition.y,
-      };
-    },
-    [isMinimized, dragPosition],
-  );
-
-  const handleResizeStart = useCallback(
-    (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      isResizing.current = true;
-      const clientX =
-        e.type === "touchstart" ? e.touches[0].clientX : e.clientX;
-      const clientY =
-        e.type === "touchstart" ? e.touches[0].clientY : e.clientY;
-      resizeStart.current = {
-        x: clientX,
-        y: clientY,
-        w: pipSize.width,
-        h: pipSize.height,
-      };
+      if (!isDragging.current) return;
+      hasDragged.current = true;
+      if (e.type === "touchmove") e.preventDefault();
+      const clientX = e.clientX || e.touches?.[0]?.clientX;
+      const clientY = e.clientY || e.touches?.[0]?.clientY;
+      const maxX = window.innerWidth - pipSize.width - 16;
+      const maxY = window.innerHeight - pipSize.height - 16;
+      setDragPosition({
+        x: Math.max(16, Math.min(clientX - dragStart.current.x, maxX)),
+        y: Math.max(16, Math.min(clientY - dragStart.current.y, maxY)),
+      });
     },
     [pipSize],
   );
-
+  const handleDragEnd = () => (isDragging.current = false);
   useEffect(() => {
-    const handleMove = (e) => {
-      if (!isDragging.current && !isResizing.current) return;
-
-      const clientX = e.type === "touchmove" ? e.touches[0].clientX : e.clientX;
-      const clientY = e.type === "touchmove" ? e.touches[0].clientY : e.clientY;
-
-      if (isDragging.current) {
-        const newX = clientX - dragStart.current.x;
-        const newY = clientY - dragStart.current.y;
-        const maxX = window.innerWidth - pipSize.width - 16;
-        const maxY = window.innerHeight - pipSize.height - 16;
-        setDragPosition({
-          x: Math.max(16, Math.min(newX, maxX)),
-          y: Math.max(16, Math.min(newY, maxY)),
-        });
-      } else if (isResizing.current) {
-        const deltaX = clientX - resizeStart.current.x;
-        const deltaY = clientY - resizeStart.current.y;
-        setPipSize({
-          width: Math.max(160, Math.min(resizeStart.current.w + deltaX, 400)),
-          height: Math.max(200, Math.min(resizeStart.current.h + deltaY, 600)),
-        });
-      }
-    };
-
-    const handleUp = () => {
-      isDragging.current = false;
-      isResizing.current = false;
-    };
-
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    window.addEventListener("touchmove", handleMove);
-    window.addEventListener("touchend", handleUp);
-
+    window.addEventListener("mousemove", handleDragMove);
+    window.addEventListener("touchmove", handleDragMove, { passive: false });
+    window.addEventListener("mouseup", handleDragEnd);
+    window.addEventListener("touchend", handleDragEnd);
     return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-      window.removeEventListener("touchmove", handleMove);
-      window.removeEventListener("touchend", handleUp);
+      window.removeEventListener("mousemove", handleDragMove);
+      window.removeEventListener("touchmove", handleDragMove);
+      window.removeEventListener("mouseup", handleDragEnd);
+      window.removeEventListener("touchend", handleDragEnd);
     };
-  }, [pipSize]);
+  }, [handleDragMove]);
 
-  // --- HELPERS ---
-  const formatDuration = (secs) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  const togglePipSize = (e) => {
+    e.stopPropagation(); // Prevent drag/click conflicts
+
+    setPipSize((prev) => {
+      const isSmall = prev.width <= 120;
+      return isSmall
+        ? { width: 220, height: 330 } // Medium/Large Size
+        : { width: 120, height: 180 }; // Default Small Size
+    });
   };
 
-  const userInitial = activeCall.otherUserName?.charAt(0).toUpperCase() || "U";
-
-  // --- RENDER: WAITING SCREEN ---
-  if (activeCall.isCaller && !isCallAccepted) {
-    return (
-      <div className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center">
-        <div className="absolute inset-0 overflow-hidden">
-          <video
-            ref={(el) => el && localStream && (el.srcObject = localStream)}
-            autoPlay
-            muted
-            playsInline
-            className="w-full h-full object-cover opacity-30 blur-xl"
-          />
-        </div>
-        <div className="relative z-10 flex flex-col items-center animate-pulse">
-          <div className="w-32 h-32 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-6xl font-bold text-white mb-6 shadow-2xl">
-            {userInitial}
-          </div>
-          <h2 className="text-2xl font-semibold text-white mb-2">
-            {activeCall.otherUserName}
-          </h2>
-          <p className="text-white/70 text-lg">Calling...</p>
-        </div>
-        <button
-          onClick={endCall}
-          className="relative z-10 mt-12 w-16 h-16 rounded-full bg-red-500 flex items-center justify-center shadow-xl hover:bg-red-600 transition-colors"
-        >
-          <IoCall className="text-3xl text-white rotate-[135deg]" />
-        </button>
-      </div>
-    );
-  }
-
-  // --- RENDER: CONNECTED SCREEN ---
   return (
     <>
-      {/* 1. Minimized View (PiP) */}
       <div
-        className={`fixed z-50 transition-opacity duration-300 ${isMinimized ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
+        className={`fixed z-[9999] transition-opacity duration-300 ${isMinimized ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
         style={{
           top: dragPosition.y,
           left: dragPosition.x,
           width: pipSize.width,
           height: pipSize.height,
+          touchAction: "none",
         }}
       >
         <div
           onMouseDown={handleDragStart}
           onTouchStart={handleDragStart}
-          className="relative w-full h-full rounded-2xl overflow-hidden shadow-2xl border-2 border-white/20 bg-slate-900 flex flex-col cursor-grab active:cursor-grabbing"
+          onClick={() => !hasDragged.current && setIsMinimized(false)}
+          className="relative w-full h-full rounded-2xl overflow-hidden shadow-2xl ring-1 ring-white/20 bg-black cursor-move active:scale-95 transition-transform"
         >
           <video
             ref={remoteVideoMiniRef}
@@ -364,158 +511,149 @@ const VideoCallScreen = () => {
             playsInline
             className="absolute inset-0 w-full h-full object-cover"
           />
-
-          {!remoteStream && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/80 backdrop-blur-sm">
-              <div className="text-2xl font-bold text-white mb-2">
-                {userInitial}
-              </div>
-              <span className="text-xs text-white/70">Connecting...</span>
-            </div>
-          )}
-
-          <div className="absolute top-0 left-0 right-0 bg-gradient-to-b from-black/70 to-transparent p-2 z-10 pointer-events-none">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              <span className="text-[10px] text-white font-medium">
-                {formatDuration(callDuration)}
-              </span>
-            </div>
+          <div className="absolute inset-0 bg-gradient-to-b from-black/50 to-transparent pointer-events-none" />
+          <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 backdrop-blur px-2 py-1 rounded-full border border-white/10 z-10">
+            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+            <span className="text-[10px] text-white font-mono">
+              {formatDuration(callDuration)}
+            </span>
           </div>
-
-          <div className="absolute bottom-2 right-2 w-[30%] aspect-[3/4] bg-slate-900 rounded-lg overflow-hidden border border-white/20 z-10 shadow-lg">
-            <video
-              ref={localVideoMiniRef}
-              autoPlay
-              muted
-              playsInline
-              className={`w-full h-full object-cover ${isVideoOff ? "opacity-0" : "opacity-100"}`}
-            />
-          </div>
-
-          <div className="absolute bottom-2 left-2 flex gap-2 pointer-events-auto z-10">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsMinimized(false);
-              }}
-              className="w-8 h-8 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center transition-colors"
-            >
-              <IoExpand className="text-white text-sm" />
-            </button>
+          {/* Change this button to toggle size instead of full screen */}
+          <button
+            onClick={togglePipSize}
+            className="absolute top-2 right-2 p-1.5 bg-black/60 backdrop-blur rounded-full text-white z-20 active:bg-white/20"
+          >
+            {/* You might want to swap the icon to IoResize if it just resizes */}
+            <IoExpand size={14} />
+          </button>
+          <div className="absolute bottom-3 left-0 right-0 flex justify-center z-10">
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 endCall();
               }}
-              className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center transition-colors"
+              className="w-9 h-9 rounded-full bg-red-500 flex items-center justify-center text-white shadow-lg active:scale-90 transition-transform"
             >
-              <IoCall className="text-white text-xs rotate-[135deg]" />
+              <IoCall size={16} className="rotate-[135deg]" />
             </button>
-          </div>
-
-          <div
-            onMouseDown={handleResizeStart}
-            onTouchStart={handleResizeStart}
-            className="absolute bottom-0 right-0 w-6 h-6 z-20 cursor-nwse-resize flex items-end justify-end p-0.5 hover:bg-white/10 rounded-tl-lg group"
-          >
-            <IoResize className="text-white/50 group-hover:text-white text-xs rotate-90" />
           </div>
         </div>
       </div>
 
-      {/* 2. Full Screen View */}
       <div
-        className={`fixed inset-0 z-50 bg-black flex flex-col transition-all duration-300 ${isMinimized ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
-        onMouseMove={() => setShowControls(true)}
-        onTouchStart={() => setShowControls(true)}
+        className={`fixed inset-0 z-50 bg-slate-950 flex flex-col transition-all duration-300 ${isMinimized ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
+        onClick={() => setShowControls((p) => !p)}
       >
-        {/* CHANGED: Background color to black and object-fit to 'contain' to avoid cropping/chopping */}
-        <div className="relative flex-1 bg-black">
+        <div className="relative flex-1 w-full h-full flex items-center justify-center bg-black overflow-hidden">
           <video
             ref={remoteVideoFullRef}
             autoPlay
             playsInline
-            className="absolute inset-0 w-full h-full object-contain"
+            className="absolute inset-0 w-full h-full object-cover md:object-contain transition-all"
           />
-          {!remoteStream && (
-            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center">
-              <div className="w-24 h-24 rounded-full bg-slate-700 flex items-center justify-center text-4xl text-white font-bold mb-4">
-                {userInitial}
+
+          {(callStatus === "ringing" ||
+            (connectionStatus !== "connected" &&
+              connectionStatus !== "completed")) && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-900/80 backdrop-blur-xl">
+              <div className="relative w-32 h-32 rounded-full bg-slate-800 flex items-center justify-center mb-6 ring-4 ring-white/10 shadow-2xl">
+                <span className="text-4xl text-white font-bold">
+                  {activeCall.otherUserName?.charAt(0)}
+                </span>
+                <div className="absolute inset-0 rounded-full border-4 border-blue-500/50 animate-ping" />
               </div>
-              <p className="text-white/50">Connecting video...</p>
+              <h2 className="text-2xl text-white font-bold mb-2">
+                {activeCall.otherUserName}
+              </h2>
+              <p className="text-blue-300 animate-pulse">
+                {connectionStatus === "failed"
+                  ? "Connection Failed"
+                  : "Connecting..."}
+              </p>
+              {connectionStatus === "failed" && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    pc.current?.restartIce();
+                  }}
+                  className="mt-6 px-6 py-2 bg-white/10 rounded-full text-white flex gap-2 items-center hover:bg-white/20"
+                >
+                  <IoRefresh /> Retry
+                </button>
+              )}
+            </div>
+          )}
+
+          {mediaError && (
+            <div className="absolute top-24 left-1/2 -translate-x-1/2 z-50 bg-red-500/90 backdrop-blur text-white px-6 py-3 rounded-full shadow-xl flex items-center gap-3">
+              <IoWarning className="text-2xl" /> <span>{mediaError}</span>
             </div>
           )}
 
           <div
-            className={`absolute top-0 left-0 right-0 p-4 sm:p-6 transition-opacity duration-300 z-20 ${showControls ? "opacity-100" : "opacity-0"}`}
+            className={`absolute top-0 left-0 right-0 p-4 md:p-8 bg-gradient-to-b from-black/80 to-transparent flex justify-between items-start z-30 transition-transform duration-300 ${showControls ? "translate-y-0" : "-translate-y-full"}`}
           >
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-semibold text-white drop-shadow-md">
-                  {activeCall.otherUserName}
-                </h3>
-                {isCallAccepted && (
-                  <div className="flex items-center gap-2 mt-1">
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                    <span className="text-sm text-white/80">
-                      {formatDuration(callDuration)}
-                    </span>
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => setIsMinimized(true)}
-                className="w-10 h-10 rounded-full bg-black/30 backdrop-blur-sm border border-white/10 flex items-center justify-center hover:bg-black/50 transition-all"
-              >
-                <IoChevronDown className="text-white text-xl" />
-              </button>
+            <div className="flex flex-col">
+              <h3 className="text-white font-bold text-lg drop-shadow">
+                {activeCall.otherUserName}
+              </h3>
+              <span className="text-white/70 text-sm font-mono">
+                {formatDuration(callDuration)}
+              </span>
             </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsMinimized(true);
+              }}
+              className="p-3 bg-white/10 backdrop-blur rounded-full text-white hover:bg-white/20 transition-all"
+            >
+              <IoChevronDown size={24} />
+            </button>
           </div>
 
           <div
-            className={`absolute bottom-32 right-4 w-32 h-44 bg-slate-900 rounded-xl overflow-hidden border-2 border-white/20 z-20 ${showControls ? "opacity-100" : "opacity-0"} transition-opacity duration-300 shadow-2xl`}
+            className={`absolute bottom-32 right-4 w-32 h-48 md:w-48 md:h-72 bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/20 z-30 transition-all duration-300 ${showControls ? "translate-y-0 opacity-100" : "translate-y-10 opacity-0"}`}
           >
             <video
               ref={localVideoPipRef}
               autoPlay
               muted
               playsInline
-              className={`w-full h-full object-cover ${isVideoOff ? "opacity-0" : "opacity-100"}`}
+              className={`w-full h-full object-cover transform scale-x-[-1] ${isVideoOff ? "opacity-0" : "opacity-100"}`}
             />
             {isVideoOff && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900">
-                <IoVideocamOff className="text-2xl text-slate-400" />
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-800 text-white/50">
+                <IoPerson size={40} />
               </div>
             )}
           </div>
         </div>
 
-        <div
-          className={`transition-transform duration-300 z-20 ${showControls ? "translate-y-0" : "translate-y-full"} bg-black/80 backdrop-blur-md`}
+        <div 
+          onClick={(e) => e.stopPropagation()}
+          className={`absolute bottom-6 left-0 right-0 flex justify-center z-40 transition-transform duration-300 ${showControls ? "translate-y-0" : "translate-y-32"}`}
         >
-          <div className="px-4 py-8 flex justify-center gap-6">
-            <button
-              onClick={() => setIsMuted(!isMuted)}
-              className={`w-14 h-14 rounded-full flex items-center justify-center ${isMuted ? "bg-red-500/20 text-red-500" : "bg-white/10 text-white"}`}
+          <div className="flex items-center gap-3 md:gap-5 px-5 py-3 md:px-6 bg-slate-900/80 backdrop-blur-xl rounded-full border border-white/10 shadow-2xl">
+             
+             <button
+              onClick={toggleAudio}
+              className={`p-3 rounded-full transition-all duration-200 ${isMuted ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20"}`}
             >
-              {isMuted ? <IoMicOff size={24} /> : <IoMic size={24} />}
+              {isMuted ? <IoMicOff size={22} /> : <IoMic size={22} />}
             </button>
-            <button
-              onClick={() => setIsVideoOff(!isVideoOff)}
-              className={`w-14 h-14 rounded-full flex items-center justify-center ${isVideoOff ? "bg-red-500/20 text-red-500" : "bg-white/10 text-white"}`}
-            >
-              {isVideoOff ? (
-                <IoVideocamOff size={24} />
-              ) : (
-                <IoVideocam size={24} />
-              )}
-            </button>
+            
             <button
               onClick={endCall}
-              className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center shadow-lg hover:bg-red-600 scale-105"
+              className="p-4 rounded-full bg-red-500 text-white shadow-lg shadow-red-500/30 hover:bg-red-600 active:scale-95 transition-all mx-1"
             >
-              <IoCall size={32} className="text-white rotate-[135deg]" />
+              <IoCall size={28} className="rotate-[135deg]" />
+            </button>
+            <button
+              onClick={toggleVideo}
+              className={`p-3 rounded-full transition-all duration-200 ${isVideoOff ? "bg-white text-slate-900" : "bg-white/10 text-white hover:bg-white/20"}`}
+            >
+               {isVideoOff ? <IoVideocamOff size={22} /> : <IoVideocam size={22} />}
             </button>
           </div>
         </div>
