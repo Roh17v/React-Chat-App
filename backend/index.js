@@ -78,19 +78,17 @@ app.use((err, req, res, next) => {
   next();
 });
 
+const PORT = Number(process.env.PORT) || 8000;
+
 connectDB()
   .then(() => {
-    const server = app.listen(process.env.PORT || 5000, () => {
-      console.log(`Listening on PORT: ${process.env.PORT}...`);
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Server listening on port ${PORT}`);
     });
 
-    try {
-      setupSocket(server);
-    } catch (error) {
-      console.log("Failed to set up WebSocket: ", error);
-    }
+    setupSocket(server);
   })
   .catch((error) => {
-    console.log("Failed to Connect to MongoDB...", error);
+    console.error("Failed to connect to MongoDB:", error);
     process.exit(1);
   });
