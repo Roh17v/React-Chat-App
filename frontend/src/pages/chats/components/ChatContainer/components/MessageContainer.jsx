@@ -12,9 +12,10 @@ import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
+import { cn } from "@/lib/utils";
 
 const MessageContainer = () => {
-  const scrollRef = useRef();
+  const scrollRef = useRef(null);
   const {
     selectedChatType,
     selectedChatData,
@@ -38,8 +39,6 @@ const MessageContainer = () => {
   const getMessages = async (pageNumber = 1) => {
     if (!selectedChatData?._id || loading || !hasMore) return;
 
-    const container = containerRef.current;
-
     setLoading(true);
     try {
       const response = await axios.get(
@@ -55,7 +54,7 @@ const MessageContainer = () => {
 
       if (containerRef.current && pageNumber === 1) {
         requestAnimationFrame(() => {
-          containerRef.current.scrollTo({
+          containerRef.current?.scrollTo({
             top: containerRef.current.scrollHeight,
             behavior: "smooth",
           });
@@ -87,7 +86,7 @@ const MessageContainer = () => {
 
       if (containerRef.current && pageNumber === 1) {
         requestAnimationFrame(() => {
-          containerRef.current.scrollTo({
+          containerRef.current?.scrollTo({
             top: containerRef.current.scrollHeight,
             behavior: "smooth",
           });
@@ -103,51 +102,23 @@ const MessageContainer = () => {
   };
 
   useEffect(() => {
-    if (selectedChatData._id) {
+    if (selectedChatData?._id) {
       if (selectedChatType === "contact") {
         setPage(1);
         setHasMore(true);
         setSelectedChatMessages([], true);
-        getMessages(1, true);
+        getMessages(1);
       }
       if (selectedChatType === "channel") {
         setPage(1);
         setHasMore(true);
         setSelectedChatMessages([], true);
-        getChannelMessages(1, true);
+        getChannelMessages(1);
       }
     }
   }, [selectedChatData, selectedChatType, setSelectedChatMessages]);
 
   const messagesRef = useRef(new Map());
-
-  const renderMessages = () => {
-    let lastDate = null;
-    return selectedChatMessages.map((message, index) => {
-      const messageDate = moment(message.createdAt).format("YYYY-MM-DD");
-      const showDate = messageDate !== lastDate;
-      lastDate = messageDate;
-
-      if (!messagesRef.current.has(message._id)) {
-        messagesRef.current.set(message._id, message);
-      }
-
-      return (
-        <div
-          key={message._id}
-          ref={index === selectedChatMessages.length - 1 ? newMessageRef : null}
-        >
-          {showDate && (
-            <div className="text-center text-gray-500 my-2">
-              {moment(message.createdAt).format("LL")}
-            </div>
-          )}
-          {selectedChatType === "contact" && renderDMMessages(message)}
-          {selectedChatType === "channel" && renderChannelMessage(message)}
-        </div>
-      );
-    });
-  };
 
   const checkIfImage = (filePath) => {
     const imageRegex =
@@ -163,7 +134,7 @@ const MessageContainer = () => {
         responseType: "blob",
         onDownloadProgress: (data) =>
           setFileDownloadingProgress(
-            Math.round((100 * data.loaded) / data.total)
+            Math.round((100 * data.loaded) / (data.total || 1))
           ),
       });
 
@@ -172,7 +143,7 @@ const MessageContainer = () => {
       const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement("a");
       link.href = urlBlob;
-      link.setAttribute("download", url.split("/").pop());
+      link.setAttribute("download", url.split("/").pop() || "file");
 
       document.body.appendChild(link);
       link.click();
@@ -184,162 +155,261 @@ const MessageContainer = () => {
     }
   };
 
-  const renderDMMessages = (message) => {
+  // Message status indicator component - bright sky-blue for read visibility
+  const MessageStatus = ({ status, isSent }) => (
+    <span className="inline-flex items-center ml-1.5">
+      {status === "sent" && (
+        <MdDone className="w-4 h-4 text-white/70" />
+      )}
+      {status === "delivered" && (
+        <IoMdDoneAll className="w-4 h-4 text-white/70" />
+      )}
+      {status === "read" && (
+        <IoMdDoneAll className="w-4 h-4 text-sky-400" />
+      )}
+    </span>
+  );
+
+  const renderDMMessages = (message, index) => {
+    const isSent = message.sender === user.id;
+    const fileName = message.fileUrl?.split("/").pop() || "";
+    const isImage = message.messageType === "file" && checkIfImage(fileName);
+
     return (
       <div
-        id={message._id}
-        className={`${message.sender === user.id ? "text-right" : "text-left"}`}
+        className={cn(
+          "flex w-full animate-message-in",
+          isSent ? "justify-end" : "justify-start"
+        )}
       >
-        {message.messageType === "text" && (
-          <div
-            className={`relative ${
-              message.sender !== selectedChatData._id
-                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
-                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-3`}
-          >
-            {message.content}
-            {message.sender === user.id && (
-              <span className="absolute bottom-[2px] right-[2px] text-xs text-gray-400 flex items-center gap-[1px]">
-                {message.status === "sent" && <MdDone className="text-base" />}
-                {message.status === "delivered" && (
-                  <IoMdDoneAll className="text-base" />
-                )}
-                {message.status === "read" && (
-                  <IoMdDoneAll className="text-blue-500 text-base" />
-                )}
-              </span>
-            )}
-          </div>
-        )}
-
-        {message.messageType === "file" && (
-          <div
-            className={`relative ${
-              message.sender !== selectedChatData._id
-                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
-                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 w-full max-w-xs sm:max-w-sm md:max-w-md lg:max-w-lg break-words p-3`}
-          >
-            {checkIfImage(message.fileUrl.split("/").pop()) ? (
-              <div
-                className="cursor-pointer"
-                onClick={() => {
-                  setShowImage(true);
-                  setImageURL(message.fileUrl);
-                }}
-              >
-                <img
-                  src={`${message.fileUrl}`}
-                  className="w-full h-auto max-h-80 object-cover rounded"
-                />
+        <div
+          className={cn(
+            "message-bubble",
+            isSent ? "message-bubble-sent" : "message-bubble-received"
+          )}
+        >
+          {/* Text Message */}
+          {message.messageType === "text" && (
+            <div className="flex flex-col">
+              <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+                {message.content}
+              </p>
+              <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
+                <span className={cn(
+                  "text-[10px]",
+                  isSent ? "text-primary-foreground/70" : "text-foreground-muted"
+                )}>
+                  {moment(message.createdAt).format("LT")}
+                </span>
+                {isSent && <MessageStatus status={message.status} isSent={isSent} />}
               </div>
-            ) : (
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <span className="text-white text-2xl sm:text-3xl bg-black/20 rounded-full p-2 sm:p-3">
-                  <MdFolderZip />
-                </span>
-                <span className="truncate max-w-[70%]">
-                  {message.fileUrl.split("/").pop()}
-                </span>
-                <span className="bg-black/20 p-2 sm:p-3 text-xl sm:text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
-                  <IoArrowDownCircle
-                    onClick={() => downloadFile(message.fileUrl)}
+            </div>
+          )}
+
+          {/* File Message */}
+          {message.messageType === "file" && (
+            <div className="flex flex-col">
+              {isImage ? (
+                <div
+                  className="cursor-pointer overflow-hidden rounded-xl"
+                  onClick={() => {
+                    setShowImage(true);
+                    setImageURL(message.fileUrl);
+                  }}
+                >
+                  <img
+                    src={message.fileUrl}
+                    alt="Shared image"
+                    className="max-w-[240px] sm:max-w-[280px] h-auto object-cover transition-transform duration-200 hover:scale-105"
                   />
+                </div>
+              ) : (
+                <div className={cn(
+                  "flex items-center gap-3 p-3 rounded-xl",
+                  isSent ? "bg-primary-hover" : "bg-background-tertiary"
+                )}>
+                  <div className={cn(
+                    "flex items-center justify-center w-10 h-10 rounded-lg",
+                    isSent ? "bg-primary-foreground/20" : "bg-primary/20"
+                  )}>
+                    <MdFolderZip className={cn(
+                      "w-5 h-5",
+                      isSent ? "text-primary-foreground" : "text-primary"
+                    )} />
+                  </div>
+                  <span className={cn(
+                    "text-sm truncate max-w-[150px] sm:max-w-[200px]",
+                    isSent ? "text-primary-foreground" : "text-foreground"
+                  )}>
+                    {fileName}
+                  </span>
+                  <button
+                    onClick={() => downloadFile(message.fileUrl)}
+                    className={cn(
+                      "touch-target rounded-full transition-colors",
+                      isSent 
+                        ? "hover:bg-primary-foreground/20" 
+                        : "hover:bg-accent"
+                    )}
+                  >
+                    <IoArrowDownCircle className={cn(
+                      "w-6 h-6",
+                      isSent ? "text-primary-foreground" : "text-primary"
+                    )} />
+                  </button>
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-1 mt-1.5">
+                <span className={cn(
+                  "text-[10px]",
+                  isSent ? "text-primary-foreground/70" : "text-foreground-muted"
+                )}>
+                  {moment(message.createdAt).format("LT")}
                 </span>
+                {isSent && <MessageStatus status={message.status} isSent={isSent} />}
               </div>
-            )}
-            {message.sender === user.id && (
-              <span className="absolute bottom-[2px] right-[2px] text-xs text-gray-400 flex items-center gap-[1px]">
-                {message.status === "sent" && <MdDone className="text-base" />}
-                {message.status === "delivered" && (
-                  <IoMdDoneAll className="text-base" />
-                )}
-                {message.status === "read" && (
-                  <IoMdDoneAll className="text-blue-500 text-base" />
-                )}
-              </span>
-            )}
-          </div>
-        )}
-
-        <div className="text-xs text-gray-500">
-          {moment(message.createdAt).format("LT")}
+            </div>
+          )}
         </div>
       </div>
     );
   };
 
-  const renderChannelMessage = (message) => {
+  const renderChannelMessage = (message, index) => {
+    const isSent = message.sender?._id === user.id;
+    const fileName = message.fileUrl?.split("/").pop() || "";
+    const isImage = message.messageType === "file" && checkIfImage(fileName);
+
     return (
       <div
-        className={`mt-5 ${
-          message.sender._id === user.id ? "text-right" : "text-left"
-        }`}
+        className={cn(
+          "flex w-full animate-message-in",
+          isSent ? "justify-end" : "justify-start"
+        )}
       >
-        {message.messageType === "text" && (
-          <div
-            className={`${
-              message.sender._id === user.id
-                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
-                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
-          >
-            {message.sender && (
-              <p className="text-xs text-gray-400 font-medium mb-1 text-left">
-                {message.sender?.firstName} {message.sender?.lastName}
+        <div
+          className={cn(
+            "message-bubble",
+            isSent ? "message-bubble-sent" : "message-bubble-received"
+          )}
+        >
+          {/* Sender name for channel messages (received only) */}
+          {!isSent && message.sender && (
+            <p className="text-xs font-medium text-primary mb-1">
+              {message.sender?.firstName} {message.sender?.lastName}
+            </p>
+          )}
+
+          {/* Text Message */}
+          {message.messageType === "text" && (
+            <div className="flex flex-col">
+              <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+                {message.content}
               </p>
-            )}
-            {message.content}
-          </div>
-        )}
-        {message.messageType === "file" && (
-          <div
-            className={`${
-              message.sender._id === user.id
-                ? "bg-[#8427ff]/5 text-[#A78BFA]/90 border-[#A78BFA]/50"
-                : "bg-[#2a2b33]/5 text-[#ffffff]/90 border-[#ffffff]/20"
-            } border inline-block rounded my-1 max-w-[50%] break-words p-2`}
-          >
-            {message.sender && (
-              <p className="text-xs text-gray-400 font-medium mb-1 text-left">
-                {message.sender?.firstName} {message.sender?.lastName}
-              </p>
-            )}
-            {checkIfImage(message.fileUrl.split("/").pop()) ? (
-              <div
-                className="cursor-pointer"
-                onClick={() => {
-                  setShowImage(true);
-                  setImageURL(message.fileUrl);
-                }}
-              >
-                <img
-                  src={`${message.fileUrl}`}
-                  height={300}
-                  width={300}
-                />
-              </div>
-            ) : (
-              <div className="flex items-center justify-center gap-4">
-                <span className="text-white text-3xl bg-black/20 rounded-full p-3">
-                  <MdFolderZip />
+              <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
+                <span className={cn(
+                  "text-[10px]",
+                  isSent ? "text-primary-foreground/70" : "text-foreground-muted"
+                )}>
+                  {moment(message.createdAt).format("LT")}
                 </span>
-                <span>{message.fileUrl.split("/").pop()}</span>
-                <span className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
-                  <IoArrowDownCircle
-                    onClick={() => downloadFile(message.fileUrl)}
+              </div>
+            </div>
+          )}
+
+          {/* File Message */}
+          {message.messageType === "file" && (
+            <div className="flex flex-col">
+              {isImage ? (
+                <div
+                  className="cursor-pointer overflow-hidden rounded-xl"
+                  onClick={() => {
+                    setShowImage(true);
+                    setImageURL(message.fileUrl);
+                  }}
+                >
+                  <img
+                    src={message.fileUrl}
+                    alt="Shared image"
+                    className="max-w-[240px] sm:max-w-[280px] h-auto object-cover transition-transform duration-200 hover:scale-105"
                   />
+                </div>
+              ) : (
+                <div className={cn(
+                  "flex items-center gap-3 p-3 rounded-xl",
+                  isSent ? "bg-primary-hover" : "bg-background-tertiary"
+                )}>
+                  <div className={cn(
+                    "flex items-center justify-center w-10 h-10 rounded-lg",
+                    isSent ? "bg-primary-foreground/20" : "bg-primary/20"
+                  )}>
+                    <MdFolderZip className={cn(
+                      "w-5 h-5",
+                      isSent ? "text-primary-foreground" : "text-primary"
+                    )} />
+                  </div>
+                  <span className={cn(
+                    "text-sm truncate max-w-[150px] sm:max-w-[200px]",
+                    isSent ? "text-primary-foreground" : "text-foreground"
+                  )}>
+                    {fileName}
+                  </span>
+                  <button
+                    onClick={() => downloadFile(message.fileUrl)}
+                    className={cn(
+                      "touch-target rounded-full transition-colors",
+                      isSent 
+                        ? "hover:bg-primary-foreground/20" 
+                        : "hover:bg-accent"
+                    )}
+                  >
+                    <IoArrowDownCircle className={cn(
+                      "w-6 h-6",
+                      isSent ? "text-primary-foreground" : "text-primary"
+                    )} />
+                  </button>
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-1 mt-1.5">
+                <span className={cn(
+                  "text-[10px]",
+                  isSent ? "text-primary-foreground/70" : "text-foreground-muted"
+                )}>
+                  {moment(message.createdAt).format("LT")}
                 </span>
               </div>
-            )}
-          </div>
-        )}
-        <div className="text-xs text-gray-500 ">
-          {moment(message.createdAt).format("LT")}
+            </div>
+          )}
         </div>
       </div>
     );
+  };
+
+  const renderMessages = () => {
+    let lastDate = null;
+    return selectedChatMessages.map((message, index) => {
+      const messageDate = moment(message.createdAt).format("YYYY-MM-DD");
+      const showDate = messageDate !== lastDate;
+      lastDate = messageDate;
+
+      if (!messagesRef.current.has(message._id)) {
+        messagesRef.current.set(message._id, message);
+      }
+
+      return (
+        <div key={message._id} className="flex flex-col gap-2">
+          {showDate && (
+            <div className="flex justify-center my-4">
+              <span className="date-separator">
+                {moment(message.createdAt).format("LL")}
+              </span>
+            </div>
+          )}
+          {selectedChatType === "contact" && renderDMMessages(message, index)}
+          {selectedChatType === "channel" && renderChannelMessage(message, index)}
+        </div>
+      );
+    });
   };
 
   const handleScroll = () => {
@@ -351,15 +421,19 @@ const MessageContainer = () => {
       if (selectedChatType === "contact") {
         getMessages(page + 1).then(() => {
           requestAnimationFrame(() => {
-            containerRef.current.scrollTop =
-              containerRef.current.scrollHeight - scrollYBeforeFetch;
+            if (containerRef.current) {
+              containerRef.current.scrollTop =
+                containerRef.current.scrollHeight - scrollYBeforeFetch;
+            }
           });
         });
       } else if (selectedChatType === "channel") {
         getChannelMessages(page + 1).then(() => {
           requestAnimationFrame(() => {
-            containerRef.current.scrollTop =
-              containerRef.current.scrollHeight - scrollYBeforeFetch;
+            if (containerRef.current) {
+              containerRef.current.scrollTop =
+                containerRef.current.scrollHeight - scrollYBeforeFetch;
+            }
           });
         });
       }
@@ -387,41 +461,65 @@ const MessageContainer = () => {
     if (container) {
       container.addEventListener("scroll", handleScroll);
     }
-    return () => container.removeEventListener("scroll", handleScroll);
+    return () => {
+      if (container) {
+        container.removeEventListener("scroll", handleScroll);
+      }
+    };
   }, [handleScroll]);
 
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-y-auto h-[calc(100vh-10rem)] scrollbar-hidden p-4 px-8 md:w-[65vw] lg:w-[70vw] xl:w-[80vw] w-full"
+      className="flex-1 overflow-y-auto overflow-x-hidden bg-background px-3 py-4 sm:px-4 md:px-6"
     >
+      {/* Loading indicator */}
       {loading && (
-        <div className="text-center py-2">
-          <span className="animate-spin inline-block w-6 h-6 border-4 border-purple-500 border-t-transparent rounded-full"></span>
+        <div className="flex justify-center py-4">
+          <div className="flex gap-1">
+            <div className="typing-dot" />
+            <div className="typing-dot" />
+            <div className="typing-dot" />
+          </div>
         </div>
       )}
-      {renderMessages()}
-      <div ref={scrollRef}></div>
-      {showImage && (
-        <div className="fixed z-[1000] top-0 left-0 h-[100vh] w-[100vw] flex items-center justify-center backdrop-blur-lg flex-col">
-          <div className="max-w-[90vw] max-h-[90vh] overflow-hidden flex items-center justify-center">
+
+      {/* Messages */}
+      <div className="flex flex-col gap-1">
+        {renderMessages()}
+      </div>
+
+      {/* Scroll anchor */}
+      <div ref={newMessageRef} />
+
+      {/* Image Preview Modal */}
+      {showImage && imageURL && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm animate-fade-in">
+          <div className="relative max-w-[90vw] max-h-[85vh]">
             <img
-              src={`${imageURL}`}
-              className="max-w-full max-h-full object-contain rounded"
+              src={imageURL}
+              alt="Preview"
+              className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-chat-lg"
             />
           </div>
-          <div className="flex gap-5 fixed top-0 mt-5">
-            <button className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
-              <IoArrowDownCircle onClick={() => downloadFile(imageURL)} />
+
+          {/* Modal Actions */}
+          <div className="fixed top-4 right-4 flex items-center gap-2">
+            <button
+              onClick={() => downloadFile(imageURL)}
+              className="touch-target rounded-full bg-background-secondary hover:bg-accent transition-colors"
+            >
+              <IoArrowDownCircle className="w-7 h-7 text-foreground" />
             </button>
 
-            <button className="bg-black/20 p-3 text-2xl rounded-full hover:bg-black/50 cursor-pointer transition-all duration-300">
-              <IoCloseSharp
-                onClick={() => {
-                  setImageURL(null);
-                  setShowImage(false);
-                }}
-              />
+            <button
+              onClick={() => {
+                setImageURL(null);
+                setShowImage(false);
+              }}
+              className="touch-target rounded-full bg-background-secondary hover:bg-destructive/20 transition-colors"
+            >
+              <IoCloseSharp className="w-7 h-7 text-foreground" />
             </button>
           </div>
         </div>

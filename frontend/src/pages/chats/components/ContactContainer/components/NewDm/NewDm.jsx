@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   Tooltip,
   TooltipContent,
@@ -6,24 +6,20 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { FaPlus } from "react-icons/fa6";
-import { useState } from "react";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import Lottie from "react-lottie";
 import { animationDefaultOptions } from "@/lib/utils";
 import axios from "axios";
-import { USER_ROUTES } from "@/utils/constants";
-import { toast } from "sonner";
+import { USER_ROUTES, HOST } from "@/utils/constants";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
-import { HOST } from "@/utils/constants";
 import useAppStore from "@/store";
 
 const NewDm = () => {
@@ -43,9 +39,7 @@ const NewDm = () => {
         `${HOST}${USER_ROUTES}/search?q=${searchTerm}`,
         { withCredentials: true }
       );
-
       setSearchedContacts(response.data);
-
     } catch (error) {
       console.log(error);
     }
@@ -62,14 +56,16 @@ const NewDm = () => {
     <>
       <TooltipProvider>
         <Tooltip>
-          <TooltipTrigger>
-            <FaPlus
-              className="text-neutral-400 font-light text-opacity-90 text-start hover:text-neutral-100 cursor-pointer duration-300 transition-all"
+          <TooltipTrigger asChild>
+            <button
               onClick={() => setOpenNewContactModel(true)}
-            />
+              className="touch-target flex items-center justify-center rounded-full text-foreground-secondary hover:text-primary hover:bg-accent transition-all duration-200 active:scale-95"
+            >
+              <FaPlus className="w-4 h-4" />
+            </button>
           </TooltipTrigger>
-          <TooltipContent className="bg-[#1c1b1e] border-none mb-2 p-3 text-white">
-            Select New Contact
+          <TooltipContent className="bg-popover text-popover-foreground border-border">
+            New Message
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -82,84 +78,81 @@ const NewDm = () => {
           setSearchTerm("");
         }}
       >
-        <DialogContent className="bg-[#181920] border-none w-[400px] h-[400px] text-white flex flex-col">
+        <DialogContent className="bg-background-secondary border-border text-foreground w-[90vw] max-w-md rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center justify-center">
-              Please Select a Contact
+            <DialogTitle className="text-foreground text-lg font-semibold">
+              New Message
             </DialogTitle>
+            <DialogDescription className="text-foreground-muted text-sm">
+              Search for a contact to start a conversation
+            </DialogDescription>
           </DialogHeader>
+
           <Input
-            placeholder="Search Contacts"
-            className="rounded-lg p-6 bg-[#2c2a3b] border-none"
+            placeholder="Search by name or email..."
+            className="bg-background-tertiary border-border text-foreground placeholder:text-foreground-muted focus:ring-primary rounded-xl h-11"
+            value={searchTerm}
             onChange={(e) => {
               setSearchTerm(e.target.value);
               handleSearch(e.target.value);
             }}
           />
-          <ScrollArea className="h-[250px] flex flex-col gap-3 overflow-y-auto">
+
+          <ScrollArea className="h-[300px] mt-2">
             {searchedContacts.length > 0 ? (
-              searchedContacts.map((contact, index) => (
-                <div
-                  key={contact.id || index}
-                  onClick={() => selectNewContact(contact)}
-                  className="flex gap-3 items-center cursor-pointer p-2 rounded-md hover:bg-[#3a3b42] transition"
-                >
-                  <Avatar
-                    className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500 flex items-center justify-center"
-                    style={{
-                      backgroundColor: `${contact.color?.bgColor || "#ccc"}80`,
-                      color: `${contact.color?.textColor || "#fff"}`,
-                    }}
+              <div className="space-y-1">
+                {searchedContacts.map((contact) => (
+                  <button
+                    key={contact._id}
+                    onClick={() => selectNewContact(contact)}
+                    className="w-full contact-item"
                   >
-                    {contact.image ? (
-                      <AvatarImage
-                        src={`${HOST}${contact.image}`}
-                        alt="profile"
-                        className="object-cover w-full h-full"
-                      />
-                    ) : (
-                      <span className="uppercase text-lg sm:text-xl font-semibold">
-                        {contact.firstName
-                          ? contact.firstName.charAt(0)
-                          : contact.email.charAt(0)}
-                      </span>
-                    )}
-                  </Avatar>
-                  <div className="flex flex-col">
-                    <span className="text-white font-medium">
-                      {contact.firstName && contact.lastName
-                        ? `${contact.firstName} ${contact.lastName}`
-                        : contact.email}
-                    </span>
-                    <span className="text-gray-400 text-xs">
-                      {contact.email}
-                    </span>
-                  </div>
-                </div>
-              ))
+                    <div className="relative">
+                      <Avatar className="h-11 w-11 ring-2 ring-border">
+                        {contact.image ? (
+                          <AvatarImage
+                            src={contact.image}
+                            alt="avatar"
+                            className="object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center rounded-full bg-primary text-primary-foreground font-semibold">
+                            {contact.firstName
+                              ? contact.firstName.charAt(0).toUpperCase()
+                              : contact.email.charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                      </Avatar>
+                    </div>
+
+                    <div className="flex-1 min-w-0 text-left">
+                      <p className="text-foreground font-medium text-sm truncate">
+                        {contact.firstName && contact.lastName
+                          ? `${contact.firstName} ${contact.lastName}`
+                          : contact.email}
+                      </p>
+                      <p className="text-foreground-muted text-xs truncate">
+                        {contact.email}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
             ) : (
-              <div className="flex-1  md:flex flex-col justify-center items-center duration-1000 transition-all mt-5 py-5">
+              <div className="flex flex-col items-center justify-center h-full py-8">
                 <Lottie
-                  isClickToPauseDisabled
-                  height={100}
-                  width={100}
+                  isClickToPauseDisabled={true}
+                  height={120}
+                  width={120}
                   options={animationDefaultOptions}
                 />
-                <div className="pb-5 text-opacity-80 text-white flex flex-col gap-5 items-center lg:text-2xl text-xl transition-all duration-300 text-center mt-5">
-                  <h3 className="poppins-medium">
-                    {searchTerm ? (
-                      <span>
-                        No <span className="text-purple-500">Contacts</span>{" "}
-                        Found!
-                      </span>
-                    ) : (
-                      <div>
-                        Hi<span className="text-purple-500">! </span>Search new
-                        <span className="text-purple-500"> Contact </span>.
-                      </div>
-                    )}
-                  </h3>
-                </div>
+                <p className="text-foreground-muted text-sm text-center mt-4">
+                  {searchTerm ? (
+                    <>No contacts found for "<span className="text-foreground">{searchTerm}</span>"</>
+                  ) : (
+                    <>Start typing to search for contacts</>
+                  )}
+                </p>
               </div>
             )}
           </ScrollArea>

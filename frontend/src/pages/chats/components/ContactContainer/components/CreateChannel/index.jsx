@@ -11,6 +11,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import axios from "axios";
@@ -76,14 +77,16 @@ const CreateChannel = () => {
     <>
       <TooltipProvider>
         <Tooltip>
-          <TooltipTrigger>
-            <FaPlus
-              className="text-neutral-400 font-light text-opacity-90 text-start hover:text-neutral-100 cursor-pointer duration-300 transition-all"
+          <TooltipTrigger asChild>
+            <button
               onClick={() => setNewChannelModal(true)}
-            />
+              className="touch-target flex items-center justify-center rounded-full text-foreground-secondary hover:text-primary hover:bg-accent transition-all duration-200 active:scale-95"
+            >
+              <FaPlus className="w-4 h-4" />
+            </button>
           </TooltipTrigger>
-          <TooltipContent className="bg-[#1c1b1e] border-none mb-2 p-3 text-white">
-            Create a Channel
+          <TooltipContent className="bg-popover text-popover-foreground border-border">
+            Create Channel
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -98,38 +101,50 @@ const CreateChannel = () => {
           }
         }}
       >
-        <DialogContent className="bg-[#181920] border-none w-[400px] h-[400px] text-white flex flex-col">
+        <DialogContent className="bg-background-secondary border-border text-foreground w-[90vw] max-w-md rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center justify-center">
-              Create a New Channel
+            <DialogTitle className="text-foreground text-lg font-semibold">
+              Create Channel
             </DialogTitle>
+            <DialogDescription className="text-foreground-muted text-sm">
+              Create a group channel with your contacts
+            </DialogDescription>
           </DialogHeader>
-          <div>
-            <Input
-              placeholder="Channel Name"
-              className="rounded-lg p-6 bg-[#2c2a3b] border-none"
-              onChange={(e) => setChannelName(e.target.value)}
-              value={channelName}
-            />
-          </div>
-          <div>
-            <MultipleSelector
-              defaultOptions={allContacts}
-              placeholder="Search Contacts"
-              value={selectedContacts}
-              onChange={setSelectedContacts}
-              emptyIndicator={
-                <p className="text-center text-lg leading-10 text-white bg-[#2c2e3b] h-full">
-                  No results found.
-                </p>
-              }
-              className="rounded-lg bg-[#2c2e3b] border-none py-2 text-white"
-            />
-          </div>
-          <div>
+
+          <div className="space-y-4 mt-2">
+            <div>
+              <label className="text-foreground-secondary text-xs font-medium uppercase tracking-wider mb-2 block">
+                Channel Name
+              </label>
+              <Input
+                placeholder="Enter channel name..."
+                className="bg-background-tertiary border-border text-foreground placeholder:text-foreground-muted focus:ring-primary rounded-xl h-11"
+                onChange={(e) => setChannelName(e.target.value)}
+                value={channelName}
+              />
+            </div>
+
+            <div>
+              <label className="text-foreground-secondary text-xs font-medium uppercase tracking-wider mb-2 block">
+                Add Members
+              </label>
+              <MultipleSelector
+                value={selectedContacts}
+                onChange={setSelectedContacts}
+                defaultOptions={allContacts}
+                placeholder="Select contacts..."
+                emptyIndicator={
+                  <p className="text-center text-foreground-muted py-4 text-sm">
+                    No contacts found
+                  </p>
+                }
+                className="rounded-xl bg-background-tertiary border-border text-foreground"
+              />
+            </div>
+
             <Button
-              className="w-full text-md py-6 bg-purple-700 hover:bg-purple-900 transition-all duration-300"
               onClick={createChannel}
+              className="w-full h-11 bg-primary hover:bg-primary-hover text-primary-foreground font-medium rounded-xl transition-all duration-200 active:scale-[0.98]"
             >
               Create Channel
             </Button>
