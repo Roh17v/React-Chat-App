@@ -27,87 +27,102 @@ const ContactList = ({ contacts, isChannel = false }) => {
     }
   };
 
+  const isSelected = (contact) =>
+    selectedChatData && selectedChatData._id === contact._id;
+
+  const isOnline = (contact) => onlineUsers?.includes(contact._id);
+
+  if (!contacts || contacts.length === 0) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <p className="text-foreground-muted text-sm">
+          {isChannel ? "No channels yet" : "No conversations yet"}
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="mt-5 space-y-2 relative">
+    <div className="space-y-1">
       {contacts.map((contact) => (
-        <div
+        <button
           key={contact._id}
           onClick={() => handleClick(contact)}
-          className={`flex items-center gap-4 p-3 rounded-lg transition-all duration-300 cursor-pointer ${
-            selectedChatData && selectedChatData._id === contact._id
-              ? "bg-[#8417ff] hover:bg-[#8417ff]"
-              : "hover:bg-[#2a2b33]"
-          }`}
+          className={`w-full contact-item ${isSelected(contact) ? "active bg-accent" : ""}`}
         >
-          {!isChannel && (
-            <Avatar
-              className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border-2 border-[#3f404a] flex items-center justify-center"
-              style={{
-                backgroundColor: `${contact.color?.bgColor || "#ccc"}80`,
-                color: `${contact.color?.textColor || "#fff"}`,
-              }}
-            >
+          {/* Avatar with status */}
+          <div className="relative flex-shrink-0">
+            <Avatar className="h-12 w-12 ring-2 ring-border">
               {contact.image ? (
                 <AvatarImage
-                  src={`${contact.image}`}
-                  alt="profile"
-                  className="object-cover w-full h-full"
+                  src={contact.image}
+                  alt="avatar"
+                  className="object-cover"
                 />
               ) : (
-                <span className="uppercase text-lg sm:text-xl font-semibold truncate">
-                  {contact.firstName
-                    ? contact.firstName.charAt(0)
-                    : contact.email.charAt(0)}
-                </span>
+                <div
+                  className={`flex h-full w-full items-center justify-center rounded-full font-semibold text-base ${
+                    isChannel ? "bg-primary text-primary-foreground" : ""
+                  }`}
+                  style={
+                    !isChannel
+                      ? {
+                          backgroundColor: `${contact.color?.bgColor || "var(--muted)"}80`,
+                          color:
+                            contact.color?.textColor || "var(--foreground)",
+                        }
+                      : {}
+                  }
+                >
+                  {isChannel
+                    ? contact.channelName?.charAt(0).toUpperCase() || "#"
+                    : contact.firstName
+                      ? contact.firstName.charAt(0).toUpperCase()
+                      : contact.email?.charAt(0).toUpperCase()}
+                </div>
               )}
             </Avatar>
-          )}
-
-          {isChannel && (
-            <Avatar
-              className="h-10 w-10 sm:h-12 sm:w-12 rounded-full overflow-hidden border border-gray-500 flex items-center justify-center"
-              style={{
-                backgroundColor: "#ffffff22",
-                color: `#e5e5e5`,
-              }}
-            >
-              {contact.image ? (
-                <AvatarImage
-                  src={`${contact.image}`}
-                  alt="profile"
-                  className="object-cover w-full h-full"
-                />
-              ) : (
-                <span className="uppercase text-lg sm:text-xl font-semibold">
-                  {contact.channelName && contact.channelName.charAt(0)}
-                </span>
-              )}
-            </Avatar>
-          )}
-
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-neutral-200">
-              {isChannel
-                ? contact.channelName
-                : `${contact.firstName} ${contact.lastName}`}
-            </p>
-            {!isChannel && (
-              <p className="text-xs text-neutral-400 truncate">
-                {contact.email}
-              </p>
+            {/* Online status indicator */}
+            {!isChannel && isOnline(contact) && (
+              <span className="status-dot online" />
             )}
           </div>
 
-          {!isChannel && contact?.unreadCount > 0 && (
-            <div className=" bg-purple-500 text-white text-xs font-semibold rounded-full w-6 h-6 flex items-center justify-center">
-              {contact.unreadCount}
+          {/* Contact info */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-foreground font-medium text-sm truncate">
+                {isChannel
+                  ? contact.channelName
+                  : `${contact.firstName || ""} ${contact.lastName || ""}`.trim() ||
+                    contact.email}
+              </span>
+              {/* Timestamp placeholder - you can add lastMessageTime here */}
+              {contact.lastMessageTime && (
+                <span className="text-foreground-muted text-xs flex-shrink-0">
+                  {contact.lastMessageTime}
+                </span>
+              )}
             </div>
-          )}
 
-          {!isChannel && onlineUsers.includes(contact._id) && (
-            <div className="w-2 h-2 bg-green-500 rounded-full flex-shrink-0"></div>
-          )}
-        </div>
+            <div className="flex items-center justify-between gap-2 mt-0.5">
+              {/* Last message preview */}
+              <p className="text-foreground-muted text-xs truncate">
+                {contact.lastMessage ||
+                  (isChannel
+                    ? `${contact.members?.length || 0} members`
+                    : contact.email)}
+              </p>
+
+              {/* Unread badge */}
+              {!isChannel && contact?.unreadCount > 0 && (
+                <span className="unread-badge flex-shrink-0">
+                  {contact.unreadCount > 99 ? "99+" : contact.unreadCount}
+                </span>
+              )}
+            </div>
+          </div>
+        </button>
       ))}
     </div>
   );

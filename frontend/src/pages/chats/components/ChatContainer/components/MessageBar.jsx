@@ -1,6 +1,5 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { CgAttachment } from "react-icons/cg";
-import { useState } from "react";
 import { RiEmojiStickerLine } from "react-icons/ri";
 import { IoSend } from "react-icons/io5";
 import EmojiPicker from "emoji-picker-react";
@@ -8,11 +7,13 @@ import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
 import axios from "axios";
 import { UPLOAD_FILE_ROUTE } from "@/utils/constants";
+import { cn } from "@/lib/utils";
 
 const MessageBar = () => {
   const [message, setMessage] = useState("");
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiRef = useRef();
+  const inputRef = useRef();
   const {
     selectedChatType,
     selectedChatData,
@@ -120,54 +121,103 @@ const MessageBar = () => {
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, [emojiPickerOpen]);
+
   return (
-    <div className="min-h-[60px] sm:h-[10vh] w-full bg-[#1c1d25] flex justify-center items-center px-4 sm:px-8 gap-2 sm:gap-6 mb-4 sm:mb-6">
-      <div className="flex-1 flex bg-[#2a2b33] rounded-md items-center gap-2 sm:gap-5 pr-3 sm:pr-5 flex-wrap">
+    <div className="p-2 sm:p-3 safe-area-bottom bg-background">
+      {/* Floating input bar - Telegram style */}
+      <div className="input-bar">
+        {/* Attachment button */}
+        <button
+          onClick={handleAttachmentClick}
+          className={cn(
+            "touch-target rounded-full",
+            "text-foreground-muted hover:text-foreground",
+            "hover:bg-accent active:scale-95",
+            "transition-all duration-200"
+          )}
+        >
+          <CgAttachment className="w-5 h-5 sm:w-6 sm:h-6" />
+        </button>
         <input
+          type="file"
+          ref={fileInputRef}
+          className="hidden"
+          onChange={handleAttachmentChange}
+        />
+
+        {/* Message input */}
+        <input
+          ref={inputRef}
           type="text"
+          className={cn(
+            "flex-1 px-3 py-2 sm:py-2.5",
+            "bg-transparent text-foreground",
+            "placeholder:text-foreground-muted",
+            "text-sm sm:text-base",
+            "focus:outline-none",
+            "min-w-0" // Prevent flex overflow
+          )}
+          placeholder="Type a message..."
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               handleSendMessage();
             }
           }}
-          className="flex-1 p-3 sm:p-5 bg-transparent rounded-md focus:border-none focus:outline-none"
-          placeholder="Enter message..."
-          onChange={(e) => setMessage(e.target.value)}
-          value={message}
         />
-        <button className="text-neutral-500 focus:border-none focus:outline-none focus:text-white duration-300 transition-all">
-          <CgAttachment onClick={handleAttachmentClick} />
-        </button>
-        <input
-          type="file"
-          className="hidden"
-          ref={fileInputRef}
-          onChange={handleAttachmentChange}
-        />
+
+        {/* Emoji picker */}
         <div className="relative" ref={emojiRef}>
           <button
-            className="text-neutral-500 focus:border-none focus:outline-none focus:text-white duration-300 transition-all"
             onClick={() => setEmojiPickerOpen((state) => !state)}
+            className={cn(
+              "touch-target rounded-full",
+              "text-foreground-muted hover:text-foreground",
+              "hover:bg-accent active:scale-95",
+              "transition-all duration-200",
+              emojiPickerOpen && "text-primary"
+            )}
           >
-            <RiEmojiStickerLine />
+            <RiEmojiStickerLine className="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
-          <div className="absolute bottom-14 sm:bottom-16 right-4 sm:right-8">
+
+          {/* Emoji picker dropdown */}
+          <div
+            className={cn(
+              "absolute bottom-14 right-0 z-50",
+              "animate-scale-in origin-bottom-right",
+              !emojiPickerOpen && "hidden"
+            )}
+          >
             <EmojiPicker
               theme="dark"
-              open={emojiPickerOpen}
               onEmojiClick={(emojiObject) => handleAddEmoji(emojiObject)}
               autoFocusSearch={false}
+              emojiStyle="native"
+              searchPlaceHolder="Search emoji..."
+              width={300}
+              height={400}
             />
           </div>
         </div>
+
+        {/* Send button */}
+        <button
+          onClick={handleSendMessage}
+          disabled={!message.trim()}
+          className={cn(
+            "touch-target rounded-full",
+            "transition-all duration-200",
+            message.trim()
+              ? "text-primary hover:text-primary-hover hover:bg-primary/10 active:scale-95"
+              : "text-foreground-muted cursor-not-allowed"
+          )}
+        >
+          <IoSend className="w-5 h-5 sm:w-6 sm:h-6" />
+        </button>
       </div>
-      <button
-        onClick={handleSendMessage}
-        className="bg-[#8417ff] rounded-md flex items-center justify-center focus:border-none p-3 sm:p-5 hover:bg-[#741bda] focus:bg-[#741bda] duration-300 transition-all"
-      >
-        <IoSend className="text-xl sm:text-2xl" />
-      </button>
     </div>
   );
 };
