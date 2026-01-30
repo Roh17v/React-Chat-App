@@ -24,3 +24,313 @@
     scrollbar-width: none;
   }
 }
+
+@layer base {
+  :root {
+    /* Base backgrounds - Deep charcoal palette */
+    --background: 240 10% 4%;           /* #0f0f14 - Deepest background */
+    --background-secondary: 240 8% 8%;   /* #1a1a24 - Secondary panels */
+    --background-tertiary: 240 6% 12%;   /* #1f1f2a - Elevated surfaces */
+    
+    /* Foreground - Text hierarchy */
+    --foreground: 0 0% 98%;              /* #fafafa - Primary text */
+    --foreground-secondary: 240 5% 65%;  /* #a0a0a8 - Secondary text */
+    --foreground-muted: 240 5% 45%;      /* #6b6b75 - Muted/timestamps */
+
+    /* Card and popover */
+    --card: 240 8% 8%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 8% 10%;
+    --popover-foreground: 0 0% 98%;
+
+    /* Primary - Teal accent */
+    --primary: 165 43% 22%;            
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 165 43% 18%;      /* Darker on hover */
+    --primary-glow: 160 84% 39% / 0.2;   /* Glow effect */
+
+    /* Secondary */
+    --secondary: 240 6% 15%;             /* #252530 */
+    --secondary-foreground: 0 0% 98%;
+
+    /* Muted */
+    --muted: 240 6% 15%;
+    --muted-foreground: 240 5% 55%;
+
+    /* Accent - For highlights and interactions */
+    --accent: 240 6% 18%;                /* #2a2a35 - Hover states */
+    --accent-foreground: 0 0% 98%;
+
+    /* Destructive */
+    --destructive: 0 72% 51%;            /* Red for errors */
+    --destructive-foreground: 0 0% 100%;
+
+    /* Borders - Subtle separators */
+    --border: 240 6% 18%;                /* #2a2a35 */
+    --border-subtle: 240 6% 14%;         /* Even more subtle */
+    --input: 240 6% 18%;
+    --ring: 160 84% 39%;                 /* Focus rings use primary */
+
+    --radius: 0.75rem;                   /* Slightly larger radius */
+
+    /* Chat-specific tokens */
+    --chat-bubble-sent: 165 43% 22%;
+    --chat-bubble-sent-foreground: 0 0% 95%; 
+    --chat-bubble-received: 240 6% 15%;  /* Dark gray for received */
+    --chat-bubble-received-foreground: 0 0% 98%;
+    
+    /* Online status */
+    --status-online: 142 76% 46%;        /* Green dot */
+    --status-offline: 240 5% 45%;        /* Gray dot */
+    
+    /* Message status */
+    --message-sent: 240 5% 55%;          /* Single check */
+    --message-delivered: 240 5% 55%;     /* Double check */
+    --message-read: 195 100% 50%;
+
+    /* Sidebar */
+    --sidebar-background: 240 8% 6%;     /* Slightly lighter than main bg */
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 160 84% 39%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 6% 12%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 240 6% 14%;
+    --sidebar-ring: 160 84% 39%;
+    
+    /* Unread badge */
+    --badge-background: 160 84% 39%;
+    --badge-foreground: 0 0% 100%;
+
+    /* Shadows for depth */
+    --shadow-sm: 0 1px 2px hsl(0 0% 0% / 0.3);
+    --shadow-md: 0 4px 12px hsl(0 0% 0% / 0.4);
+    --shadow-lg: 0 8px 24px hsl(0 0% 0% / 0.5);
+    --shadow-glow: 0 0 20px hsl(160 84% 39% / 0.15);
+
+    /* Transition timings */
+    --transition-fast: 150ms;
+    --transition-base: 200ms;
+    --transition-slow: 300ms;
+
+    /* Spacing scale (4px base) */
+    --space-1: 0.25rem;   /* 4px */
+    --space-2: 0.5rem;    /* 8px */
+    --space-3: 0.75rem;   /* 12px */
+    --space-4: 1rem;      /* 16px */
+    --space-5: 1.25rem;   /* 20px */
+    --space-6: 1.5rem;    /* 24px */
+    --space-8: 2rem;      /* 32px */
+    --space-10: 2.5rem;   /* 40px */
+    --space-12: 3rem;     /* 48px */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Custom scrollbar for dark theme */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+}
+
+@layer components {
+  /* Glass morphism effect */
+  .glass {
+    background: hsl(var(--background-secondary) / 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  /* Message bubble base styles */
+  .message-bubble {
+    @apply relative px-3 py-2 rounded-2xl max-w-[85%] md:max-w-[70%];
+    box-shadow: var(--shadow-sm);
+  }
+
+  .message-bubble-sent {
+    @apply bg-primary text-primary-foreground rounded-br-md;
+  }
+
+  .message-bubble-received {
+    background: hsl(var(--chat-bubble-received));
+    color: hsl(var(--chat-bubble-received-foreground));
+    @apply rounded-bl-md;
+  }
+
+  /* Contact item hover effect */
+  .contact-item {
+    @apply relative flex items-center gap-3 p-3 rounded-xl cursor-pointer;
+    @apply transition-all duration-200 ease-out;
+    @apply hover:bg-accent active:scale-[0.98];
+  }
+
+  .contact-item.active {
+    @apply bg-accent;
+  }
+
+  /* Online status indicator */
+  .status-dot {
+    @apply absolute bottom-0 right-0 w-3 h-3 rounded-full border-2;
+    border-color: hsl(var(--background-secondary));
+  }
+
+  .status-dot.online {
+    background: hsl(var(--status-online));
+  }
+
+  .status-dot.offline {
+    background: hsl(var(--status-offline));
+  }
+
+  /* Unread badge */
+  .unread-badge {
+    @apply flex items-center justify-center min-w-5 h-5 px-1.5 text-xs font-semibold rounded-full;
+    background: hsl(var(--badge-background));
+    color: hsl(var(--badge-foreground));
+  }
+
+  /* Floating input bar */
+  .input-bar {
+    @apply flex items-end gap-2 p-2 mx-2 mb-2 rounded-2xl;
+    background: hsl(var(--background-secondary));
+    border: 1px solid hsl(var(--border-subtle));
+    box-shadow: var(--shadow-md);
+  }
+
+  /* Date separator pill */
+  .date-separator {
+    @apply inline-flex px-3 py-1 text-xs font-medium rounded-full;
+    background: hsl(var(--background-tertiary));
+    color: hsl(var(--foreground-muted));
+  }
+
+  /* Touch-friendly button base */
+  .touch-target {
+    @apply min-w-[44px] min-h-[44px] flex items-center justify-center;
+  }
+}
+
+@layer utilities {
+  /* Safe area padding for notched devices */
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top, 0);
+  }
+
+  /* Animation utilities */
+  .animate-slide-up {
+    animation: slideUp var(--transition-base) ease-out;
+  }
+
+  .animate-slide-in-left {
+    animation: slideInLeft var(--transition-slow) ease-out;
+  }
+
+  .animate-slide-in-right {
+    animation: slideInRight var(--transition-slow) ease-out;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn var(--transition-base) ease-out;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn var(--transition-fast) ease-out;
+  }
+
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes slideInLeft {
+    from {
+      opacity: 0;
+      transform: translateX(-100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes slideInRight {
+    from {
+      opacity: 0;
+      transform: translateX(100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes scaleIn {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  /* Typing indicator dots animation */
+  .typing-dot {
+    @apply w-2 h-2 rounded-full bg-foreground-muted;
+    animation: typingBounce 1.4s infinite ease-in-out both;
+  }
+
+  .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+  .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+  .typing-dot:nth-child(3) { animation-delay: 0; }
+
+  @keyframes typingBounce {
+    0%, 80%, 100% {
+      transform: scale(0.6);
+      opacity: 0.4;
+    }
+    40% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+}
