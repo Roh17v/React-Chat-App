@@ -21,9 +21,9 @@ dotenv.config();
 //middlewares
 const allowedOrigins = [
   process.env.FRONTEND_URL,
-  "http://localhost:5173",     
-  "http://localhost",         
-  "capacitor://localhost",
+  "http://localhost:5173",
+  "http://localhost",      
+  "capacitor://localhost"   
 ];
 
 const corsOptions = {
@@ -40,11 +40,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
-
-app.options("*", (req, res) => {
-  res.sendStatus(200);
-});
+app.options("*", cors(corsOptions)); 
 
 app.use(cookieParser());
 app.use(express.json());
