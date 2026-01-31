@@ -10,7 +10,13 @@ let userSocketMap;
 const setupSocket = (server) => {
   io = new SocketIoServer(server, {
     cors: {
-      origin: process.env.FRONTEND_URL,
+      origin: [
+        process.env.FRONTEND_URL,
+        "http://localhost:5173",
+        "http://localhost",       
+        "https://localhost",      
+        "capacitor://localhost"   
+      ],
       methods: ["GET", "POST"],
       credentials: true,
     },
