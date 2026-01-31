@@ -1,4 +1,4 @@
-export const HOST = import.meta.env.VITE_BASE_URL;
+export const HOST = "https://react-chat-app-0vd8.onrender.com";
 
 export const AUTH_ROUTES = "/api/auth";
 

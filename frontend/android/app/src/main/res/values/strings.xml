@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name"> SyncronusChatApp</string>
+    <string name="title_activity_main"> SyncronusChatApp</string>
+    <string name="package_name">com.rohit.syncronus</string>
+    <string name="custom_url_scheme">com.rohit.syncronus</string>
+</resources>
