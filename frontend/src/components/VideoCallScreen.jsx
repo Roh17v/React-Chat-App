@@ -16,6 +16,7 @@ import {
   Signal,
   SignalLow,
   SignalZero,
+  SwitchCamera,
 } from "lucide-react";
 import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
@@ -34,6 +35,8 @@ const VideoCallScreen = () => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [pipExpanded, setPipExpanded] = useState(false);
+  const [facingMode, setFacingMode] = useState("user"); // "user" for front, "environment" for back
+  const [isFlipping, setIsFlipping] = useState(false);
 
   // Connection State
   const [callStatus, setCallStatus] = useState(
@@ -106,13 +109,75 @@ const VideoCallScreen = () => {
     },
     [],
   );
+const flipCamera = async () => {
+    if (isFlipping || isVideoOff) return;
+    
+    setIsFlipping(true);
+    
+    try {
+      const newFacingMode = facingMode === "user" ? "environment" : "user";
+      
+      // GRAB EXISTING TRACKS
+      const currentStream = localStreamRef.current;
+      const oldAudioTrack = currentStream?.getAudioTracks()[0];
+      const oldVideoTrack = currentStream?.getVideoTracks()[0];
+
+      if (oldVideoTrack) {
+        oldVideoTrack.stop();
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // GET NEW VIDEO ONLY (Reuse audio to prevent mic errors)
+      const videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: newFacingMode },
+        audio: false, 
+      });
+      
+      const newVideoTrack = videoStream.getVideoTracks()[0];
+
+      const tracks = [newVideoTrack];
+      if (oldAudioTrack) tracks.push(oldAudioTrack);
+      
+      const newStream = new MediaStream(tracks);
+      
+      // UPDATE REFS
+      localStreamRef.current = newStream;
+      
+      // Update local UI
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = newStream;
+        localVideoRef.current.muted = true; // Avoid feedback
+      }
+      if (pipLocalVideoRef.current) pipLocalVideoRef.current.srcObject = newStream;
+      if (fullscreenLocalVideoRef.current) fullscreenLocalVideoRef.current.srcObject = newStream;
+      
+      // REPLACE TRACK IN PEER CONNECTION
+      if (pc.current) {
+        const senders = pc.current.getSenders();
+        const videoSender = senders.find((s) => s.track?.kind === "video");
+        
+        if (videoSender && newVideoTrack) {
+           await videoSender.replaceTrack(newVideoTrack);
+        }
+      }
+      
+      setFacingMode(newFacingMode);
+
+    } catch (err) {
+      console.error("Failed to flip camera:", err);
+      setMediaError("Failed to switch camera. Please try again.");
+    } finally {
+      setIsFlipping(false);
+    }
+  };
 
   // RESTART MEDIA ON DEVICE CHANGE
   const handleDeviceChange = async () => {
     console.log("Device change detected. Refreshing stream...");
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
+        video: { facingMode },
         audio: true,
       });
       localStreamRef.current = newStream;
@@ -142,7 +207,7 @@ const VideoCallScreen = () => {
     const startMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: { facingMode },
           audio: true,
         });
         localStreamRef.current = stream;
@@ -737,8 +802,23 @@ const VideoCallScreen = () => {
                   playsInline
                   muted
                   className="w-full h-full object-cover"
-                  style={{ transform: "scaleX(-1)" }}
+                  style={{ transform: facingMode === "user" ? "scaleX(-1)" : "none" }}
                 />
+                {/* Flip Camera Button on Local Video */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    flipCamera();
+                  }}
+                  disabled={isFlipping || isVideoOff}
+                  className={cn(
+                    "absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/50 backdrop-blur-sm",
+                    "flex items-center justify-center text-white/80 hover:text-white transition-all",
+                    (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <SwitchCamera className={cn("w-3 h-3", isFlipping && "animate-spin")} />
+                </button>
               </motion.div>
 
               {/* End Call Button */}
@@ -922,7 +1002,7 @@ const VideoCallScreen = () => {
                 playsInline
                 muted
                 className="w-full h-full object-cover"
-                style={{ transform: "scaleX(-1)" }}
+                style={{ transform: facingMode === "user" ? "scaleX(-1)" : "none" }}
               />
               {isVideoOff && (
                 <div className="absolute inset-0 bg-background-tertiary flex items-center justify-center">
@@ -930,6 +1010,24 @@ const VideoCallScreen = () => {
                     <User className="w-6 h-6 text-muted-foreground" />
                   </div>
                 </div>
+              )}
+              {/* Flip Camera Button on Local Video */}
+              {!isVideoOff && (
+                <motion.button
+                  whileTap={{ scale: 0.9 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    flipCamera();
+                  }}
+                  disabled={isFlipping}
+                  className={cn(
+                    "absolute bottom-2 right-2 w-8 h-8 rounded-full bg-black/50 backdrop-blur-sm",
+                    "flex items-center justify-center text-white/80 hover:text-white hover:bg-black/70 transition-all",
+                    isFlipping && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <SwitchCamera className={cn("w-4 h-4", isFlipping && "animate-spin")} />
+                </motion.button>
               )}
             </motion.div>
 
@@ -962,6 +1060,20 @@ const VideoCallScreen = () => {
                     ) : (
                       <Mic className="w-6 h-6" />
                     )}
+                  </motion.button>
+
+                  {/* Flip Camera Button */}
+                  <motion.button
+                    whileTap={{ scale: 0.9 }}
+                    onClick={flipCamera}
+                    disabled={isFlipping || isVideoOff}
+                    className={cn(
+                      "w-14 h-14 rounded-full flex items-center justify-center transition-colors",
+                      "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                      (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed"
+                    )}
+                  >
+                    <SwitchCamera className={cn("w-6 h-6", isFlipping && "animate-spin")} />
                   </motion.button>
 
                   {/* End Call Button */}
