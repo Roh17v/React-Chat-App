@@ -37,13 +37,10 @@ const VideoCallScreen = () => {
 
   // Connection State
   const [callStatus, setCallStatus] = useState(
-    activeCall?.isCaller ? "ringing" : "connected"
+    activeCall?.isCaller ? "ringing" : "connected",
   );
   const [connectionStatus, setConnectionStatus] = useState("initializing");
   const [mediaError, setMediaError] = useState(null);
-
-  // --- FIX 2: Switched to Top/Left for correct drag behavior ---
-  const [dragPosition, setDragPosition] = useState({ x: 20, y: 20 }); 
 
   // WEBRTC REFS
   const pc = useRef(null);
@@ -54,20 +51,39 @@ const VideoCallScreen = () => {
   // ROBUSTNESS BUFFERS
   const pendingOffer = useRef(null);
   const pendingCandidates = useRef([]);
+
   const makingOffer = useRef(false);
   const ignoreOffer = useRef(false);
   const isPolite = useRef(!activeCall?.isCaller);
 
-  // UI Refs
-  const remoteVideoFullRef = useRef(null);
-  const remoteVideoMiniRef = useRef(null);
-  const localVideoPipRef = useRef(null);
-  const localVideoMiniRef = useRef(null);
+  // Single set of video refs - always mounted
+  const remoteVideoRef = useRef(null);
+  const localVideoRef = useRef(null);
 
-  // Drag Logic Refs
+  // Additional refs for cloned video elements to prevent flickering
+  const pipRemoteVideoRef = useRef(null);
+  const pipLocalVideoRef = useRef(null);
+  const fullscreenRemoteVideoRef = useRef(null);
+  const fullscreenLocalVideoRef = useRef(null);
+
+  // Track if streams have been attached to prevent re-assignment
+  const streamsAttached = useRef({
+    hidden: { local: false, remote: false },
+    pip: { local: false, remote: false },
+    fullscreen: { local: false, remote: false },
+  });
+
+  // Drag Logic Refs - Using refs for smooth dragging without re-renders
   const isDragging = useRef(false);
   const hasDragged = useRef(false);
-  const dragStart = useRef({ x: 0, y: 0 });
+  const dragStartPos = useRef({ x: 0, y: 0 });
+  const dragStartMouse = useRef({ x: 0, y: 0 });
+  const currentPosition = useRef({
+    x: window.innerWidth - 120 - 16,
+    y: window.innerHeight - 160 - 16,
+  });
+  const pipContainerRef = useRef(null);
+  const animationFrameRef = useRef(null);
 
   // PiP sizes
   const pipSize = pipExpanded
@@ -76,27 +92,20 @@ const VideoCallScreen = () => {
 
   if (!activeCall || activeCall.callType !== "video") return null;
 
-  // --- FIX 1: Re-attach streams when switching views ---
-  // This effect runs whenever you minimize/maximize to ensure the new video tags get the stream
-  useEffect(() => {
-    // Attach Local Stream
-    if (localStreamRef.current) {
-        if (localVideoPipRef.current) {
-            localVideoPipRef.current.srcObject = localStreamRef.current;
-            localVideoPipRef.current.muted = true;
-        }
-        if (localVideoMiniRef.current) {
-            localVideoMiniRef.current.srcObject = localStreamRef.current;
-            localVideoMiniRef.current.muted = true;
-        }
-    }
-    // Attach Remote Stream
-    if (remoteStreamRef.current) {
-        if (remoteVideoFullRef.current) remoteVideoFullRef.current.srcObject = remoteStreamRef.current;
-        if (remoteVideoMiniRef.current) remoteVideoMiniRef.current.srcObject = remoteStreamRef.current;
-    }
-  }, [isMinimized, connectionStatus]); // Trigger on mode switch
+  // Helper to attach stream to video element only once
+  const attachStreamToVideo = useCallback(
+    (videoEl, stream, trackingKey, subKey) => {
+      if (!videoEl || !stream) return;
+      if (videoEl.srcObject === stream) return; // Already attached
+      if (streamsAttached.current[trackingKey]?.[subKey]) return; // Already tracked as attached
 
+      videoEl.srcObject = stream;
+      if (streamsAttached.current[trackingKey]) {
+        streamsAttached.current[trackingKey][subKey] = true;
+      }
+    },
+    [],
+  );
 
   // RESTART MEDIA ON DEVICE CHANGE
   const handleDeviceChange = async () => {
@@ -107,7 +116,13 @@ const VideoCallScreen = () => {
         audio: true,
       });
       localStreamRef.current = newStream;
-      updateLocalVideoRefs(newStream);
+
+      // Reset tracking for local streams
+      streamsAttached.current.hidden.local = false;
+      streamsAttached.current.pip.local = false;
+      streamsAttached.current.fullscreen.local = false;
+
+      updateLocalVideoRef(newStream);
 
       if (pc.current) {
         const senders = pc.current.getSenders();
@@ -131,7 +146,7 @@ const VideoCallScreen = () => {
           audio: true,
         });
         localStreamRef.current = stream;
-        updateLocalVideoRefs(stream);
+        updateLocalVideoRef(stream);
         setMediaError(null);
 
         stream.getTracks().forEach((track) => {
@@ -147,13 +162,15 @@ const VideoCallScreen = () => {
         setMediaError("Camera/Mic access denied.");
       }
     };
+
     startMedia();
     navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+
     return () => {
       cleanup();
       navigator.mediaDevices.removeEventListener(
         "devicechange",
-        handleDeviceChange
+        handleDeviceChange,
       );
     };
   }, []);
@@ -187,6 +204,7 @@ const VideoCallScreen = () => {
   // PEER CONNECTION LOGIC
   const initializePeerConnection = async (stream) => {
     if (pc.current) return;
+
     let config = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -206,20 +224,32 @@ const VideoCallScreen = () => {
     }
 
     pc.current = new RTCPeerConnection(config);
-    stream
-      .getTracks()
-      .forEach((track) => pc.current.addTrack(track, stream));
+    stream.getTracks().forEach((track) => pc.current.addTrack(track, stream));
 
     pc.current.ontrack = ({ track }) => {
       remoteStreamRef.current.addTrack(track);
-      const refresh = (el) => {
-        if (el && el.srcObject !== remoteStreamRef.current) {
-          el.srcObject = remoteStreamRef.current;
-          el.play().catch((e) => console.log("Autoplay error", e));
-        }
-      };
-      refresh(remoteVideoFullRef.current);
-      refresh(remoteVideoMiniRef.current);
+
+      // Reset tracking for remote streams when new track arrives
+      streamsAttached.current.hidden.remote = false;
+      streamsAttached.current.pip.remote = false;
+      streamsAttached.current.fullscreen.remote = false;
+
+      // Attach to all remote video elements
+      if (
+        remoteVideoRef.current &&
+        remoteVideoRef.current.srcObject !== remoteStreamRef.current
+      ) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        remoteVideoRef.current
+          .play()
+          .catch((e) => console.log("Autoplay error", e));
+      }
+      if (pipRemoteVideoRef.current) {
+        pipRemoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+      if (fullscreenRemoteVideoRef.current) {
+        fullscreenRemoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
     };
 
     pc.current.onicecandidate = ({ candidate }) => {
@@ -234,6 +264,7 @@ const VideoCallScreen = () => {
     pc.current.oniceconnectionstatechange = () => {
       const state = pc.current.iceConnectionState;
       setConnectionStatus(state);
+
       if (connectionTimeout.current) {
         clearTimeout(connectionTimeout.current);
         connectionTimeout.current = null;
@@ -268,7 +299,7 @@ const VideoCallScreen = () => {
     if (pendingOffer.current) {
       await handleDescription(
         pendingOffer.current.description,
-        pendingOffer.current.from
+        pendingOffer.current.from,
       );
       pendingOffer.current = null;
     }
@@ -317,6 +348,7 @@ const VideoCallScreen = () => {
 
   useEffect(() => {
     if (!socket) return;
+
     const onDescription = ({ description, from }) =>
       handleDescription(description, from);
     const onCandidate = async ({ candidate }) => {
@@ -330,7 +362,6 @@ const VideoCallScreen = () => {
         pendingCandidates.current.push(candidate);
       }
     };
-
     const onEnd = () => cleanup();
 
     socket.on("call:offer", onDescription);
@@ -351,6 +382,8 @@ const VideoCallScreen = () => {
     pc.current?.close();
     pc.current = null;
     if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
+    if (animationFrameRef.current)
+      cancelAnimationFrame(animationFrameRef.current);
     clearActiveCall();
     setConnectionStatus("disconnected");
   }, [clearActiveCall]);
@@ -361,13 +394,18 @@ const VideoCallScreen = () => {
     cleanup();
   };
 
-  const updateLocalVideoRefs = (stream) => {
-    [localVideoPipRef.current, localVideoMiniRef.current].forEach((el) => {
-      if (el) {
-        el.srcObject = stream;
-        el.muted = true;
-      }
-    });
+  const updateLocalVideoRef = (stream) => {
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+      localVideoRef.current.muted = true;
+    }
+    // Also update other local video refs
+    if (pipLocalVideoRef.current) {
+      pipLocalVideoRef.current.srcObject = stream;
+    }
+    if (fullscreenLocalVideoRef.current) {
+      fullscreenLocalVideoRef.current.srcObject = stream;
+    }
   };
 
   const toggleAudio = () => {
@@ -398,61 +436,194 @@ const VideoCallScreen = () => {
       .toString()
       .padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
-  // --- FIX 2: Corrected Drag Handlers (Using Top/Left) ---
-  const handleDragStart = (e) => {
+  // Smooth drag handlers using refs and transform
+  const updatePipPosition = useCallback(() => {
+    if (pipContainerRef.current) {
+      pipContainerRef.current.style.left = `${currentPosition.current.x}px`;
+      pipContainerRef.current.style.top = `${currentPosition.current.y}px`;
+    }
+  }, []);
+
+  const handleDragStart = useCallback((e) => {
     if (e.target.closest("button")) return;
+    e.preventDefault();
+
     isDragging.current = true;
     hasDragged.current = false;
-    
-    // Get mouse/touch start position
-    const clientX = e.clientX || e.touches?.[0]?.clientX;
-    const clientY = e.clientY || e.touches?.[0]?.clientY;
-    
-    // Store the difference between mouse pos and element's top/left
-    dragStart.current = {
-      x: clientX - dragPosition.x,
-      y: clientY - dragPosition.y
+
+    const clientX = e.clientX ?? e.touches?.[0]?.clientX;
+    const clientY = e.clientY ?? e.touches?.[0]?.clientY;
+
+    // Store the mouse start position and element start position
+    dragStartMouse.current = { x: clientX, y: clientY };
+    dragStartPos.current = {
+      x: currentPosition.current.x,
+      y: currentPosition.current.y,
     };
-  };
+
+    if (pipContainerRef.current) {
+      pipContainerRef.current.style.transition = "none";
+      pipContainerRef.current.style.willChange = "left, top";
+    }
+  }, []);
 
   const handleDragMove = useCallback(
     (e) => {
       if (!isDragging.current) return;
-      hasDragged.current = true;
-      if (e.type === "touchmove") e.preventDefault();
-      
-      const clientX = e.clientX || e.touches?.[0]?.clientX;
-      const clientY = e.clientY || e.touches?.[0]?.clientY;
 
+      hasDragged.current = true;
+
+      const clientX = e.clientX ?? e.touches?.[0]?.clientX;
+      const clientY = e.clientY ?? e.touches?.[0]?.clientY;
+
+      if (clientX === undefined || clientY === undefined) return;
+
+      // Calculate delta from start
+      const deltaX = clientX - dragStartMouse.current.x;
+      const deltaY = clientY - dragStartMouse.current.y;
+
+      // New position = start position + delta
+      const newX = dragStartPos.current.x + deltaX;
+      const newY = dragStartPos.current.y + deltaY;
+
+      // Clamp to screen bounds
       const maxX = window.innerWidth - pipSize.width - 16;
       const maxY = window.innerHeight - pipSize.height - 16;
-      
-      // With Top/Left, the math matches the mouse movement
-      const newX = clientX - dragStart.current.x;
-      const newY = clientY - dragStart.current.y;
 
-      setDragPosition({
+      currentPosition.current = {
         x: Math.max(16, Math.min(newX, maxX)),
         y: Math.max(16, Math.min(newY, maxY)),
-      });
+      };
+
+      // Use requestAnimationFrame for smooth updates
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationFrameRef.current = requestAnimationFrame(updatePipPosition);
     },
-    [pipSize]
+    [pipSize.width, pipSize.height, updatePipPosition],
   );
 
-  const handleDragEnd = () => (isDragging.current = false);
+  const handleDragEnd = useCallback(() => {
+    if (!isDragging.current) return;
+
+    isDragging.current = false;
+
+    if (pipContainerRef.current) {
+      pipContainerRef.current.style.willChange = "auto";
+    }
+  }, []);
 
   useEffect(() => {
-    window.addEventListener("mousemove", handleDragMove);
-    window.addEventListener("touchmove", handleDragMove, { passive: false });
+    const moveHandler = (e) => {
+      if (isDragging.current && e.type === "touchmove") {
+        e.preventDefault();
+      }
+      handleDragMove(e);
+    };
+
+    const handleResize = () => {
+      // Keep PiP within bounds on resize
+      const maxX = window.innerWidth - pipSize.width - 16;
+      const maxY = window.innerHeight - pipSize.height - 16;
+      currentPosition.current = {
+        x: Math.max(16, Math.min(currentPosition.current.x, maxX)),
+        y: Math.max(16, Math.min(currentPosition.current.y, maxY)),
+      };
+      updatePipPosition();
+    };
+
+    window.addEventListener("mousemove", moveHandler);
+    window.addEventListener("touchmove", moveHandler, { passive: false });
     window.addEventListener("mouseup", handleDragEnd);
     window.addEventListener("touchend", handleDragEnd);
+    window.addEventListener("resize", handleResize);
+
     return () => {
-      window.removeEventListener("mousemove", handleDragMove);
-      window.removeEventListener("touchmove", handleDragMove);
+      window.removeEventListener("mousemove", moveHandler);
+      window.removeEventListener("touchmove", moveHandler);
       window.removeEventListener("mouseup", handleDragEnd);
       window.removeEventListener("touchend", handleDragEnd);
+      window.removeEventListener("resize", handleResize);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
     };
-  }, [handleDragMove]);
+  }, [
+    handleDragMove,
+    handleDragEnd,
+    pipSize.width,
+    pipSize.height,
+    updatePipPosition,
+  ]);
+
+  // Reset hasDragged flag when minimized state changes
+  useEffect(() => {
+    hasDragged.current = false;
+  }, [isMinimized]);
+
+  // Adjust position when PiP size changes to keep it within bounds
+  useEffect(() => {
+    const maxX = window.innerWidth - pipSize.width - 16;
+    const maxY = window.innerHeight - pipSize.height - 16;
+
+    const needsAdjustment =
+      currentPosition.current.x > maxX || currentPosition.current.y > maxY;
+
+    if (needsAdjustment) {
+      currentPosition.current = {
+        x: Math.max(16, Math.min(currentPosition.current.x, maxX)),
+        y: Math.max(16, Math.min(currentPosition.current.y, maxY)),
+      };
+
+      if (pipContainerRef.current) {
+        pipContainerRef.current.style.transition =
+          "left 0.2s ease-out, top 0.2s ease-out";
+        updatePipPosition();
+        // Reset transition after animation
+        setTimeout(() => {
+          if (pipContainerRef.current) {
+            pipContainerRef.current.style.transition = "none";
+          }
+        }, 200);
+      }
+    }
+  }, [pipSize.width, pipSize.height, updatePipPosition]);
+
+  // Effect to attach streams to video elements when they mount (prevents flickering)
+  useEffect(() => {
+    // Attach remote stream
+    if (remoteStreamRef.current.getTracks().length > 0) {
+      if (
+        pipRemoteVideoRef.current &&
+        pipRemoteVideoRef.current.srcObject !== remoteStreamRef.current
+      ) {
+        pipRemoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+      if (
+        fullscreenRemoteVideoRef.current &&
+        fullscreenRemoteVideoRef.current.srcObject !== remoteStreamRef.current
+      ) {
+        fullscreenRemoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+    }
+
+    // Attach local stream
+    if (localStreamRef.current) {
+      if (
+        pipLocalVideoRef.current &&
+        pipLocalVideoRef.current.srcObject !== localStreamRef.current
+      ) {
+        pipLocalVideoRef.current.srcObject = localStreamRef.current;
+      }
+      if (
+        fullscreenLocalVideoRef.current &&
+        fullscreenLocalVideoRef.current.srcObject !== localStreamRef.current
+      ) {
+        fullscreenLocalVideoRef.current.srcObject = localStreamRef.current;
+      }
+    }
+  }, [isMinimized]);
 
   const getConnectionIcon = () => {
     switch (connectionStatus) {
@@ -473,6 +644,21 @@ const VideoCallScreen = () => {
 
   return (
     <>
+      {/* ALWAYS MOUNTED VIDEO ELEMENTS - Hidden but connected */}
+      <div
+        className="fixed -top-[9999px] -left-[9999px] pointer-events-none"
+        aria-hidden="true"
+      >
+        <video ref={remoteVideoRef} autoPlay playsInline className="w-1 h-1" />
+        <video
+          ref={localVideoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-1 h-1"
+        />
+      </div>
+
       {/* MINIMIZED PIP VIEW */}
       <AnimatePresence>
         {isMinimized && (
@@ -481,13 +667,15 @@ const VideoCallScreen = () => {
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.8 }}
             transition={{ type: "spring", damping: 25, stiffness: 300 }}
+            ref={pipContainerRef}
             style={{
               position: "fixed",
-              left: dragPosition.x, // Changed from right to left
-              top: dragPosition.y,  // Changed from bottom to top
+              left: currentPosition.current.x,
+              top: currentPosition.current.y,
               width: pipSize.width,
               height: pipSize.height,
               zIndex: 9999,
+              touchAction: "none",
             }}
             onMouseDown={handleDragStart}
             onTouchStart={handleDragStart}
@@ -501,21 +689,21 @@ const VideoCallScreen = () => {
                 "relative w-full h-full rounded-2xl overflow-hidden",
                 "bg-background-secondary ring-1 ring-border",
                 "shadow-chat-lg cursor-move",
-                "active:ring-2 active:ring-primary/50"
+                "active:ring-2 active:ring-primary/50",
               )}
             >
-              {/* Remote Video */}
+              {/* Remote Video - Using stable ref */}
               <video
-                ref={remoteVideoMiniRef}
+                ref={pipRemoteVideoRef}
                 autoPlay
                 playsInline
                 className="absolute inset-0 w-full h-full object-cover"
               />
-              
-              {/* ... (rest of the mini UI is same) ... */}
-              
+
+              {/* Gradient Overlay */}
               <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
-              
+
+              {/* Top Bar */}
               <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
                 <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/40 backdrop-blur-sm">
                   {getConnectionIcon()}
@@ -538,20 +726,22 @@ const VideoCallScreen = () => {
                 </button>
               </div>
 
-              {/* Local Video Inset */}
+              {/* Local Video Inset - Using stable ref */}
               <motion.div
                 layout
                 className="absolute bottom-10 right-2 w-12 h-16 rounded-lg overflow-hidden ring-1 ring-white/20 shadow-md"
               >
                 <video
-                  ref={localVideoMiniRef}
+                  ref={pipLocalVideoRef}
                   autoPlay
                   playsInline
                   muted
                   className="w-full h-full object-cover"
+                  style={{ transform: "scaleX(-1)" }}
                 />
               </motion.div>
 
+              {/* End Call Button */}
               <div className="absolute bottom-2 left-0 right-0 flex justify-center">
                 <motion.button
                   whileTap={{ scale: 0.9 }}
@@ -580,21 +770,25 @@ const VideoCallScreen = () => {
             className="fixed inset-0 z-50 bg-background"
             onClick={() => setShowControls((p) => !p)}
           >
-             {/* ... (The rest of Full Screen UI remains identical) ... */}
-             
-            <div className="absolute inset-0">
+            {/* Remote Video Background - Constrained for large screens */}
+            <div className="absolute inset-0 flex items-center justify-center bg-background-secondary">
               <video
-                ref={remoteVideoFullRef}
+                ref={fullscreenRemoteVideoRef}
                 autoPlay
                 playsInline
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover md:max-w-[1920px] md:max-h-[1080px] md:object-contain"
               />
+
+              {/* Video Off Fallback */}
               {(isConnecting || connectionStatus === "failed") && (
                 <div className="absolute inset-0 bg-background-secondary" />
               )}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40" />
+
+              {/* Gradient Overlays */}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40 pointer-events-none" />
             </div>
 
+            {/* Connecting State */}
             <AnimatePresence>
               {isConnecting && (
                 <motion.div
@@ -603,6 +797,7 @@ const VideoCallScreen = () => {
                   exit={{ opacity: 0, y: -20 }}
                   className="absolute inset-0 flex flex-col items-center justify-center z-10"
                 >
+                  {/* Avatar with Pulse */}
                   <div className="relative mb-6">
                     <motion.div
                       animate={{ scale: [1, 1.2, 1], opacity: [0.5, 0.2, 0.5] }}
@@ -622,16 +817,21 @@ const VideoCallScreen = () => {
                       </span>
                     </div>
                   </div>
+
                   <h2 className="text-xl font-semibold text-foreground mb-1">
                     {activeCall.otherUserName}
                   </h2>
+
                   <motion.p
                     animate={{ opacity: [0.5, 1, 0.5] }}
                     transition={{ duration: 1.5, repeat: Infinity }}
                     className="text-sm text-foreground-secondary"
                   >
-                    {connectionStatus === "failed" ? "Connection Failed" : "Connecting..."}
+                    {connectionStatus === "failed"
+                      ? "Connection Failed"
+                      : "Connecting..."}
                   </motion.p>
+
                   {connectionStatus === "failed" && (
                     <motion.button
                       initial={{ opacity: 0, y: 10 }}
@@ -651,6 +851,7 @@ const VideoCallScreen = () => {
               )}
             </AnimatePresence>
 
+            {/* Media Error Banner */}
             <AnimatePresence>
               {mediaError && (
                 <motion.div
@@ -667,9 +868,13 @@ const VideoCallScreen = () => {
               )}
             </AnimatePresence>
 
+            {/* Top Header */}
             <motion.div
               initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : -20 }}
+              animate={{
+                opacity: showControls ? 1 : 0,
+                y: showControls ? 0 : -20,
+              }}
               transition={{ duration: 0.2 }}
               className="absolute top-0 left-0 right-0 z-20 safe-area-top"
             >
@@ -680,7 +885,9 @@ const VideoCallScreen = () => {
                     <h3 className="text-sm font-semibold text-white">
                       {activeCall.otherUserName}
                     </h3>
-                    <p className="text-xs text-white/60">{formatDuration(callDuration)}</p>
+                    <p className="text-xs text-white/60">
+                      {formatDuration(callDuration)}
+                    </p>
                   </div>
                 </div>
                 <motion.button
@@ -696,6 +903,7 @@ const VideoCallScreen = () => {
               </div>
             </motion.div>
 
+            {/* Local Video PiP */}
             <motion.div
               layout
               initial={{ opacity: 0, scale: 0.8 }}
@@ -705,15 +913,16 @@ const VideoCallScreen = () => {
                 "absolute top-20 right-4 z-20",
                 "w-28 h-40 md:w-36 md:h-52",
                 "rounded-2xl overflow-hidden",
-                "ring-2 ring-white/20 shadow-chat-lg"
+                "ring-2 ring-white/20 shadow-chat-lg",
               )}
             >
               <video
-                ref={localVideoPipRef}
+                ref={fullscreenLocalVideoRef}
                 autoPlay
                 playsInline
                 muted
                 className="w-full h-full object-cover"
+                style={{ transform: "scaleX(-1)" }}
               />
               {isVideoOff && (
                 <div className="absolute inset-0 bg-background-tertiary flex items-center justify-center">
@@ -724,15 +933,20 @@ const VideoCallScreen = () => {
               )}
             </motion.div>
 
+            {/* Bottom Controls */}
             <motion.div
               initial={{ opacity: 0, y: 40 }}
-              animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : 40 }}
+              animate={{
+                opacity: showControls ? 1 : 0,
+                y: showControls ? 0 : 40,
+              }}
               transition={{ duration: 0.2 }}
               className="absolute bottom-0 left-0 right-0 z-20 safe-area-bottom"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="p-6 pb-8">
                 <div className="flex items-center justify-center gap-4">
+                  {/* Mute Button */}
                   <motion.button
                     whileTap={{ scale: 0.9 }}
                     onClick={toggleAudio}
@@ -740,11 +954,17 @@ const VideoCallScreen = () => {
                       "w-14 h-14 rounded-full flex items-center justify-center transition-colors",
                       isMuted
                         ? "bg-destructive/20 text-destructive"
-                        : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20"
+                        : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
                     )}
                   >
-                    {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+                    {isMuted ? (
+                      <MicOff className="w-6 h-6" />
+                    ) : (
+                      <Mic className="w-6 h-6" />
+                    )}
                   </motion.button>
+
+                  {/* End Call Button */}
                   <motion.button
                     whileTap={{ scale: 0.9 }}
                     onClick={endCall}
@@ -752,6 +972,8 @@ const VideoCallScreen = () => {
                   >
                     <PhoneOff className="w-7 h-7" />
                   </motion.button>
+
+                  {/* Video Button */}
                   <motion.button
                     whileTap={{ scale: 0.9 }}
                     onClick={toggleVideo}
@@ -759,10 +981,14 @@ const VideoCallScreen = () => {
                       "w-14 h-14 rounded-full flex items-center justify-center transition-colors",
                       isVideoOff
                         ? "bg-destructive/20 text-destructive"
-                        : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20"
+                        : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
                     )}
                   >
-                    {isVideoOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
+                    {isVideoOff ? (
+                      <VideoOff className="w-6 h-6" />
+                    ) : (
+                      <Video className="w-6 h-6" />
+                    )}
                   </motion.button>
                 </div>
               </div>
