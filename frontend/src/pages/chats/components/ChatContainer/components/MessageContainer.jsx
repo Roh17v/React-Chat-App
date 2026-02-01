@@ -6,12 +6,13 @@ import {
   PRIVATE_CONTACT_MESSAGES_ROUTE,
 } from "@/utils/constants";
 import moment from "moment";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const MessageContainer = () => {
@@ -33,8 +34,20 @@ const MessageContainer = () => {
   const [imageURL, setImageURL] = useState(null);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const containerRef = useRef(null);
   const newMessageRef = useRef(null);
+  const isInitialLoad = useRef(true);
+
+  // Smooth scroll to bottom function
+  const scrollToBottom = useCallback((smooth = true) => {
+    if (containerRef.current) {
+      containerRef.current.scrollTo({
+        top: containerRef.current.scrollHeight,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    }
+  }, []);
 
   const getMessages = async (pageNumber = 1) => {
     if (!selectedChatData?._id || loading || !hasMore) return;
@@ -52,13 +65,8 @@ const MessageContainer = () => {
 
       setSelectedChatMessages(response.data, false);
 
-      if (containerRef.current && pageNumber === 1) {
-        requestAnimationFrame(() => {
-          containerRef.current?.scrollTo({
-            top: containerRef.current.scrollHeight,
-            behavior: "smooth",
-          });
-        });
+      if (pageNumber === 1) {
+        isInitialLoad.current = true;
       }
 
       setPage(pageNumber);
@@ -84,13 +92,8 @@ const MessageContainer = () => {
 
       setSelectedChatMessages(response.data, false);
 
-      if (containerRef.current && pageNumber === 1) {
-        requestAnimationFrame(() => {
-          containerRef.current?.scrollTo({
-            top: containerRef.current.scrollHeight,
-            behavior: "smooth",
-          });
-        });
+      if (pageNumber === 1) {
+        isInitialLoad.current = true;
       }
 
       setPage(pageNumber);
@@ -165,7 +168,7 @@ const MessageContainer = () => {
         <IoMdDoneAll className="w-4 h-4 text-white/70" />
       )}
       {status === "read" && (
-        <IoMdDoneAll className="w-4 h-4 text-sky-400" />
+        <IoMdDoneAll className="w-4 h-4 text-sky-300" />
       )}
     </span>
   );
@@ -412,12 +415,20 @@ const MessageContainer = () => {
     });
   };
 
-  const handleScroll = () => {
-    if (!containerRef.current || loading || !hasMore) return;
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current) return;
 
-    const scrollYBeforeFetch = containerRef.current.scrollHeight;
+    const container = containerRef.current;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    
+    // Show scroll button when scrolled up more than 300px from bottom
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    setShowScrollButton(distanceFromBottom > 300);
 
-    if (containerRef.current.scrollTop < 50) {
+    // Load more messages when near top
+    if (!loading && hasMore && scrollTop < 50) {
+      const scrollYBeforeFetch = scrollHeight;
+
       if (selectedChatType === "contact") {
         getMessages(page + 1).then(() => {
           requestAnimationFrame(() => {
@@ -438,28 +449,35 @@ const MessageContainer = () => {
         });
       }
     }
-  };
+  }, [loading, hasMore, selectedChatType, page]);
 
+  // Scroll to bottom on initial load and new messages
   useEffect(() => {
+    if (!containerRef.current || selectedChatMessages.length === 0) return;
+
     const container = containerRef.current;
-    if (!container) return;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < 400;
 
-    const isNearBottom =
-      container.scrollTop + container.clientHeight >=
-      container.scrollHeight - 400;
-
-    if (isNearBottom && newMessageRef.current) {
-      newMessageRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "end",
+    // Initial load - instant scroll to bottom
+    if (isInitialLoad.current) {
+      requestAnimationFrame(() => {
+        scrollToBottom(false); // Instant scroll on initial load
+        // After a tiny delay, enable smooth scrolling for subsequent messages
+        setTimeout(() => {
+          isInitialLoad.current = false;
+        }, 100);
       });
+    } else if (isNearBottom) {
+      // New message received while near bottom - smooth scroll
+      scrollToBottom(true);
     }
-  }, [selectedChatMessages]);
+  }, [selectedChatMessages, scrollToBottom]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (container) {
-      container.addEventListener("scroll", handleScroll);
+      container.addEventListener("scroll", handleScroll, { passive: true });
     }
     return () => {
       if (container) {
@@ -491,6 +509,20 @@ const MessageContainer = () => {
 
       {/* Scroll anchor */}
       <div ref={newMessageRef} />
+
+      {/* Scroll to bottom button */}
+      <button
+        onClick={() => scrollToBottom(true)}
+        className={cn(
+          "fixed bottom-24 right-4 sm:right-8 z-40 w-10 h-10 rounded-full bg-background-secondary border border-border-subtle shadow-lg flex items-center justify-center transition-all duration-300 hover:bg-accent hover:scale-110 active:scale-95",
+          showScrollButton 
+            ? "opacity-100 translate-y-0" 
+            : "opacity-0 translate-y-4 pointer-events-none"
+        )}
+        aria-label="Scroll to bottom"
+      >
+        <ChevronDown className="w-5 h-5 text-foreground" />
+      </button>
 
       {/* Image Preview Modal */}
       {showImage && imageURL && (
