@@ -191,6 +191,49 @@ const setupSocket = (server) => {
     }
   };
 
+  const emitTypingEvent = async ({ event, chatType, receiverId, channelId, senderId }) => {
+    try {
+      const sender = await User.findById(senderId, "firstName lastName");
+      const payload = {
+        chatType,
+        senderId,
+        sender: sender
+          ? {
+              _id: sender._id,
+              firstName: sender.firstName,
+              lastName: sender.lastName,
+            }
+          : { _id: senderId },
+        receiverId: receiverId || null,
+        channelId: channelId || null,
+      };
+
+      if (chatType === "contact" && receiverId) {
+        emitToUser(receiverId, event, payload);
+        return;
+      }
+
+      if (chatType === "channel" && channelId) {
+        const channel = await Channel.findById(channelId).populate("members");
+        if (!channel) return;
+
+        const memberIds = new Set(
+          (channel.members || []).map((member) => member._id.toString()),
+        );
+        if (channel.admin) {
+          memberIds.add(channel.admin.toString());
+        }
+        memberIds.delete(senderId);
+
+        memberIds.forEach((memberId) => {
+          emitToUser(memberId, event, payload);
+        });
+      }
+    } catch (error) {
+      console.error("Error emitting typing event:", error);
+    }
+  };
+
   io.on("connection", async (socket) => {
     const userId = socket.handshake.query.userId;
 
@@ -363,6 +406,27 @@ const setupSocket = (server) => {
         from: userId,
       });
     });
+
+    socket.on("typing", ({ chatType, receiverId, channelId }) => {
+      emitTypingEvent({
+        event: "typing",
+        chatType,
+        receiverId,
+        channelId,
+        senderId: userId,
+      });
+    });
+
+    socket.on("stop-typing", ({ chatType, receiverId, channelId }) => {
+      emitTypingEvent({
+        event: "stop-typing",
+        chatType,
+        receiverId,
+        channelId,
+        senderId: userId,
+      });
+    });
+    
   });
 };
 
