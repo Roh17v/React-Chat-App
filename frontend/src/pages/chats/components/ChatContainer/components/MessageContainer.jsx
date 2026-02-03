@@ -28,6 +28,8 @@ const MessageContainer = () => {
     setFileDownloadingProgress,
     page,
     setPage,
+    typingIndicators,
+    clearTypingIndicatorsForChat,
   } = useAppStore();
 
   const [showImage, setShowImage] = useState(false);
@@ -38,6 +40,21 @@ const MessageContainer = () => {
   const containerRef = useRef(null);
   const newMessageRef = useRef(null);
   const isInitialLoad = useRef(true);
+  const lastMessageCountRef = useRef(0);
+  const wasNearBottomRef = useRef(true);
+  const prevTypingUsersLengthRef = useRef(0);
+
+  // Typing indicator state
+  const typingUsers = selectedChatData?._id
+    ? typingIndicators[selectedChatData._id] || []
+    : [];
+
+  // Check if user is near bottom of scroll
+  const isNearBottom = useCallback(() => {
+    if (!containerRef.current) return true;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    return scrollHeight - scrollTop - clientHeight < 150;
+  }, []);
 
   // Smooth scroll to bottom function
   const scrollToBottom = useCallback((smooth = true) => {
@@ -121,7 +138,39 @@ const MessageContainer = () => {
     }
   }, [selectedChatData, selectedChatType, setSelectedChatMessages]);
 
+  // Clear typing indicators when leaving chat
+  useEffect(() => {
+    return () => {
+      if (selectedChatData?._id) {
+        clearTypingIndicatorsForChat(selectedChatData._id);
+      }
+    };
+  }, [selectedChatData?._id, clearTypingIndicatorsForChat]);
+
   const messagesRef = useRef(new Map());
+
+  // Format typing indicator label
+  const formatTypingLabel = () => {
+    if (typingUsers.length === 0) return "";
+
+    if (selectedChatType === "contact") {
+      const userName =
+        `${typingUsers[0]?.firstName || ""} ${typingUsers[0]?.lastName || ""}`.trim() ||
+        "Someone";
+      return `${userName} is typing...`;
+    }
+
+    const names = typingUsers
+      .map((typingUser) =>
+        `${typingUser.firstName || ""} ${typingUser.lastName || ""}`.trim(),
+      )
+      .filter(Boolean);
+
+    if (names.length === 0) return "Someone is typing...";
+    if (names.length === 1) return `${names[0]} is typing...`;
+    if (names.length === 2) return `${names[0]} and ${names[1]} are typing...`;
+    return `${names[0]}, ${names[1]} and ${names.length - 2} others are typing...`;
+  };
 
   const checkIfImage = (filePath) => {
     const imageRegex =
@@ -455,25 +504,69 @@ const MessageContainer = () => {
   useEffect(() => {
     if (!containerRef.current || selectedChatMessages.length === 0) return;
 
-    const container = containerRef.current;
-    const { scrollTop, scrollHeight, clientHeight } = container;
-    const isNearBottom = scrollHeight - scrollTop - clientHeight < 400;
+    const currentMessageCount = selectedChatMessages.length;
+    const lastMessage = selectedChatMessages[selectedChatMessages.length - 1];
+    const isOwnMessage = lastMessage?.sender === user?.id || lastMessage?.sender?._id === user?.id;
 
     // Initial load - instant scroll to bottom
     if (isInitialLoad.current) {
       requestAnimationFrame(() => {
-        scrollToBottom(false); // Instant scroll on initial load
-        // After a tiny delay, enable smooth scrolling for subsequent messages
+        scrollToBottom(false);
         setTimeout(() => {
           isInitialLoad.current = false;
+          lastMessageCountRef.current = currentMessageCount;
+          wasNearBottomRef.current = true;
         }, 100);
       });
-    } else if (isNearBottom) {
-      // New message received while near bottom - smooth scroll
-      scrollToBottom(true);
+      return;
     }
-  }, [selectedChatMessages, scrollToBottom]);
 
+    // New message arrived (not from pagination)
+    if (currentMessageCount > lastMessageCountRef.current) {
+      const wasAtBottom = wasNearBottomRef.current;
+      
+      // Always scroll for own messages, or if user was near bottom for received messages
+      if (isOwnMessage || wasAtBottom) {
+        requestAnimationFrame(() => {
+          scrollToBottom(true);
+        });
+      }
+    }
+
+    lastMessageCountRef.current = currentMessageCount;
+  }, [selectedChatMessages, scrollToBottom, user?.id]);
+
+  // Track scroll position continuously
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const trackPosition = () => {
+      wasNearBottomRef.current = isNearBottom();
+    };
+
+    container.addEventListener("scroll", trackPosition, { passive: true });
+    return () => container.removeEventListener("scroll", trackPosition);
+  }, [isNearBottom]);
+
+  // Handle typing indicator appearance - scroll to show it if near bottom
+  useEffect(() => {
+    const typingUsersLength = typingUsers.length;
+    const prevLength = prevTypingUsersLengthRef.current;
+
+    // Typing indicator just appeared
+    if (typingUsersLength > 0 && prevLength === 0) {
+      if (wasNearBottomRef.current) {
+        requestAnimationFrame(() => {
+          scrollToBottom(true);
+        });
+      }
+    }
+
+    prevTypingUsersLengthRef.current = typingUsersLength;
+  }, [typingUsers.length, scrollToBottom]);
+
+  // Scroll handler for pagination
   useEffect(() => {
     const container = containerRef.current;
     if (container) {
@@ -506,6 +599,19 @@ const MessageContainer = () => {
       <div className="flex flex-col gap-1">
         {renderMessages()}
       </div>
+
+      {/* Typing indicator*/}
+      {typingUsers.length > 0 && (
+        <div className="flex justify-start px-1 py-2 animate-fade-in">
+          <div className="message-bubble message-bubble-received flex items-center gap-3 px-4 py-3">
+            <div className="flex items-center gap-1">
+              <span className="typing-dot" />
+              <span className="typing-dot" />
+              <span className="typing-dot" />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Scroll anchor */}
       <div ref={newMessageRef} />

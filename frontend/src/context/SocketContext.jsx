@@ -28,6 +28,7 @@ export const SocketProvider = ({ children }) => {
     clearIncomingCall,
     setActiveCall,
     clearActiveCall,
+    setTypingIndicator,
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
@@ -77,6 +78,42 @@ export const SocketProvider = ({ children }) => {
         clearActiveCall();
       });
 
+      socket.current.on("typing", (payload) => {
+        if (payload?.chatType === "contact") {
+          setTypingIndicator({
+            chatId: payload.senderId,
+            user: payload.sender,
+            isTyping: true,
+          });
+        }
+
+        if (payload?.chatType === "channel") {
+          setTypingIndicator({
+            chatId: payload.channelId,
+            user: payload.sender,
+            isTyping: true,
+          });
+        }
+      });
+
+      socket.current.on("stop-typing", (payload) => {
+        if (payload?.chatType === "contact") {
+          setTypingIndicator({
+            chatId: payload.senderId,
+            user: payload.sender,
+            isTyping: false,
+          });
+        }
+
+        if (payload?.chatType === "channel") {
+          setTypingIndicator({
+            chatId: payload.channelId,
+            user: payload.sender,
+            isTyping: false,
+          });
+        }
+      });
+
       return () => {
         if (socket.current) {
           socket.current.off("new-dm-contact");
@@ -85,6 +122,8 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("incoming-call");
           socket.current.off("call-rejected");
           socket.current.off("call-ended");
+          socket.current.off("typing");
+          socket.current.off("stop-typing");
 
           socket.current.disconnect();
           socket.current = null;

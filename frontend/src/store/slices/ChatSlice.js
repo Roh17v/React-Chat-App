@@ -10,9 +10,9 @@ export const createChatSlice = (set, get) => ({
   channels: [],
   messageContainerRef: null,
   page: 1,
-  incomingCall: null,   // { callId, callerId, callType }
-  activeCall: null,     // { callId, otherUserId, callType }
-
+  incomingCall: null, // { callId, callerId, callType }
+  activeCall: null, // { callId, otherUserId, callType }
+  typingIndicators: {},
 
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
@@ -36,7 +36,7 @@ export const createChatSlice = (set, get) => ({
         : [...newMessages, ...state.selectedChatMessages];
 
       const uniqueMessages = Array.from(
-        new Map(allMessages.map((msg) => [msg._id, msg])).values()
+        new Map(allMessages.map((msg) => [msg._id, msg])).values(),
       );
 
       return { selectedChatMessages: uniqueMessages };
@@ -100,4 +100,29 @@ export const createChatSlice = (set, get) => ({
   setActiveCall: (call) => set({ activeCall: call }),
   clearActiveCall: () => set({ activeCall: null }),
 
+  setTypingIndicator: ({ chatId, user, isTyping }) =>
+    set((state) => {
+      const existingUsers = state.typingIndicators[chatId] || [];
+      const hasUser = existingUsers.some(
+        (typingUser) => typingUser._id === user._id,
+      );
+      const nextUsers = isTyping
+        ? hasUser
+          ? existingUsers
+          : [...existingUsers, user]
+        : existingUsers.filter((typingUser) => typingUser._id !== user._id);
+
+      return {
+        typingIndicators: {
+          ...state.typingIndicators,
+          [chatId]: nextUsers,
+        },
+      };
+    }),
+  clearTypingIndicatorsForChat: (chatId) =>
+    set((state) => {
+      if (!state.typingIndicators[chatId]) return {};
+      const { [chatId]: _removed, ...rest } = state.typingIndicators;
+      return { typingIndicators: rest };
+    }),
 });
