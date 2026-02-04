@@ -178,3 +178,26 @@ export const getAllContacts = async (req, res, next) => {
     next(error);
   }
 };
+
+export const registerPushToken = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { token, platform } = req.body;
+
+    if (!token || !platform) {
+      return next(createError(400, "token and platform are required."));
+    }
+
+    await User.findByIdAndUpdate(userId, {
+      $pull: { pushTokens: { token } },
+    });
+
+    await User.findByIdAndUpdate(userId, {
+      $push: { pushTokens: { token, platform, createdAt: new Date() } },
+    });
+
+    return res.status(200).json({ message: "Push token registered." });
+  } catch (error) {
+    next(error);
+  }
+};
