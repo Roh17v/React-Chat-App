@@ -1,9 +1,9 @@
-import { useRef } from "react";
+import { useCallback, useRef } from "react";
 
 const useMediaStream = () => {
   const localStreamRef = useRef(null);
 
-  const startMedia = async (type = "audio") => {
+  const startMedia = useCallback(async (type = "audio") => {
     if (localStreamRef.current) return localStreamRef.current;
 
     const constraints =
@@ -12,9 +12,9 @@ const useMediaStream = () => {
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     localStreamRef.current = stream;
     return stream;
-  };
+  }, []);
 
-  const stopMedia = () => {
+  const stopMedia = useCallback(() => {
     if (!localStreamRef.current) return;
 
     localStreamRef.current.getTracks().forEach((track) => {
@@ -22,7 +22,7 @@ const useMediaStream = () => {
     });
 
     localStreamRef.current = null;
-  };
+  }, []);
 
   return {
     localStreamRef,

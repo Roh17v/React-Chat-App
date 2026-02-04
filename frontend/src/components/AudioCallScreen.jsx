@@ -24,7 +24,8 @@ const DEFAULT_ICE_SERVERS = {
   ],
 };
 const AudioCallScreen = () => {
-  const { activeCall, clearActiveCall } = useAppStore();
+  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted } =
+    useAppStore();
   const { socket } = useSocket();
   // UI states
   const [callDuration, setCallDuration] = useState(0);
@@ -47,6 +48,9 @@ const AudioCallScreen = () => {
   const makingOffer = useRef(false);
   const ignoreOffer = useRef(false);
   const isPolite = useRef(!activeCall.isCaller);
+  const shouldStartOnStreamReady = useRef(false);
+  const acceptRetryRef = useRef(null);
+  const hasReceivedOffer = useRef(false);
   if (!activeCall || activeCall.callType !== "audio") return null;
   // Wake lock screen
   useEffect(() => {
@@ -90,6 +94,10 @@ const AudioCallScreen = () => {
           handleDeviceChange();
         };
         if (!activeCall.isCaller) initializePeerConnection(stream);
+        if (activeCall.isCaller && shouldStartOnStreamReady.current) {
+          shouldStartOnStreamReady.current = false;
+          initializePeerConnection(stream);
+        }
       } catch (err) {
         console.error("Media Error:", err);
         setConnectionStatus("failed");
@@ -122,15 +130,16 @@ const AudioCallScreen = () => {
   };
   // Caller Trigger
   useEffect(() => {
-    if (!socket || !activeCall.isCaller) return;
-    const handleCallAccepted = () => {
-      setCallStatus("connected");
-      if (localStreamRef.current)
-        initializePeerConnection(localStreamRef.current);
-    };
-    socket.on("call-accepted", handleCallAccepted);
-    return () => socket.off("call-accepted", handleCallAccepted);
-  }, [socket, activeCall.isCaller]);
+    if (!activeCall?.isCaller) return;
+    if (!callAccepted) return;
+    setCallStatus("connected");
+    if (localStreamRef.current) {
+      initializePeerConnection(localStreamRef.current);
+    } else {
+      shouldStartOnStreamReady.current = true;
+    }
+    clearCallAccepted();
+  }, [callAccepted, activeCall?.isCaller, clearCallAccepted]);
   const initializePeerConnection = async (stream) => {
     if (pc.current) return;
     let config = { ...DEFAULT_ICE_SERVERS };
@@ -215,6 +224,13 @@ const AudioCallScreen = () => {
         (makingOffer.current || peer.signalingState !== "stable");
       ignoreOffer.current = !isPolite.current && offerCollision;
       if (ignoreOffer.current) return;
+      if (description.type === "offer") {
+        hasReceivedOffer.current = true;
+        if (acceptRetryRef.current) {
+          clearInterval(acceptRetryRef.current);
+          acceptRetryRef.current = null;
+        }
+      }
       if (offerCollision) {
         await Promise.all([
           peer.setLocalDescription({ type: "rollback" }),
@@ -259,13 +275,46 @@ const AudioCallScreen = () => {
       socket.off("call:end", onEnd);
     };
   }, [socket]);
+
+  useEffect(() => {
+    if (!socket || activeCall?.isCaller) return;
+    const callId = activeCall?.callId;
+    const callerId = activeCall?.otherUserId || activeCall?.callerId;
+    if (!callId) return;
+
+    let attempts = 0;
+    const sendAccept = () => {
+      if (hasReceivedOffer.current) return;
+      attempts += 1;
+      socket.emit("call:accept", { callId, callerId });
+      if (attempts >= 5 && acceptRetryRef.current) {
+        clearInterval(acceptRetryRef.current);
+        acceptRetryRef.current = null;
+      }
+    };
+
+    sendAccept();
+    acceptRetryRef.current = setInterval(sendAccept, 2000);
+
+    return () => {
+      if (acceptRetryRef.current) {
+        clearInterval(acceptRetryRef.current);
+        acceptRetryRef.current = null;
+      }
+    };
+  }, [socket, activeCall?.isCaller, activeCall?.callId, activeCall?.otherUserId, activeCall?.callerId]);
   const cleanup = useCallback(() => {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
     pc.current = null;
     if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
+    if (acceptRetryRef.current) {
+      clearInterval(acceptRetryRef.current);
+      acceptRetryRef.current = null;
+    }
     clearActiveCall();
-  }, [clearActiveCall]);
+    clearCallAccepted();
+  }, [clearActiveCall, clearCallAccepted]);
   const endCall = () => {
     const to = activeCall?.otherUserId || activeCall?.callerId;
     if (to) socket.emit("call:end", { to });

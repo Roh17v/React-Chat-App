@@ -28,6 +28,8 @@ export const SocketProvider = ({ children }) => {
     clearIncomingCall,
     setActiveCall,
     clearActiveCall,
+    setCallAccepted,
+    clearCallAccepted,
     setTypingIndicator,
   } = useAppStore();
 
@@ -67,15 +69,21 @@ export const SocketProvider = ({ children }) => {
         setIncomingCall(data);
       });
 
+      socket.current.on("call-accepted", () => {
+        setCallAccepted(true);
+      });
+
       socket.current.on("call-rejected", () => {
         clearIncomingCall();
         clearActiveCall();
+        clearCallAccepted();
       });
 
       socket.current.on("call-ended", () => {
         stopMedia();
         clearIncomingCall();
         clearActiveCall();
+        clearCallAccepted();
       });
 
       socket.current.on("typing", (payload) => {
@@ -120,6 +128,7 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("new-channel-contact");
           socket.current.off("onlineUsers");
           socket.current.off("incoming-call");
+          socket.current.off("call-accepted");
           socket.current.off("call-rejected");
           socket.current.off("call-ended");
           socket.current.off("typing");
@@ -138,6 +147,9 @@ export const SocketProvider = ({ children }) => {
     clearIncomingCall,
     setActiveCall,
     clearActiveCall,
+    setCallAccepted,
+    clearCallAccepted,
+    stopMedia,
   ]);
   useEffect(() => {
     if (!socket.current) return;

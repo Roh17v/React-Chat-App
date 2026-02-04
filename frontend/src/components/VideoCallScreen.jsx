@@ -25,7 +25,8 @@ import { GET_TURN_CREDENTIALS } from "@/utils/constants";
 import { cn } from "@/lib/utils";
 
 const VideoCallScreen = () => {
-  const { activeCall, clearActiveCall } = useAppStore();
+  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted } =
+    useAppStore();
   const { socket } = useSocket();
 
   // UI STATE
@@ -61,6 +62,9 @@ const VideoCallScreen = () => {
   const makingOffer = useRef(false);
   const ignoreOffer = useRef(false);
   const isPolite = useRef(!activeCall?.isCaller);
+  const shouldStartOnStreamReady = useRef(false);
+  const acceptRetryRef = useRef(null);
+  const hasReceivedOffer = useRef(false);
 
   // SINGLE SET OF PERSISTENT VIDEO REFS - Never remounted
   const remoteVideoRef = useRef(null);
@@ -239,6 +243,10 @@ const VideoCallScreen = () => {
         });
 
         if (!activeCall.isCaller) initializePeerConnection(stream);
+        if (activeCall.isCaller && shouldStartOnStreamReady.current) {
+          shouldStartOnStreamReady.current = false;
+          initializePeerConnection(stream);
+        }
       } catch (err) {
         console.error("Media Error:", err);
         setMediaError("Camera/Mic access denied.");
@@ -259,15 +267,16 @@ const VideoCallScreen = () => {
 
   // CALLER TRIGGER
   useEffect(() => {
-    if (!socket || !activeCall.isCaller) return;
-    const handleCallAccepted = () => {
-      setCallStatus("connected");
-      if (localStreamRef.current)
-        initializePeerConnection(localStreamRef.current);
-    };
-    socket.on("call-accepted", handleCallAccepted);
-    return () => socket.off("call-accepted", handleCallAccepted);
-  }, [socket, activeCall.isCaller]);
+    if (!activeCall?.isCaller) return;
+    if (!callAccepted) return;
+    setCallStatus("connected");
+    if (localStreamRef.current) {
+      initializePeerConnection(localStreamRef.current);
+    } else {
+      shouldStartOnStreamReady.current = true;
+    }
+    clearCallAccepted();
+  }, [callAccepted, activeCall?.isCaller, clearCallAccepted]);
 
   // HANDLE TAB CLOSE
   useEffect(() => {
@@ -390,6 +399,13 @@ const VideoCallScreen = () => {
 
       ignoreOffer.current = !isPolite.current && offerCollision;
       if (ignoreOffer.current) return;
+      if (description.type === "offer") {
+        hasReceivedOffer.current = true;
+        if (acceptRetryRef.current) {
+          clearInterval(acceptRetryRef.current);
+          acceptRetryRef.current = null;
+        }
+      }
 
       if (offerCollision) {
         await Promise.all([
@@ -443,6 +459,34 @@ const VideoCallScreen = () => {
     };
   }, [socket]);
 
+  useEffect(() => {
+    if (!socket || activeCall?.isCaller) return;
+    const callId = activeCall?.callId;
+    const callerId = activeCall?.otherUserId || activeCall?.callerId;
+    if (!callId) return;
+
+    let attempts = 0;
+    const sendAccept = () => {
+      if (hasReceivedOffer.current) return;
+      attempts += 1;
+      socket.emit("call:accept", { callId, callerId });
+      if (attempts >= 5 && acceptRetryRef.current) {
+        clearInterval(acceptRetryRef.current);
+        acceptRetryRef.current = null;
+      }
+    };
+
+    sendAccept();
+    acceptRetryRef.current = setInterval(sendAccept, 2000);
+
+    return () => {
+      if (acceptRetryRef.current) {
+        clearInterval(acceptRetryRef.current);
+        acceptRetryRef.current = null;
+      }
+    };
+  }, [socket, activeCall?.isCaller, activeCall?.callId, activeCall?.otherUserId, activeCall?.callerId]);
+
   const cleanup = useCallback(() => {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
@@ -450,9 +494,14 @@ const VideoCallScreen = () => {
     if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
     if (animationFrameRef.current)
       cancelAnimationFrame(animationFrameRef.current);
+    if (acceptRetryRef.current) {
+      clearInterval(acceptRetryRef.current);
+      acceptRetryRef.current = null;
+    }
     clearActiveCall();
+    clearCallAccepted();
     setConnectionStatus("disconnected");
-  }, [clearActiveCall]);
+  }, [clearActiveCall, clearCallAccepted]);
 
   const endCall = () => {
     const to = activeCall?.otherUserId || activeCall?.callerId;

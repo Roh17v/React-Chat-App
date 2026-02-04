@@ -9,6 +9,7 @@ import {
   onMessage,
 } from "firebase/messaging";
 import { REGISTER_PUSH_TOKEN_ROUTE } from "./constants";
+import useAppStore from "../store";
 
 const getFirebaseConfig = () => ({
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -26,6 +27,69 @@ const registerPushToken = async (token, platform) => {
     { token, platform },
     { withCredentials: true },
   );
+};
+
+const buildPendingPayload = (rawData = {}, action) => {
+  const data = rawData || {};
+  const type =
+    data.type ||
+    (data.callId ? "call" : data.chatId || data.senderId ? "message" : "");
+
+  const chatId =
+    data.chatId || data.senderId || data.channelId || data.contactId || "";
+  const chatType = data.chatType || (data.channelId ? "channel" : "contact");
+
+  const callAction =
+    action === "accept" || action === "reject" ? action : undefined;
+
+  return {
+    type,
+    chatType,
+    chatId,
+    callId: data.callId || "",
+    callerId: data.callerId || data.senderId || "",
+    callType: data.callType || "audio",
+    callerName: data.callerName || data.senderName || "",
+    callerImage: data.callerImage || data.senderImage || "",
+    callerEmail: data.callerEmail || "",
+    callAction,
+  };
+};
+
+const setPendingNotification = (payload) => {
+  if (!payload || !payload.type) return;
+  const store = useAppStore.getState();
+  if (store?.setPendingNotification) {
+    store.setPendingNotification(payload);
+  }
+};
+
+const buildWebNotificationOptions = (data = {}) => {
+  const icon =
+    data.senderImage ||
+    data.callerImage ||
+    data.imageUrl ||
+    "/web-app-manifest-192x192.png";
+  const options = {
+    body: data.body || "",
+    icon,
+    badge: "/favicon-96x96.png",
+    data,
+    tag: data.chatId ? `chat-${data.chatId}` : undefined,
+    renotify: true,
+  };
+
+  if (data.type === "call") {
+    options.tag = data.callId ? `call-${data.callId}` : "incoming-call";
+    options.requireInteraction = true;
+    options.vibrate = [200, 100, 200, 100, 200];
+    options.actions = [
+      { action: "accept", title: "Accept" },
+      { action: "reject", title: "Reject" },
+    ];
+  }
+
+  return options;
 };
 
 const setupWebPush = async () => {
@@ -69,19 +133,42 @@ const setupWebPush = async () => {
 
   const unsubscribe = onMessage(messaging, (payload) => {
     if (Notification.permission !== "granted") return;
-    const title = payload.notification?.title || "New notification";
-    const body = payload.notification?.body || "";
-    new Notification(title, { body });
+    const data = {
+      ...(payload?.data || {}),
+      title: payload?.data?.title || payload?.notification?.title || "",
+      body: payload?.data?.body || payload?.notification?.body || "",
+    };
+    const title = data.title || "New notification";
+    const options = buildWebNotificationOptions(data);
+    serviceWorkerRegistration?.showNotification(title, options);
   });
+
+  const handleServiceWorkerMessage = (event) => {
+    const payload = event?.data?.payload;
+    const action = event?.data?.action || event?.data?.payload?.action || "";
+    if (!payload) return;
+    setPendingNotification(buildPendingPayload(payload, action));
+  };
+
+  navigator.serviceWorker?.addEventListener(
+    "message",
+    handleServiceWorkerMessage,
+  );
 
   return () => {
     unsubscribe();
+    navigator.serviceWorker?.removeEventListener(
+      "message",
+      handleServiceWorkerMessage,
+    );
   };
 };
 
 const setupNativePush = async () => {
   let registrationListener;
   let errorListener;
+  let actionListener;
+  let receiveListener;
 
   const permission = await PushNotifications.requestPermissions();
   if (permission.receive !== "granted") return () => {};
@@ -102,9 +189,30 @@ const setupNativePush = async () => {
     },
   );
 
+  receiveListener = await PushNotifications.addListener(
+    "pushNotificationReceived",
+    (notification) => {
+      const data = notification?.data || {};
+      if (data.type !== "call") return;
+      setPendingNotification(buildPendingPayload(data));
+    },
+  );
+
+  actionListener = await PushNotifications.addListener(
+    "pushNotificationActionPerformed",
+    (notification) => {
+      const data =
+        notification?.notification?.data || notification?.data || {};
+      const action = notification?.actionId || "";
+      setPendingNotification(buildPendingPayload(data, action));
+    },
+  );
+
   return () => {
     registrationListener?.remove();
     errorListener?.remove();
+    actionListener?.remove();
+    receiveListener?.remove();
   };
 };
 
