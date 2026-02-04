@@ -4,9 +4,19 @@ import { Channel } from "./models/channel.model.js";
 import { User } from "./models/user.model.js";
 import Call from "./models/call.model.js";
 import { sendPushToTokens } from "./utils/pushNotifications.js";
+import mongoose from "mongoose";
 
 let io;
 let userSocketMap;
+
+const buildCallQuery = (callId) => {
+  if (!callId) return null;
+  const isObjectId = mongoose.Types.ObjectId.isValid(callId);
+  if (isObjectId) {
+    return { $or: [{ _id: callId }, { callId }] };
+  }
+  return { callId };
+};
 
 const setupSocket = (server) => {
   io = new SocketIoServer(server, {
@@ -94,15 +104,22 @@ const setupSocket = (server) => {
         const receiverUser = await User.findById(message.receiver).select(
           "pushTokens",
         );
-        const tokens =
-          receiverUser?.pushTokens?.map((entry) => entry.token) || [];
+        const pushTokens = receiverUser?.pushTokens || [];
         void sendPushToTokens({
-          tokens,
+          tokens: pushTokens,
           title: `${messageData.sender.firstName || "New"} message`,
           body: messageData.content || "Sent you a message.",
+          imageUrl: messageData.sender.image || undefined,
           data: {
             type: "message",
+            chatType: "contact",
+            chatId: messageData.sender._id.toString(),
             senderId: messageData.sender._id.toString(),
+            senderName: `${messageData.sender.firstName || ""} ${
+              messageData.sender.lastName || ""
+            }`.trim(),
+            senderImage: messageData.sender.image || "",
+            url: `/chats?type=message&chatType=contact&chatId=${messageData.sender._id.toString()}`,
           },
         });
       }
@@ -167,19 +184,26 @@ const setupSocket = (server) => {
           const users = await User.find({ _id: { $in: uniqueOfflineIds } })
             .select("pushTokens")
             .lean();
-          const tokens = users.flatMap((user) =>
-            (user.pushTokens || []).map((entry) => entry.token),
-          );
+          const pushTokens = users.flatMap((user) => user.pushTokens || []);
           void sendPushToTokens({
-            tokens,
+            tokens: pushTokens,
             title: `${messageData.sender.firstName || "New"} in ${
               channel.name || "channel"
             }`,
             body: messageData.content || "Sent a file.",
+            imageUrl: messageData.sender.image || undefined,
             data: {
               type: "channel-message",
+              chatType: "channel",
+              chatId: channel._id.toString(),
               channelId: channel._id.toString(),
+              channelName: channel.name || "channel",
               senderId: messageData.sender._id.toString(),
+              senderName: `${messageData.sender.firstName || ""} ${
+                messageData.sender.lastName || ""
+              }`.trim(),
+              senderImage: messageData.sender.image || "",
+              url: `/chats?type=channel-message&chatType=channel&chatId=${channel._id.toString()}`,
             },
           });
         }
@@ -371,17 +395,21 @@ const setupSocket = (server) => {
         if (receiverSockets.size === 0) {
           const receiverUser =
             await User.findById(receiverId).select("pushTokens");
-          const tokens =
-            receiverUser?.pushTokens?.map((entry) => entry.token) || [];
+          const pushTokens = receiverUser?.pushTokens || [];
           void sendPushToTokens({
-            tokens,
+            tokens: pushTokens,
             title: "Incoming call",
             body: `${payload.callerName} is calling you.`,
+            imageUrl: payload.callerImage || undefined,
             data: {
               type: "call",
               callId: payload.callId.toString(),
               callerId: payload.callerId.toString(),
               callType,
+              callerName: payload.callerName || "Unknown",
+              callerImage: payload.callerImage || "",
+              callerEmail: payload.callerEmail || "",
+              url: `/chats?type=call&callId=${payload.callId.toString()}&callerId=${payload.callerId.toString()}&callType=${callType}`,
             },
           });
         }
@@ -392,26 +420,34 @@ const setupSocket = (server) => {
 
     // 2. Accept Call
     socket.on("call:accept", async ({ callId, callerId }) => {
-      const call = await Call.findByIdAndUpdate(
-        callId,
-        { connectedAt: new Date() },
-        { new: true },
-      );
-      emitToUser(callerId || call?.callerId.toString(), "call-accepted", {
-        callId,
-      });
+      const query = buildCallQuery(callId);
+      const call = query
+        ? await Call.findOneAndUpdate(
+            query,
+            { connectedAt: new Date() },
+            { new: true },
+          )
+        : null;
+      const targetCallerId = callerId || call?.callerId?.toString();
+      if (targetCallerId) {
+        emitToUser(targetCallerId, "call-accepted", { callId });
+      }
     });
 
     // Reject Call
     socket.on("call:reject", async ({ callId, callerId }) => {
-      const call = await Call.findByIdAndUpdate(
-        callId,
-        { status: "rejected", endedAt: new Date() },
-        { new: true },
-      );
-      emitToUser(callerId || call?.callerId.toString(), "call-rejected", {
-        callId,
-      });
+      const query = buildCallQuery(callId);
+      const call = query
+        ? await Call.findOneAndUpdate(
+            query,
+            { status: "rejected", endedAt: new Date() },
+            { new: true },
+          )
+        : null;
+      const targetCallerId = callerId || call?.callerId?.toString();
+      if (targetCallerId) {
+        emitToUser(targetCallerId, "call-rejected", { callId });
+      }
     });
 
     // End Call (Hangup)
