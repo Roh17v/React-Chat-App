@@ -1,4 +1,4 @@
-export const HOST = "https://react-chat-app-0vd8.onrender.com";
+export const HOST = import.meta.env.VITE_BASE_URL;
 
 export const AUTH_ROUTES = "/api/auth";
 
@@ -17,6 +17,8 @@ export const PRIVATE_CONTACT_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/private`;
 export const CHANNEL_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/channel`;
 
 export const DM_CONTACTS_ROUTE = `${USER_ROUTES}/dm-contacts`;
+
+export const REGISTER_PUSH_TOKEN_ROUTE = `${HOST}${USER_ROUTES}/push-token`;
 
 export const UPLOAD_FILE_ROUTE = `${HOST}${MESSAGES_ROUTE}/upload-file`;
 

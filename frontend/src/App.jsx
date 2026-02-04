@@ -10,11 +10,13 @@ import axios from "axios";
 import { HOST } from "./utils/constants";
 import { AUTH_ROUTES } from "./utils/constants";
 import Loader from "./components/Loader";
+import { initializePushNotifications } from "./utils/pushNotifications";
 
 function App() {
   const checkAuth = useAppStore((state) => state.checkAuth);
   const [isLoading, setIsLoading] = useState(true);
   const setUser = useAppStore((state) => state.setUser);
+  const user = useAppStore((state) => state.user);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -40,6 +42,21 @@ function App() {
 
     checkAuth();
   }, []);
+
+  useEffect(() => {
+    let cleanup = () => {};
+    if (user) {
+      initializePushNotifications()
+      .then((teardown) => {
+        cleanup = teardown || (() => {});
+      })
+      .catch((error) => {
+        console.error("Failed to initialize push notifications:", error);
+      });
+    }
+
+    return () => cleanup();
+  }, [user]);
 
   if (isLoading) return <Loader />;
 
