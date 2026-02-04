@@ -86,16 +86,19 @@ export const sendPushToTokens = async ({
   }
 
   if (grouped.android.length > 0) {
+    const isCall = data?.type === "call";
     await sendMulticast({
       tokens: grouped.android,
-      notification: {
-        title,
-        body,
-        image: imageUrl,
-      },
+      notification: isCall
+        ? undefined
+        : {
+            title,
+            body,
+            image: imageUrl,
+          },
       data: baseData,
       android: {
-        priority: data?.type === "call" ? "high" : "normal",
+        priority: isCall ? "high" : "normal",
       },
     });
   }
