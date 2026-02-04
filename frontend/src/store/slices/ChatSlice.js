@@ -12,6 +12,8 @@ export const createChatSlice = (set, get) => ({
   page: 1,
   incomingCall: null, // { callId, callerId, callType }
   activeCall: null, // { callId, otherUserId, callType }
+  pendingNotification: null, // { type, chatType, chatId, callId, callAction }
+  callAccepted: false,
   typingIndicators: {},
 
   setPage: (pageNo) => set({ page: pageNo }),
@@ -99,6 +101,12 @@ export const createChatSlice = (set, get) => ({
 
   setActiveCall: (call) => set({ activeCall: call }),
   clearActiveCall: () => set({ activeCall: null }),
+
+  setCallAccepted: (accepted = true) => set({ callAccepted: accepted }),
+  clearCallAccepted: () => set({ callAccepted: false }),
+
+  setPendingNotification: (payload) => set({ pendingNotification: payload }),
+  clearPendingNotification: () => set({ pendingNotification: null }),
 
   setTypingIndicator: ({ chatId, user, isTyping }) =>
     set((state) => {
