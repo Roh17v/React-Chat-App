@@ -29,6 +29,16 @@ export const createChatSlice = (set, get) => ({
     set({ fileDownloadingProgress }),
   setDirectMessagesContacts: (contacts) =>
     set({ directMessagesContacts: contacts }),
+  resetUnreadCount: (contactId) =>
+    set((state) => {
+      if (!contactId || !state.directMessagesContacts) return {};
+      const updated = state.directMessagesContacts.map((contact) =>
+        contact._id === contactId
+          ? { ...contact, unreadCount: 0 }
+          : contact,
+      );
+      return { directMessagesContacts: updated };
+    }),
   setSelectedChatData: (selectedChatData) => set({ selectedChatData }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
   setSelectedChatMessages: (newMessages, reset = false) =>

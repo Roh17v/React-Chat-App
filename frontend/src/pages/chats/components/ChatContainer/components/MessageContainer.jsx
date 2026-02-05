@@ -14,6 +14,7 @@ import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useSocket } from "@/context/SocketContext";
 
 const MessageContainer = () => {
   const scrollRef = useRef(null);
@@ -30,7 +31,9 @@ const MessageContainer = () => {
     setPage,
     typingIndicators,
     clearTypingIndicatorsForChat,
+    resetUnreadCount,
   } = useAppStore();
+  const { socket } = useSocket();
 
   const [showImage, setShowImage] = useState(false);
   const [imageURL, setImageURL] = useState(null);
@@ -128,6 +131,13 @@ const MessageContainer = () => {
         setHasMore(true);
         setSelectedChatMessages([], true);
         getMessages(1);
+        if (socket && user?.id) {
+          socket.emit("confirm-read", {
+            userId: user.id,
+            senderId: selectedChatData._id,
+          });
+        }
+        resetUnreadCount(selectedChatData._id);
       }
       if (selectedChatType === "channel") {
         setPage(1);
@@ -136,7 +146,14 @@ const MessageContainer = () => {
         getChannelMessages(1);
       }
     }
-  }, [selectedChatData, selectedChatType, setSelectedChatMessages]);
+  }, [
+    selectedChatData,
+    selectedChatType,
+    setSelectedChatMessages,
+    socket,
+    user?.id,
+    resetUnreadCount,
+  ]);
 
   // Clear typing indicators when leaving chat
   useEffect(() => {
