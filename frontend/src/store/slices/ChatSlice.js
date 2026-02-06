@@ -105,6 +105,25 @@ export const createChatSlice = (set, get) => ({
       return {};
     });
   },
+  updateContactLastSeen: (userId, lastSeen) =>
+    set((state) => {
+      let updatedContacts = state.directMessagesContacts;
+      if (updatedContacts && updatedContacts.length > 0) {
+        updatedContacts = updatedContacts.map((contact) =>
+          contact._id === userId ? { ...contact, lastSeen } : contact,
+        );
+      }
+
+      const selectedChatData =
+        state.selectedChatData?._id === userId
+          ? { ...state.selectedChatData, lastSeen }
+          : state.selectedChatData;
+
+      return {
+        directMessagesContacts: updatedContacts,
+        selectedChatData,
+      };
+    }),
 
   setIncomingCall: (call) => set({ incomingCall: call }),
   clearIncomingCall: () => set({ incomingCall: null }),

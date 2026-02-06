@@ -50,6 +50,55 @@ const ChatHeader = () => {
 
   const contactIsOnline = onlineUsers?.includes(selectedChatData._id);
 
+  const formatLastSeen = (value) => {
+    if (!value) return "Last seen recently";
+    const lastSeenDate = new Date(value);
+    if (Number.isNaN(lastSeenDate.getTime())) return "Last seen recently";
+
+    const now = new Date();
+    const diffMs = now - lastSeenDate;
+    if (diffMs <= 60 * 1000) return "Last seen just now";
+
+    const isSameDay = (a, b) =>
+      a.getFullYear() === b.getFullYear() &&
+      a.getMonth() === b.getMonth() &&
+      a.getDate() === b.getDate();
+
+    const timeFormatter = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const timeText = timeFormatter.format(lastSeenDate);
+
+    if (isSameDay(lastSeenDate, now)) {
+      return `Last seen today at ${timeText}`;
+    }
+
+    const yesterday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 1,
+    );
+    if (isSameDay(lastSeenDate, yesterday)) {
+      return `Last seen yesterday at ${timeText}`;
+    }
+
+    const dateFormatter = new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    return `Last seen on ${dateFormatter.format(lastSeenDate)} at ${timeText}`;
+  };
+
+  const getStatusText = () => {
+    if (selectedChatType !== "contact") {
+      return `${selectedChatData?.members?.length || 0} members`;
+    }
+    if (contactIsOnline) return "Online";
+    return formatLastSeen(selectedChatData?.lastSeen);
+  };
+
   return (
     <>
       {/* Header */}
@@ -92,11 +141,7 @@ const ChatHeader = () => {
               {getDisplayName()}
             </span>
             <span className="text-foreground-muted text-xs">
-              {selectedChatType === "contact"
-                ? contactIsOnline
-                  ? "Online"
-                  : "Offline"
-                : `${selectedChatData?.members?.length || 0} members`}
+              {getStatusText()}
             </span>
           </div>
         </div>
