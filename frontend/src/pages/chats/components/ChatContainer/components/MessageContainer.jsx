@@ -46,10 +46,11 @@ const MessageContainer = () => {
   const lastMessageCountRef = useRef(0);
   const wasNearBottomRef = useRef(true);
   const prevTypingUsersLengthRef = useRef(0);
+  const selectedChatId = selectedChatData?._id;
 
   // Typing indicator state
-  const typingUsers = selectedChatData?._id
-    ? typingIndicators[selectedChatData._id] || []
+  const typingUsers = selectedChatId
+    ? typingIndicators[selectedChatId] || []
     : [];
 
   // Check if user is near bottom of scroll
@@ -70,12 +71,12 @@ const MessageContainer = () => {
   }, []);
 
   const getMessages = async (pageNumber = 1) => {
-    if (!selectedChatData?._id || loading || !hasMore) return;
+    if (!selectedChatId || loading || !hasMore) return;
 
     setLoading(true);
     try {
       const response = await axios.get(
-        `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatData._id}?page=${pageNumber}&limit=20`,
+        `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${pageNumber}&limit=20`,
         {
           withCredentials: true,
         }
@@ -98,12 +99,12 @@ const MessageContainer = () => {
   };
 
   const getChannelMessages = async (pageNumber = 1) => {
-    if (!selectedChatData?._id || loading || !hasMore) return;
+    if (!selectedChatId || loading || !hasMore) return;
     setLoading(true);
 
     try {
       const response = await axios.get(
-        `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatData._id}?page=${pageNumber}&limit=20`,
+        `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${pageNumber}&limit=20`,
         {
           withCredentials: true,
         }
@@ -125,7 +126,7 @@ const MessageContainer = () => {
   };
 
   useEffect(() => {
-    if (selectedChatData?._id) {
+    if (selectedChatId) {
       if (selectedChatType === "contact") {
         setPage(1);
         setHasMore(true);
@@ -134,10 +135,10 @@ const MessageContainer = () => {
         if (socket && user?.id) {
           socket.emit("confirm-read", {
             userId: user.id,
-            senderId: selectedChatData._id,
+            senderId: selectedChatId,
           });
         }
-        resetUnreadCount(selectedChatData._id);
+        resetUnreadCount(selectedChatId);
       }
       if (selectedChatType === "channel") {
         setPage(1);
@@ -147,7 +148,7 @@ const MessageContainer = () => {
       }
     }
   }, [
-    selectedChatData,
+    selectedChatId,
     selectedChatType,
     setSelectedChatMessages,
     socket,
