@@ -28,6 +28,9 @@ export const SocketProvider = ({ children }) => {
     clearIncomingCall,
     setActiveCall,
     clearActiveCall,
+    setCallAccepted,
+    clearCallAccepted,
+    setTypingIndicator,
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
@@ -66,15 +69,57 @@ export const SocketProvider = ({ children }) => {
         setIncomingCall(data);
       });
 
+      socket.current.on("call-accepted", () => {
+        setCallAccepted(true);
+      });
+
       socket.current.on("call-rejected", () => {
         clearIncomingCall();
         clearActiveCall();
+        clearCallAccepted();
       });
 
       socket.current.on("call-ended", () => {
         stopMedia();
         clearIncomingCall();
         clearActiveCall();
+        clearCallAccepted();
+      });
+
+      socket.current.on("typing", (payload) => {
+        if (payload?.chatType === "contact") {
+          setTypingIndicator({
+            chatId: payload.senderId,
+            user: payload.sender,
+            isTyping: true,
+          });
+        }
+
+        if (payload?.chatType === "channel") {
+          setTypingIndicator({
+            chatId: payload.channelId,
+            user: payload.sender,
+            isTyping: true,
+          });
+        }
+      });
+
+      socket.current.on("stop-typing", (payload) => {
+        if (payload?.chatType === "contact") {
+          setTypingIndicator({
+            chatId: payload.senderId,
+            user: payload.sender,
+            isTyping: false,
+          });
+        }
+
+        if (payload?.chatType === "channel") {
+          setTypingIndicator({
+            chatId: payload.channelId,
+            user: payload.sender,
+            isTyping: false,
+          });
+        }
       });
 
       return () => {
@@ -83,8 +128,11 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("new-channel-contact");
           socket.current.off("onlineUsers");
           socket.current.off("incoming-call");
+          socket.current.off("call-accepted");
           socket.current.off("call-rejected");
           socket.current.off("call-ended");
+          socket.current.off("typing");
+          socket.current.off("stop-typing");
 
           socket.current.disconnect();
           socket.current = null;
@@ -99,6 +147,9 @@ export const SocketProvider = ({ children }) => {
     clearIncomingCall,
     setActiveCall,
     clearActiveCall,
+    setCallAccepted,
+    clearCallAccepted,
+    stopMedia,
   ]);
   useEffect(() => {
     if (!socket.current) return;

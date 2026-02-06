@@ -3,9 +3,20 @@ import Message from "./models/message.model.js";
 import { Channel } from "./models/channel.model.js";
 import { User } from "./models/user.model.js";
 import Call from "./models/call.model.js";
+import { sendPushToTokens } from "./utils/pushNotifications.js";
+import mongoose from "mongoose";
 
 let io;
 let userSocketMap;
+
+const buildCallQuery = (callId) => {
+  if (!callId) return null;
+  const isObjectId = mongoose.Types.ObjectId.isValid(callId);
+  if (isObjectId) {
+    return { $or: [{ _id: callId }, { callId }] };
+  }
+  return { callId };
+};
 
 const setupSocket = (server) => {
   io = new SocketIoServer(server, {
@@ -13,9 +24,9 @@ const setupSocket = (server) => {
       origin: [
         process.env.FRONTEND_URL,
         "http://localhost:5173",
-        "http://localhost",       
-        "https://localhost",      
-        "capacitor://localhost"   
+        "http://localhost",
+        "https://localhost",
+        "capacitor://localhost",
       ],
       methods: ["GET", "POST"],
       credentials: true,
@@ -90,6 +101,27 @@ const setupSocket = (server) => {
         senderSockets.forEach((socketId) =>
           io.to(socketId).emit("receiveMessage", messageData),
         );
+        const receiverUser = await User.findById(message.receiver).select(
+          "pushTokens",
+        );
+        const pushTokens = receiverUser?.pushTokens || [];
+        void sendPushToTokens({
+          tokens: pushTokens,
+          title: `${messageData.sender.firstName || "New"} message`,
+          body: messageData.content || "Sent you a message.",
+          imageUrl: messageData.sender.image || undefined,
+          data: {
+            type: "message",
+            chatType: "contact",
+            chatId: messageData.sender._id.toString(),
+            senderId: messageData.sender._id.toString(),
+            senderName: `${messageData.sender.firstName || ""} ${
+              messageData.sender.lastName || ""
+            }`.trim(),
+            senderImage: messageData.sender.image || "",
+            url: `/chats?type=message&chatType=contact&chatId=${messageData.sender._id.toString()}`,
+          },
+        });
       }
     } catch (error) {
       console.error("Error sending message:", error);
@@ -123,6 +155,7 @@ const setupSocket = (server) => {
       const finalData = { ...messageData._doc, channelId: channel._id };
 
       if (channel && channel.members) {
+        const offlineMemberIds = [];
         channel.members.forEach((contact) => {
           const memberSocketId =
             userSocketMap.get(contact._id.toString()) || new Set();
@@ -130,6 +163,8 @@ const setupSocket = (server) => {
             memberSocketId.forEach((socketId) => {
               io.to(socketId).emit("receive-channel-message", finalData);
             });
+          } else {
+            offlineMemberIds.push(contact._id.toString());
           }
         });
         const adminSocketId =
@@ -137,6 +172,39 @@ const setupSocket = (server) => {
         if (adminSocketId.size > 0) {
           adminSocketId.forEach((socketId) => {
             io.to(socketId).emit("receive-channel-message", finalData);
+          });
+        } else if (channel.admin?.toString() !== sender) {
+          offlineMemberIds.push(channel.admin.toString());
+        }
+
+        const uniqueOfflineIds = Array.from(
+          new Set(offlineMemberIds.filter((id) => id !== sender)),
+        );
+        if (uniqueOfflineIds.length > 0) {
+          const users = await User.find({ _id: { $in: uniqueOfflineIds } })
+            .select("pushTokens")
+            .lean();
+          const pushTokens = users.flatMap((user) => user.pushTokens || []);
+          void sendPushToTokens({
+            tokens: pushTokens,
+            title: `${messageData.sender.firstName || "New"} in ${
+              channel.name || "channel"
+            }`,
+            body: messageData.content || "Sent a file.",
+            imageUrl: messageData.sender.image || undefined,
+            data: {
+              type: "channel-message",
+              chatType: "channel",
+              chatId: channel._id.toString(),
+              channelId: channel._id.toString(),
+              channelName: channel.name || "channel",
+              senderId: messageData.sender._id.toString(),
+              senderName: `${messageData.sender.firstName || ""} ${
+                messageData.sender.lastName || ""
+              }`.trim(),
+              senderImage: messageData.sender.image || "",
+              url: `/chats?type=channel-message&chatType=channel&chatId=${channel._id.toString()}`,
+            },
           });
         }
       }
@@ -188,6 +256,55 @@ const setupSocket = (server) => {
       console.warn(
         `[⚠️ FAILED SEND] '${event}' to User ${userId} - User is OFFLINE or ID mismatch`,
       );
+    }
+  };
+
+  const emitTypingEvent = async ({
+    event,
+    chatType,
+    receiverId,
+    channelId,
+    senderId,
+  }) => {
+    try {
+      const sender = await User.findById(senderId, "firstName lastName");
+      const payload = {
+        chatType,
+        senderId,
+        sender: sender
+          ? {
+              _id: sender._id,
+              firstName: sender.firstName,
+              lastName: sender.lastName,
+            }
+          : { _id: senderId },
+        receiverId: receiverId || null,
+        channelId: channelId || null,
+      };
+
+      if (chatType === "contact" && receiverId) {
+        emitToUser(receiverId, event, payload);
+        return;
+      }
+
+      if (chatType === "channel" && channelId) {
+        const channel = await Channel.findById(channelId).populate("members");
+        if (!channel) return;
+
+        const memberIds = new Set(
+          (channel.members || []).map((member) => member._id.toString()),
+        );
+        if (channel.admin) {
+          memberIds.add(channel.admin.toString());
+        }
+        memberIds.delete(senderId);
+
+        memberIds.forEach((memberId) => {
+          emitToUser(memberId, event, payload);
+        });
+      }
+    } catch (error) {
+      console.error("Error emitting typing event:", error);
     }
   };
 
@@ -243,7 +360,7 @@ const setupSocket = (server) => {
       console.log(`Client Disconnected: ${socket.id}`);
     });
 
-    // Initiate Call 
+    // Initiate Call
     socket.on("call:initiate", async ({ receiverId, callType }) => {
       try {
         const caller = await User.findById(
@@ -274,6 +391,28 @@ const setupSocket = (server) => {
 
         // Notify Receiver
         emitToUser(receiverId, "incoming-call", payload);
+        const receiverSockets = userSocketMap.get(receiverId) || new Set();
+        if (receiverSockets.size === 0) {
+          const receiverUser =
+            await User.findById(receiverId).select("pushTokens");
+          const pushTokens = receiverUser?.pushTokens || [];
+          void sendPushToTokens({
+            tokens: pushTokens,
+            title: "Incoming call",
+            body: `${payload.callerName} is calling you.`,
+            imageUrl: payload.callerImage || undefined,
+            data: {
+              type: "call",
+              callId: payload.callId.toString(),
+              callerId: payload.callerId.toString(),
+              callType,
+              callerName: payload.callerName || "Unknown",
+              callerImage: payload.callerImage || "",
+              callerEmail: payload.callerEmail || "",
+              url: `/chats?type=call&callId=${payload.callId.toString()}&callerId=${payload.callerId.toString()}&callType=${callType}`,
+            },
+          });
+        }
       } catch (err) {
         console.error("Call initiate error:", err);
       }
@@ -281,26 +420,34 @@ const setupSocket = (server) => {
 
     // 2. Accept Call
     socket.on("call:accept", async ({ callId, callerId }) => {
-      const call = await Call.findByIdAndUpdate(
-        callId,
-        { connectedAt: new Date() },
-        { new: true },
-      );
-      emitToUser(callerId || call?.callerId.toString(), "call-accepted", {
-        callId,
-      });
+      const query = buildCallQuery(callId);
+      const call = query
+        ? await Call.findOneAndUpdate(
+            query,
+            { connectedAt: new Date() },
+            { new: true },
+          )
+        : null;
+      const targetCallerId = callerId || call?.callerId?.toString();
+      if (targetCallerId) {
+        emitToUser(targetCallerId, "call-accepted", { callId });
+      }
     });
 
     // Reject Call
     socket.on("call:reject", async ({ callId, callerId }) => {
-      const call = await Call.findByIdAndUpdate(
-        callId,
-        { status: "rejected", endedAt: new Date() },
-        { new: true },
-      );
-      emitToUser(callerId || call?.callerId.toString(), "call-rejected", {
-        callId,
-      });
+      const query = buildCallQuery(callId);
+      const call = query
+        ? await Call.findOneAndUpdate(
+            query,
+            { status: "rejected", endedAt: new Date() },
+            { new: true },
+          )
+        : null;
+      const targetCallerId = callerId || call?.callerId?.toString();
+      if (targetCallerId) {
+        emitToUser(targetCallerId, "call-rejected", { callId });
+      }
     });
 
     // End Call (Hangup)
@@ -338,13 +485,12 @@ const setupSocket = (server) => {
       }
     });
 
-
     // Offer (Handling "Polite" vs "Impolite")
     // Note: We use 'description' now instead of just 'offer' to be generic
     socket.on("call:offer", ({ to, description }) => {
       emitToUser(to, "call:offer", {
         description,
-        from: userId, 
+        from: userId,
       });
     });
 
@@ -361,6 +507,26 @@ const setupSocket = (server) => {
       emitToUser(to, "call:ice-candidate", {
         candidate,
         from: userId,
+      });
+    });
+
+    socket.on("typing", ({ chatType, receiverId, channelId }) => {
+      emitTypingEvent({
+        event: "typing",
+        chatType,
+        receiverId,
+        channelId,
+        senderId: userId,
+      });
+    });
+
+    socket.on("stop-typing", ({ chatType, receiverId, channelId }) => {
+      emitTypingEvent({
+        event: "stop-typing",
+        chatType,
+        receiverId,
+        channelId,
+        senderId: userId,
       });
     });
   });

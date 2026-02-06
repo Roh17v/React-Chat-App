@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Background from "@/assets/login2.png";
 import Victory from "@/assets/victory.svg";
 import { Tabs, TabsContent, TabsTrigger, TabsList } from "@/components/ui/tabs";
@@ -19,6 +19,13 @@ const Auth = () => {
   const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
   const setUser = useAppStore((state) => state.setUser);
+  const user = useAppStore((state) => state.user);
+
+  useEffect(() => {
+    if (!user) return;
+    navigate(user.profileSetup ? "/chats" : "/profile");
+  }, [navigate, user]);
+  
   const validateSignup = () => {
     if (!email.length) {
       toast.error("Email is required!");

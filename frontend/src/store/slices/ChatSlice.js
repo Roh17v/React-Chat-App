@@ -10,9 +10,11 @@ export const createChatSlice = (set, get) => ({
   channels: [],
   messageContainerRef: null,
   page: 1,
-  incomingCall: null,   // { callId, callerId, callType }
-  activeCall: null,     // { callId, otherUserId, callType }
-
+  incomingCall: null, // { callId, callerId, callType }
+  activeCall: null, // { callId, otherUserId, callType }
+  pendingNotification: null, // { type, chatType, chatId, callId, callAction }
+  callAccepted: false,
+  typingIndicators: {},
 
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
@@ -27,6 +29,16 @@ export const createChatSlice = (set, get) => ({
     set({ fileDownloadingProgress }),
   setDirectMessagesContacts: (contacts) =>
     set({ directMessagesContacts: contacts }),
+  resetUnreadCount: (contactId) =>
+    set((state) => {
+      if (!contactId || !state.directMessagesContacts) return {};
+      const updated = state.directMessagesContacts.map((contact) =>
+        contact._id === contactId
+          ? { ...contact, unreadCount: 0 }
+          : contact,
+      );
+      return { directMessagesContacts: updated };
+    }),
   setSelectedChatData: (selectedChatData) => set({ selectedChatData }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
   setSelectedChatMessages: (newMessages, reset = false) =>
@@ -36,7 +48,7 @@ export const createChatSlice = (set, get) => ({
         : [...newMessages, ...state.selectedChatMessages];
 
       const uniqueMessages = Array.from(
-        new Map(allMessages.map((msg) => [msg._id, msg])).values()
+        new Map(allMessages.map((msg) => [msg._id, msg])).values(),
       );
 
       return { selectedChatMessages: uniqueMessages };
@@ -100,4 +112,35 @@ export const createChatSlice = (set, get) => ({
   setActiveCall: (call) => set({ activeCall: call }),
   clearActiveCall: () => set({ activeCall: null }),
 
+  setCallAccepted: (accepted = true) => set({ callAccepted: accepted }),
+  clearCallAccepted: () => set({ callAccepted: false }),
+
+  setPendingNotification: (payload) => set({ pendingNotification: payload }),
+  clearPendingNotification: () => set({ pendingNotification: null }),
+
+  setTypingIndicator: ({ chatId, user, isTyping }) =>
+    set((state) => {
+      const existingUsers = state.typingIndicators[chatId] || [];
+      const hasUser = existingUsers.some(
+        (typingUser) => typingUser._id === user._id,
+      );
+      const nextUsers = isTyping
+        ? hasUser
+          ? existingUsers
+          : [...existingUsers, user]
+        : existingUsers.filter((typingUser) => typingUser._id !== user._id);
+
+      return {
+        typingIndicators: {
+          ...state.typingIndicators,
+          [chatId]: nextUsers,
+        },
+      };
+    }),
+  clearTypingIndicatorsForChat: (chatId) =>
+    set((state) => {
+      if (!state.typingIndicators[chatId]) return {};
+      const { [chatId]: _removed, ...rest } = state.typingIndicators;
+      return { typingIndicators: rest };
+    }),
 });

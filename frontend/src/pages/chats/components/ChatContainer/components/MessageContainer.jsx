@@ -6,13 +6,15 @@ import {
   PRIVATE_CONTACT_MESSAGES_ROUTE,
 } from "@/utils/constants";
 import moment from "moment";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useSocket } from "@/context/SocketContext";
 
 const MessageContainer = () => {
   const scrollRef = useRef(null);
@@ -27,14 +29,45 @@ const MessageContainer = () => {
     setFileDownloadingProgress,
     page,
     setPage,
+    typingIndicators,
+    clearTypingIndicatorsForChat,
+    resetUnreadCount,
   } = useAppStore();
+  const { socket } = useSocket();
 
   const [showImage, setShowImage] = useState(false);
   const [imageURL, setImageURL] = useState(null);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const containerRef = useRef(null);
   const newMessageRef = useRef(null);
+  const isInitialLoad = useRef(true);
+  const lastMessageCountRef = useRef(0);
+  const wasNearBottomRef = useRef(true);
+  const prevTypingUsersLengthRef = useRef(0);
+
+  // Typing indicator state
+  const typingUsers = selectedChatData?._id
+    ? typingIndicators[selectedChatData._id] || []
+    : [];
+
+  // Check if user is near bottom of scroll
+  const isNearBottom = useCallback(() => {
+    if (!containerRef.current) return true;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    return scrollHeight - scrollTop - clientHeight < 150;
+  }, []);
+
+  // Smooth scroll to bottom function
+  const scrollToBottom = useCallback((smooth = true) => {
+    if (containerRef.current) {
+      containerRef.current.scrollTo({
+        top: containerRef.current.scrollHeight,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    }
+  }, []);
 
   const getMessages = async (pageNumber = 1) => {
     if (!selectedChatData?._id || loading || !hasMore) return;
@@ -52,13 +85,8 @@ const MessageContainer = () => {
 
       setSelectedChatMessages(response.data, false);
 
-      if (containerRef.current && pageNumber === 1) {
-        requestAnimationFrame(() => {
-          containerRef.current?.scrollTo({
-            top: containerRef.current.scrollHeight,
-            behavior: "smooth",
-          });
-        });
+      if (pageNumber === 1) {
+        isInitialLoad.current = true;
       }
 
       setPage(pageNumber);
@@ -84,13 +112,8 @@ const MessageContainer = () => {
 
       setSelectedChatMessages(response.data, false);
 
-      if (containerRef.current && pageNumber === 1) {
-        requestAnimationFrame(() => {
-          containerRef.current?.scrollTo({
-            top: containerRef.current.scrollHeight,
-            behavior: "smooth",
-          });
-        });
+      if (pageNumber === 1) {
+        isInitialLoad.current = true;
       }
 
       setPage(pageNumber);
@@ -108,6 +131,13 @@ const MessageContainer = () => {
         setHasMore(true);
         setSelectedChatMessages([], true);
         getMessages(1);
+        if (socket && user?.id) {
+          socket.emit("confirm-read", {
+            userId: user.id,
+            senderId: selectedChatData._id,
+          });
+        }
+        resetUnreadCount(selectedChatData._id);
       }
       if (selectedChatType === "channel") {
         setPage(1);
@@ -116,9 +146,48 @@ const MessageContainer = () => {
         getChannelMessages(1);
       }
     }
-  }, [selectedChatData, selectedChatType, setSelectedChatMessages]);
+  }, [
+    selectedChatData,
+    selectedChatType,
+    setSelectedChatMessages,
+    socket,
+    user?.id,
+    resetUnreadCount,
+  ]);
+
+  // Clear typing indicators when leaving chat
+  useEffect(() => {
+    return () => {
+      if (selectedChatData?._id) {
+        clearTypingIndicatorsForChat(selectedChatData._id);
+      }
+    };
+  }, [selectedChatData?._id, clearTypingIndicatorsForChat]);
 
   const messagesRef = useRef(new Map());
+
+  // Format typing indicator label
+  const formatTypingLabel = () => {
+    if (typingUsers.length === 0) return "";
+
+    if (selectedChatType === "contact") {
+      const userName =
+        `${typingUsers[0]?.firstName || ""} ${typingUsers[0]?.lastName || ""}`.trim() ||
+        "Someone";
+      return `${userName} is typing...`;
+    }
+
+    const names = typingUsers
+      .map((typingUser) =>
+        `${typingUser.firstName || ""} ${typingUser.lastName || ""}`.trim(),
+      )
+      .filter(Boolean);
+
+    if (names.length === 0) return "Someone is typing...";
+    if (names.length === 1) return `${names[0]} is typing...`;
+    if (names.length === 2) return `${names[0]} and ${names[1]} are typing...`;
+    return `${names[0]}, ${names[1]} and ${names.length - 2} others are typing...`;
+  };
 
   const checkIfImage = (filePath) => {
     const imageRegex =
@@ -165,7 +234,7 @@ const MessageContainer = () => {
         <IoMdDoneAll className="w-4 h-4 text-white/70" />
       )}
       {status === "read" && (
-        <IoMdDoneAll className="w-4 h-4 text-sky-400" />
+        <IoMdDoneAll className="w-4 h-4 text-sky-300" />
       )}
     </span>
   );
@@ -412,12 +481,20 @@ const MessageContainer = () => {
     });
   };
 
-  const handleScroll = () => {
-    if (!containerRef.current || loading || !hasMore) return;
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current) return;
 
-    const scrollYBeforeFetch = containerRef.current.scrollHeight;
+    const container = containerRef.current;
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    
+    // Show scroll button when scrolled up more than 300px from bottom
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    setShowScrollButton(distanceFromBottom > 300);
 
-    if (containerRef.current.scrollTop < 50) {
+    // Load more messages when near top
+    if (!loading && hasMore && scrollTop < 50) {
+      const scrollYBeforeFetch = scrollHeight;
+
       if (selectedChatType === "contact") {
         getMessages(page + 1).then(() => {
           requestAnimationFrame(() => {
@@ -438,28 +515,79 @@ const MessageContainer = () => {
         });
       }
     }
-  };
+  }, [loading, hasMore, selectedChatType, page]);
 
+  // Scroll to bottom on initial load and new messages
+  useEffect(() => {
+    if (!containerRef.current || selectedChatMessages.length === 0) return;
+
+    const currentMessageCount = selectedChatMessages.length;
+    const lastMessage = selectedChatMessages[selectedChatMessages.length - 1];
+    const isOwnMessage = lastMessage?.sender === user?.id || lastMessage?.sender?._id === user?.id;
+
+    // Initial load - instant scroll to bottom
+    if (isInitialLoad.current) {
+      requestAnimationFrame(() => {
+        scrollToBottom(false);
+        setTimeout(() => {
+          isInitialLoad.current = false;
+          lastMessageCountRef.current = currentMessageCount;
+          wasNearBottomRef.current = true;
+        }, 100);
+      });
+      return;
+    }
+
+    // New message arrived (not from pagination)
+    if (currentMessageCount > lastMessageCountRef.current) {
+      const wasAtBottom = wasNearBottomRef.current;
+      
+      // Always scroll for own messages, or if user was near bottom for received messages
+      if (isOwnMessage || wasAtBottom) {
+        requestAnimationFrame(() => {
+          scrollToBottom(true);
+        });
+      }
+    }
+
+    lastMessageCountRef.current = currentMessageCount;
+  }, [selectedChatMessages, scrollToBottom, user?.id]);
+
+  // Track scroll position continuously
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const isNearBottom =
-      container.scrollTop + container.clientHeight >=
-      container.scrollHeight - 400;
+    const trackPosition = () => {
+      wasNearBottomRef.current = isNearBottom();
+    };
 
-    if (isNearBottom && newMessageRef.current) {
-      newMessageRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "end",
-      });
+    container.addEventListener("scroll", trackPosition, { passive: true });
+    return () => container.removeEventListener("scroll", trackPosition);
+  }, [isNearBottom]);
+
+  // Handle typing indicator appearance - scroll to show it if near bottom
+  useEffect(() => {
+    const typingUsersLength = typingUsers.length;
+    const prevLength = prevTypingUsersLengthRef.current;
+
+    // Typing indicator just appeared
+    if (typingUsersLength > 0 && prevLength === 0) {
+      if (wasNearBottomRef.current) {
+        requestAnimationFrame(() => {
+          scrollToBottom(true);
+        });
+      }
     }
-  }, [selectedChatMessages]);
 
+    prevTypingUsersLengthRef.current = typingUsersLength;
+  }, [typingUsers.length, scrollToBottom]);
+
+  // Scroll handler for pagination
   useEffect(() => {
     const container = containerRef.current;
     if (container) {
-      container.addEventListener("scroll", handleScroll);
+      container.addEventListener("scroll", handleScroll, { passive: true });
     }
     return () => {
       if (container) {
@@ -489,8 +617,35 @@ const MessageContainer = () => {
         {renderMessages()}
       </div>
 
+      {/* Typing indicator*/}
+      {typingUsers.length > 0 && (
+        <div className="flex justify-start px-1 py-2 animate-fade-in">
+          <div className="message-bubble message-bubble-received flex items-center gap-3 px-4 py-3">
+            <div className="flex items-center gap-1">
+              <span className="typing-dot" />
+              <span className="typing-dot" />
+              <span className="typing-dot" />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Scroll anchor */}
       <div ref={newMessageRef} />
+
+      {/* Scroll to bottom button */}
+      <button
+        onClick={() => scrollToBottom(true)}
+        className={cn(
+          "fixed bottom-24 right-4 sm:right-8 z-40 w-10 h-10 rounded-full bg-background-secondary border border-border-subtle shadow-lg flex items-center justify-center transition-all duration-300 hover:bg-accent hover:scale-110 active:scale-95",
+          showScrollButton 
+            ? "opacity-100 translate-y-0" 
+            : "opacity-0 translate-y-4 pointer-events-none"
+        )}
+        aria-label="Scroll to bottom"
+      >
+        <ChevronDown className="w-5 h-5 text-foreground" />
+      </button>
 
       {/* Image Preview Modal */}
       {showImage && imageURL && (

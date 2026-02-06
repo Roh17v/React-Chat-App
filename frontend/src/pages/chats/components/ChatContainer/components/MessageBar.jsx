@@ -14,6 +14,8 @@ const MessageBar = () => {
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const emojiRef = useRef();
   const inputRef = useRef();
+  const typingTimeoutRef = useRef(null);
+  const isTypingRef = useRef(false);
   const {
     selectedChatType,
     selectedChatData,
@@ -47,6 +49,15 @@ const MessageBar = () => {
         channelId: selectedChatData._id,
       });
     }
+    if (isTypingRef.current) {
+      socket.emit("stop-typing", {
+        chatType: selectedChatType,
+        receiverId:
+          selectedChatType === "contact" ? selectedChatData._id : null,
+        channelId: selectedChatType === "channel" ? selectedChatData._id : null,
+      });
+      isTypingRef.current = false;
+    }
     setMessage("");
   };
 
@@ -73,7 +84,7 @@ const MessageBar = () => {
           withCredentials: true,
           onUploadProgress: (data) =>
             setFileUploadingProgress(
-              Math.round((100 * data.loaded) / data.total)
+              Math.round((100 * data.loaded) / data.total),
             ),
         });
 
@@ -122,6 +133,68 @@ const MessageBar = () => {
     };
   }, [emojiPickerOpen]);
 
+  useEffect(() => {
+    if (!socket || !selectedChatData?._id) return;
+
+    const shouldEmitTyping = message.trim().length > 0;
+    if (shouldEmitTyping && !isTypingRef.current) {
+      socket.emit("typing", {
+        chatType: selectedChatType,
+        receiverId:
+          selectedChatType === "contact" ? selectedChatData._id : null,
+        channelId: selectedChatType === "channel" ? selectedChatData._id : null,
+      });
+      isTypingRef.current = true;
+    }
+
+    if (!shouldEmitTyping && isTypingRef.current) {
+      socket.emit("stop-typing", {
+        chatType: selectedChatType,
+        receiverId:
+          selectedChatType === "contact" ? selectedChatData._id : null,
+        channelId: selectedChatType === "channel" ? selectedChatData._id : null,
+      });
+      isTypingRef.current = false;
+    }
+
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+
+    if (shouldEmitTyping) {
+      typingTimeoutRef.current = setTimeout(() => {
+        socket.emit("stop-typing", {
+          chatType: selectedChatType,
+          receiverId:
+            selectedChatType === "contact" ? selectedChatData._id : null,
+          channelId:
+            selectedChatType === "channel" ? selectedChatData._id : null,
+        });
+        isTypingRef.current = false;
+      }, 1500);
+    }
+
+    return () => {
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+    };
+  }, [message, selectedChatData, selectedChatType, socket]);
+
+  useEffect(() => {
+    return () => {
+      if (!socket || !isTypingRef.current) return;
+      socket.emit("stop-typing", {
+        chatType: selectedChatType,
+        receiverId:
+          selectedChatType === "contact" ? selectedChatData?._id : null,
+        channelId:
+          selectedChatType === "channel" ? selectedChatData?._id : null,
+      });
+      isTypingRef.current = false;
+    };
+  }, [selectedChatData, selectedChatType, socket]);
+
   return (
     <div className="p-2 sm:p-3 safe-area-bottom bg-background">
       {/* Floating input bar - Telegram style */}
@@ -133,7 +206,7 @@ const MessageBar = () => {
             "touch-target rounded-full",
             "text-foreground-muted hover:text-foreground",
             "hover:bg-accent active:scale-95",
-            "transition-all duration-200"
+            "transition-all duration-200",
           )}
         >
           <CgAttachment className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -155,7 +228,7 @@ const MessageBar = () => {
             "placeholder:text-foreground-muted",
             "text-sm sm:text-base",
             "focus:outline-none",
-            "min-w-0" // Prevent flex overflow
+            "min-w-0", // Prevent flex overflow
           )}
           placeholder="Type a message..."
           value={message}
@@ -177,7 +250,7 @@ const MessageBar = () => {
               "text-foreground-muted hover:text-foreground",
               "hover:bg-accent active:scale-95",
               "transition-all duration-200",
-              emojiPickerOpen && "text-primary"
+              emojiPickerOpen && "text-primary",
             )}
           >
             <RiEmojiStickerLine className="w-5 h-5 sm:w-6 sm:h-6" />
@@ -188,7 +261,7 @@ const MessageBar = () => {
             className={cn(
               "absolute bottom-14 right-0 z-50",
               "animate-scale-in origin-bottom-right",
-              !emojiPickerOpen && "hidden"
+              !emojiPickerOpen && "hidden",
             )}
           >
             <EmojiPicker
@@ -212,7 +285,7 @@ const MessageBar = () => {
             "transition-all duration-200",
             message.trim()
               ? "text-primary hover:text-primary-hover hover:bg-primary/10 active:scale-95"
-              : "text-foreground-muted cursor-not-allowed"
+              : "text-foreground-muted cursor-not-allowed",
           )}
         >
           <IoSend className="w-5 h-5 sm:w-6 sm:h-6" />

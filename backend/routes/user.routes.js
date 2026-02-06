@@ -5,6 +5,7 @@ import {
   searchUsers,
   dmContacts,
   getAllContacts,
+  registerPushToken
 } from "../controllers/user.controller.js";
 import { validateToken } from "../middlewares/auth.js";
 import upload from "../middlewares/upload.middleware.js";
@@ -16,5 +17,6 @@ userRouter.delete("/:userId/profile/image", deleteProfileImage);
 userRouter.get("/search", validateToken, searchUsers);
 userRouter.get("/dm-contacts", validateToken, dmContacts);
 userRouter.get("/contacts", validateToken, getAllContacts);
+userRouter.post("/push-token", validateToken, registerPushToken);
 
 export default userRouter;

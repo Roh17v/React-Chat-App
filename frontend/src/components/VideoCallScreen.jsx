@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Phone,
   PhoneOff,
@@ -16,6 +16,7 @@ import {
   Signal,
   SignalLow,
   SignalZero,
+  SwitchCamera,
 } from "lucide-react";
 import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
@@ -24,7 +25,8 @@ import { GET_TURN_CREDENTIALS } from "@/utils/constants";
 import { cn } from "@/lib/utils";
 
 const VideoCallScreen = () => {
-  const { activeCall, clearActiveCall } = useAppStore();
+  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted } =
+    useAppStore();
   const { socket } = useSocket();
 
   // UI STATE
@@ -34,16 +36,19 @@ const VideoCallScreen = () => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [pipExpanded, setPipExpanded] = useState(false);
+  const [facingMode, setFacingMode] = useState("user");
+  const [isFlipping, setIsFlipping] = useState(false);
+  
+  // Track when streams are ready to trigger video element updates
+  const [localStreamReady, setLocalStreamReady] = useState(false);
+  const [remoteStreamReady, setRemoteStreamReady] = useState(false);
 
   // Connection State
   const [callStatus, setCallStatus] = useState(
-    activeCall?.isCaller ? "ringing" : "connected"
+    activeCall?.isCaller ? "ringing" : "connected",
   );
   const [connectionStatus, setConnectionStatus] = useState("initializing");
   const [mediaError, setMediaError] = useState(null);
-
-  // --- FIX 2: Switched to Top/Left for correct drag behavior ---
-  const [dragPosition, setDragPosition] = useState({ x: 20, y: 20 }); 
 
   // WEBRTC REFS
   const pc = useRef(null);
@@ -57,17 +62,31 @@ const VideoCallScreen = () => {
   const makingOffer = useRef(false);
   const ignoreOffer = useRef(false);
   const isPolite = useRef(!activeCall?.isCaller);
+  const shouldStartOnStreamReady = useRef(false);
+  const acceptRetryRef = useRef(null);
+  const hasReceivedOffer = useRef(false);
 
-  // UI Refs
-  const remoteVideoFullRef = useRef(null);
-  const remoteVideoMiniRef = useRef(null);
-  const localVideoPipRef = useRef(null);
-  const localVideoMiniRef = useRef(null);
+  // SINGLE SET OF PERSISTENT VIDEO REFS - Never remounted
+  const remoteVideoRef = useRef(null);
+  const localVideoRef = useRef(null);
+  
+  // Display video refs for PiP and fullscreen
+  const pipRemoteVideoRef = useRef(null);
+  const pipLocalVideoRef = useRef(null);
+  const fullscreenRemoteVideoRef = useRef(null);
+  const fullscreenLocalVideoRef = useRef(null);
 
-  // Drag Logic Refs
+  // Drag Logic Refs - Using refs for smooth dragging without re-renders
   const isDragging = useRef(false);
   const hasDragged = useRef(false);
-  const dragStart = useRef({ x: 0, y: 0 });
+  const dragStartPos = useRef({ x: 0, y: 0 });
+  const dragStartMouse = useRef({ x: 0, y: 0 });
+  const currentPosition = useRef({
+    x: window.innerWidth - 120 - 16,
+    y: window.innerHeight - 160 - 16,
+  });
+  const pipContainerRef = useRef(null);
+  const animationFrameRef = useRef(null);
 
   // PiP sizes
   const pipSize = pipExpanded
@@ -76,38 +95,114 @@ const VideoCallScreen = () => {
 
   if (!activeCall || activeCall.callType !== "video") return null;
 
-  // --- FIX 1: Re-attach streams when switching views ---
-  // This effect runs whenever you minimize/maximize to ensure the new video tags get the stream
+  // Helper to update all local video elements
+  const updateAllLocalVideos = useCallback((stream) => {
+    if (!stream) return;
+    
+    const videos = [
+      localVideoRef.current,
+      pipLocalVideoRef.current,
+      fullscreenLocalVideoRef.current,
+    ];
+    
+    videos.forEach((video) => {
+      if (video && video.srcObject !== stream) {
+        video.srcObject = stream;
+        video.muted = true;
+      }
+    });
+  }, []);
+
+  // Helper to update all remote video elements
+  const updateAllRemoteVideos = useCallback((stream) => {
+    if (!stream) return;
+    
+    const videos = [
+      remoteVideoRef.current,
+      pipRemoteVideoRef.current,
+      fullscreenRemoteVideoRef.current,
+    ];
+    
+    videos.forEach((video) => {
+      if (video && video.srcObject !== stream) {
+        video.srcObject = stream;
+      }
+    });
+  }, []);
+
+  // Effect to sync local stream to all video elements when ready
   useEffect(() => {
-    // Attach Local Stream
-    if (localStreamRef.current) {
-        if (localVideoPipRef.current) {
-            localVideoPipRef.current.srcObject = localStreamRef.current;
-            localVideoPipRef.current.muted = true;
-        }
-        if (localVideoMiniRef.current) {
-            localVideoMiniRef.current.srcObject = localStreamRef.current;
-            localVideoMiniRef.current.muted = true;
-        }
+    if (localStreamReady && localStreamRef.current) {
+      updateAllLocalVideos(localStreamRef.current);
     }
-    // Attach Remote Stream
-    if (remoteStreamRef.current) {
-        if (remoteVideoFullRef.current) remoteVideoFullRef.current.srcObject = remoteStreamRef.current;
-        if (remoteVideoMiniRef.current) remoteVideoMiniRef.current.srcObject = remoteStreamRef.current;
+  }, [localStreamReady, updateAllLocalVideos, isMinimized]);
+
+  // Effect to sync remote stream to all video elements when ready
+  useEffect(() => {
+    if (remoteStreamReady && remoteStreamRef.current) {
+      updateAllRemoteVideos(remoteStreamRef.current);
     }
-  }, [isMinimized, connectionStatus]); // Trigger on mode switch
+  }, [remoteStreamReady, updateAllRemoteVideos, isMinimized]);
 
+  const flipCamera = async () => {
+    if (isFlipping || isVideoOff) return;
+    setIsFlipping(true);
 
-  // RESTART MEDIA ON DEVICE CHANGE
+    try {
+      const newFacingMode = facingMode === "user" ? "environment" : "user";
+      const currentStream = localStreamRef.current;
+      const oldAudioTrack = currentStream?.getAudioTracks()[0];
+      const oldVideoTrack = currentStream?.getVideoTracks()[0];
+
+      if (oldVideoTrack) {
+        oldVideoTrack.stop();
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: newFacingMode },
+        audio: false,
+      });
+
+      const newVideoTrack = videoStream.getVideoTracks()[0];
+      const tracks = [newVideoTrack];
+      if (oldAudioTrack) tracks.push(oldAudioTrack);
+
+      const newStream = new MediaStream(tracks);
+      localStreamRef.current = newStream;
+
+      // Update all local video elements
+      updateAllLocalVideos(newStream);
+
+      if (pc.current) {
+        const senders = pc.current.getSenders();
+        const videoSender = senders.find((s) => s.track?.kind === "video");
+        if (videoSender && newVideoTrack) {
+          await videoSender.replaceTrack(newVideoTrack);
+        }
+      }
+
+      setFacingMode(newFacingMode);
+    } catch (err) {
+      console.error("Failed to flip camera:", err);
+      setMediaError("Failed to switch camera. Please try again.");
+    } finally {
+      setIsFlipping(false);
+    }
+  };
+
   const handleDeviceChange = async () => {
     console.log("Device change detected. Refreshing stream...");
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
+        video: { facingMode },
         audio: true,
       });
       localStreamRef.current = newStream;
-      updateLocalVideoRefs(newStream);
+
+      // Update all local video elements
+      updateAllLocalVideos(newStream);
 
       if (pc.current) {
         const senders = pc.current.getSenders();
@@ -127,11 +222,17 @@ const VideoCallScreen = () => {
     const startMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: { facingMode },
           audio: true,
         });
         localStreamRef.current = stream;
-        updateLocalVideoRefs(stream);
+
+        // Update all local video elements
+        updateAllLocalVideos(stream);
+        
+        // Mark local stream as ready
+        setLocalStreamReady(true);
+
         setMediaError(null);
 
         stream.getTracks().forEach((track) => {
@@ -142,33 +243,40 @@ const VideoCallScreen = () => {
         });
 
         if (!activeCall.isCaller) initializePeerConnection(stream);
+        if (activeCall.isCaller && shouldStartOnStreamReady.current) {
+          shouldStartOnStreamReady.current = false;
+          initializePeerConnection(stream);
+        }
       } catch (err) {
         console.error("Media Error:", err);
         setMediaError("Camera/Mic access denied.");
       }
     };
+
     startMedia();
     navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+
     return () => {
       cleanup();
       navigator.mediaDevices.removeEventListener(
         "devicechange",
-        handleDeviceChange
+        handleDeviceChange,
       );
     };
   }, []);
 
   // CALLER TRIGGER
   useEffect(() => {
-    if (!socket || !activeCall.isCaller) return;
-    const handleCallAccepted = () => {
-      setCallStatus("connected");
-      if (localStreamRef.current)
-        initializePeerConnection(localStreamRef.current);
-    };
-    socket.on("call-accepted", handleCallAccepted);
-    return () => socket.off("call-accepted", handleCallAccepted);
-  }, [socket, activeCall.isCaller]);
+    if (!activeCall?.isCaller) return;
+    if (!callAccepted) return;
+    setCallStatus("connected");
+    if (localStreamRef.current) {
+      initializePeerConnection(localStreamRef.current);
+    } else {
+      shouldStartOnStreamReady.current = true;
+    }
+    clearCallAccepted();
+  }, [callAccepted, activeCall?.isCaller, clearCallAccepted]);
 
   // HANDLE TAB CLOSE
   useEffect(() => {
@@ -187,6 +295,7 @@ const VideoCallScreen = () => {
   // PEER CONNECTION LOGIC
   const initializePeerConnection = async (stream) => {
     if (pc.current) return;
+
     let config = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -206,20 +315,16 @@ const VideoCallScreen = () => {
     }
 
     pc.current = new RTCPeerConnection(config);
-    stream
-      .getTracks()
-      .forEach((track) => pc.current.addTrack(track, stream));
+    stream.getTracks().forEach((track) => pc.current?.addTrack(track, stream));
 
     pc.current.ontrack = ({ track }) => {
       remoteStreamRef.current.addTrack(track);
-      const refresh = (el) => {
-        if (el && el.srcObject !== remoteStreamRef.current) {
-          el.srcObject = remoteStreamRef.current;
-          el.play().catch((e) => console.log("Autoplay error", e));
-        }
-      };
-      refresh(remoteVideoFullRef.current);
-      refresh(remoteVideoMiniRef.current);
+
+      // Update all remote video elements
+      updateAllRemoteVideos(remoteStreamRef.current);
+      
+      // Mark remote stream as ready
+      setRemoteStreamReady(true);
     };
 
     pc.current.onicecandidate = ({ candidate }) => {
@@ -232,8 +337,9 @@ const VideoCallScreen = () => {
     };
 
     pc.current.oniceconnectionstatechange = () => {
-      const state = pc.current.iceConnectionState;
+      const state = pc.current?.iceConnectionState;
       setConnectionStatus(state);
+
       if (connectionTimeout.current) {
         clearTimeout(connectionTimeout.current);
         connectionTimeout.current = null;
@@ -246,17 +352,17 @@ const VideoCallScreen = () => {
           }
         }, 2000);
       } else if (state === "failed") {
-        pc.current.restartIce();
+        pc.current?.restartIce();
       }
     };
 
     pc.current.onnegotiationneeded = async () => {
       try {
         makingOffer.current = true;
-        await pc.current.setLocalDescription();
+        await pc.current?.setLocalDescription();
         socket.emit("call:offer", {
           to: activeCall.otherUserId || activeCall.callerId,
-          description: pc.current.localDescription,
+          description: pc.current?.localDescription,
         });
       } catch (err) {
         console.error(err);
@@ -268,14 +374,14 @@ const VideoCallScreen = () => {
     if (pendingOffer.current) {
       await handleDescription(
         pendingOffer.current.description,
-        pendingOffer.current.from
+        pendingOffer.current.from,
       );
       pendingOffer.current = null;
     }
 
     while (pendingCandidates.current.length > 0) {
       const candidate = pendingCandidates.current.shift();
-      await pc.current.addIceCandidate(candidate);
+      if (candidate) await pc.current.addIceCandidate(candidate);
     }
   };
 
@@ -293,6 +399,13 @@ const VideoCallScreen = () => {
 
       ignoreOffer.current = !isPolite.current && offerCollision;
       if (ignoreOffer.current) return;
+      if (description.type === "offer") {
+        hasReceivedOffer.current = true;
+        if (acceptRetryRef.current) {
+          clearInterval(acceptRetryRef.current);
+          acceptRetryRef.current = null;
+        }
+      }
 
       if (offerCollision) {
         await Promise.all([
@@ -317,6 +430,7 @@ const VideoCallScreen = () => {
 
   useEffect(() => {
     if (!socket) return;
+
     const onDescription = ({ description, from }) =>
       handleDescription(description, from);
     const onCandidate = async ({ candidate }) => {
@@ -330,7 +444,6 @@ const VideoCallScreen = () => {
         pendingCandidates.current.push(candidate);
       }
     };
-
     const onEnd = () => cleanup();
 
     socket.on("call:offer", onDescription);
@@ -346,28 +459,54 @@ const VideoCallScreen = () => {
     };
   }, [socket]);
 
+  useEffect(() => {
+    if (!socket || activeCall?.isCaller) return;
+    const callId = activeCall?.callId;
+    const callerId = activeCall?.otherUserId || activeCall?.callerId;
+    if (!callId) return;
+
+    let attempts = 0;
+    const sendAccept = () => {
+      if (hasReceivedOffer.current) return;
+      attempts += 1;
+      socket.emit("call:accept", { callId, callerId });
+      if (attempts >= 5 && acceptRetryRef.current) {
+        clearInterval(acceptRetryRef.current);
+        acceptRetryRef.current = null;
+      }
+    };
+
+    sendAccept();
+    acceptRetryRef.current = setInterval(sendAccept, 2000);
+
+    return () => {
+      if (acceptRetryRef.current) {
+        clearInterval(acceptRetryRef.current);
+        acceptRetryRef.current = null;
+      }
+    };
+  }, [socket, activeCall?.isCaller, activeCall?.callId, activeCall?.otherUserId, activeCall?.callerId]);
+
   const cleanup = useCallback(() => {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
     pc.current = null;
     if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
+    if (animationFrameRef.current)
+      cancelAnimationFrame(animationFrameRef.current);
+    if (acceptRetryRef.current) {
+      clearInterval(acceptRetryRef.current);
+      acceptRetryRef.current = null;
+    }
     clearActiveCall();
+    clearCallAccepted();
     setConnectionStatus("disconnected");
-  }, [clearActiveCall]);
+  }, [clearActiveCall, clearCallAccepted]);
 
   const endCall = () => {
     const to = activeCall?.otherUserId || activeCall?.callerId;
     if (to) socket.emit("call:end", { to });
     cleanup();
-  };
-
-  const updateLocalVideoRefs = (stream) => {
-    [localVideoPipRef.current, localVideoMiniRef.current].forEach((el) => {
-      if (el) {
-        el.srcObject = stream;
-        el.muted = true;
-      }
-    });
   };
 
   const toggleAudio = () => {
@@ -398,61 +537,149 @@ const VideoCallScreen = () => {
       .toString()
       .padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
-  // --- FIX 2: Corrected Drag Handlers (Using Top/Left) ---
-  const handleDragStart = (e) => {
+  // Smooth drag handlers
+  const updatePipPosition = useCallback(() => {
+    if (pipContainerRef.current) {
+      pipContainerRef.current.style.left = `${currentPosition.current.x}px`;
+      pipContainerRef.current.style.top = `${currentPosition.current.y}px`;
+    }
+  }, []);
+
+  const handleDragStart = useCallback((e) => {
     if (e.target.closest("button")) return;
+    e.preventDefault();
+
     isDragging.current = true;
     hasDragged.current = false;
-    
-    // Get mouse/touch start position
-    const clientX = e.clientX || e.touches?.[0]?.clientX;
-    const clientY = e.clientY || e.touches?.[0]?.clientY;
-    
-    // Store the difference between mouse pos and element's top/left
-    dragStart.current = {
-      x: clientX - dragPosition.x,
-      y: clientY - dragPosition.y
+
+    const clientX = "clientX" in e ? e.clientX : e.touches?.[0]?.clientX;
+    const clientY = "clientY" in e ? e.clientY : e.touches?.[0]?.clientY;
+
+    dragStartMouse.current = { x: clientX, y: clientY };
+    dragStartPos.current = {
+      x: currentPosition.current.x,
+      y: currentPosition.current.y,
     };
-  };
+
+    if (pipContainerRef.current) {
+      pipContainerRef.current.style.transition = "none";
+      pipContainerRef.current.style.willChange = "left, top";
+    }
+  }, []);
 
   const handleDragMove = useCallback(
     (e) => {
       if (!isDragging.current) return;
+
       hasDragged.current = true;
-      if (e.type === "touchmove") e.preventDefault();
-      
-      const clientX = e.clientX || e.touches?.[0]?.clientX;
-      const clientY = e.clientY || e.touches?.[0]?.clientY;
+
+      const clientX = "clientX" in e ? e.clientX : e.touches?.[0]?.clientX;
+      const clientY = "clientY" in e ? e.clientY : e.touches?.[0]?.clientY;
+
+      if (clientX === undefined || clientY === undefined) return;
+
+      const deltaX = clientX - dragStartMouse.current.x;
+      const deltaY = clientY - dragStartMouse.current.y;
+
+      const newX = dragStartPos.current.x + deltaX;
+      const newY = dragStartPos.current.y + deltaY;
 
       const maxX = window.innerWidth - pipSize.width - 16;
       const maxY = window.innerHeight - pipSize.height - 16;
-      
-      // With Top/Left, the math matches the mouse movement
-      const newX = clientX - dragStart.current.x;
-      const newY = clientY - dragStart.current.y;
 
-      setDragPosition({
+      currentPosition.current = {
         x: Math.max(16, Math.min(newX, maxX)),
         y: Math.max(16, Math.min(newY, maxY)),
-      });
+      };
+
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      animationFrameRef.current = requestAnimationFrame(updatePipPosition);
     },
-    [pipSize]
+    [pipSize.width, pipSize.height, updatePipPosition],
   );
 
-  const handleDragEnd = () => (isDragging.current = false);
+  const handleDragEnd = useCallback(() => {
+    if (!isDragging.current) return;
+    isDragging.current = false;
+
+    if (pipContainerRef.current) {
+      pipContainerRef.current.style.willChange = "auto";
+    }
+  }, []);
 
   useEffect(() => {
-    window.addEventListener("mousemove", handleDragMove);
-    window.addEventListener("touchmove", handleDragMove, { passive: false });
+    const moveHandler = (e) => {
+      if (isDragging.current && e.type === "touchmove") {
+        e.preventDefault();
+      }
+      handleDragMove(e);
+    };
+
+    const handleResize = () => {
+      const maxX = window.innerWidth - pipSize.width - 16;
+      const maxY = window.innerHeight - pipSize.height - 16;
+      currentPosition.current = {
+        x: Math.max(16, Math.min(currentPosition.current.x, maxX)),
+        y: Math.max(16, Math.min(currentPosition.current.y, maxY)),
+      };
+      updatePipPosition();
+    };
+
+    window.addEventListener("mousemove", moveHandler);
+    window.addEventListener("touchmove", moveHandler, { passive: false });
     window.addEventListener("mouseup", handleDragEnd);
     window.addEventListener("touchend", handleDragEnd);
+    window.addEventListener("resize", handleResize);
+
     return () => {
-      window.removeEventListener("mousemove", handleDragMove);
-      window.removeEventListener("touchmove", handleDragMove);
+      window.removeEventListener("mousemove", moveHandler);
+      window.removeEventListener("touchmove", moveHandler);
       window.removeEventListener("mouseup", handleDragEnd);
       window.removeEventListener("touchend", handleDragEnd);
+      window.removeEventListener("resize", handleResize);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
     };
-  }, [handleDragMove]);
+  }, [
+    handleDragMove,
+    handleDragEnd,
+    pipSize.width,
+    pipSize.height,
+    updatePipPosition,
+  ]);
+
+  useEffect(() => {
+    hasDragged.current = false;
+  }, [isMinimized]);
+
+  useEffect(() => {
+    const maxX = window.innerWidth - pipSize.width - 16;
+    const maxY = window.innerHeight - pipSize.height - 16;
+
+    const needsAdjustment =
+      currentPosition.current.x > maxX || currentPosition.current.y > maxY;
+
+    if (needsAdjustment) {
+      currentPosition.current = {
+        x: Math.max(16, Math.min(currentPosition.current.x, maxX)),
+        y: Math.max(16, Math.min(currentPosition.current.y, maxY)),
+      };
+
+      if (pipContainerRef.current) {
+        pipContainerRef.current.style.transition =
+          "left 0.2s ease-out, top 0.2s ease-out";
+        updatePipPosition();
+        setTimeout(() => {
+          if (pipContainerRef.current) {
+            pipContainerRef.current.style.transition = "none";
+          }
+        }, 200);
+      }
+    }
+  }, [pipSize.width, pipSize.height, updatePipPosition]);
 
   const getConnectionIcon = () => {
     switch (connectionStatus) {
@@ -461,7 +688,9 @@ const VideoCallScreen = () => {
         return <Signal className="w-3.5 h-3.5 text-status-online" />;
       case "checking":
       case "new":
-        return <SignalLow className="w-3.5 h-3.5 text-yellow-400" />;
+        return (
+          <SignalLow className="w-3.5 h-3.5 text-yellow-400 animate-pulse" />
+        );
       default:
         return <SignalZero className="w-3.5 h-3.5 text-destructive" />;
     }
@@ -473,303 +702,378 @@ const VideoCallScreen = () => {
 
   return (
     <>
-      {/* MINIMIZED PIP VIEW */}
-      <AnimatePresence>
-        {isMinimized && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.8 }}
-            transition={{ type: "spring", damping: 25, stiffness: 300 }}
-            style={{
-              position: "fixed",
-              left: dragPosition.x, // Changed from right to left
-              top: dragPosition.y,  // Changed from bottom to top
-              width: pipSize.width,
-              height: pipSize.height,
-              zIndex: 9999,
-            }}
-            onMouseDown={handleDragStart}
-            onTouchStart={handleDragStart}
-            className="select-none"
-          >
-            <motion.div
-              layout
-              transition={{ type: "spring", damping: 20, stiffness: 200 }}
-              onClick={() => !hasDragged.current && setIsMinimized(false)}
+      {/* PERSISTENT HIDDEN VIDEO ELEMENTS - Source of truth, never remounted */}
+      <div
+        className="fixed pointer-events-none"
+        style={{ opacity: 0, position: "fixed", top: -9999, left: -9999 }}
+        aria-hidden="true"
+      >
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className="w-1 h-1"
+        />
+        <video
+          ref={localVideoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-1 h-1"
+        />
+      </div>
+
+      {/* MINIMIZED PIP VIEW - Always rendered, visibility controlled by CSS */}
+      <div
+        ref={pipContainerRef}
+        style={{
+          width: pipSize.width,
+          height: pipSize.height,
+          left: currentPosition.current.x,
+          top: currentPosition.current.y,
+          visibility: isMinimized ? "visible" : "hidden",
+          opacity: isMinimized ? 1 : 0,
+          transform: isMinimized ? "scale(1)" : "scale(0.8)",
+          transition:
+            "opacity 0.25s ease-out, transform 0.25s ease-out, width 0.2s ease-out, height 0.2s ease-out",
+          pointerEvents: isMinimized ? "auto" : "none",
+        }}
+        className="fixed z-[9999] select-none touch-none"
+        onMouseDown={handleDragStart}
+        onTouchStart={handleDragStart}
+      >
+        <div
+          onClick={() => !hasDragged.current && setIsMinimized(false)}
+          className={cn(
+            "relative w-full h-full rounded-2xl overflow-hidden",
+            "bg-background-secondary ring-1 ring-border",
+            "shadow-chat-lg cursor-move",
+            "active:ring-2 active:ring-primary/50",
+          )}
+        >
+          {/* Remote Video */}
+          <video
+            ref={pipRemoteVideoRef}
+            autoPlay
+            playsInline
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+
+          {/* Gradient Overlay */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
+
+          {/* Top Bar */}
+          <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/40 backdrop-blur-sm">
+              {getConnectionIcon()}
+              <span className="text-[10px] font-medium text-white">
+                {formatDuration(callDuration)}
+              </span>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setPipExpanded(!pipExpanded);
+              }}
+              className="w-6 h-6 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white/80 hover:text-white transition-colors"
+            >
+              {pipExpanded ? (
+                <Minimize2 className="w-3 h-3" />
+              ) : (
+                <Maximize2 className="w-3 h-3" />
+              )}
+            </button>
+          </div>
+
+          {/* Local Video Inset */}
+          <div className="absolute bottom-10 right-2 w-12 h-16 rounded-lg overflow-hidden ring-1 ring-white/20 shadow-md">
+            <video
+              ref={pipLocalVideoRef}
+              autoPlay
+              playsInline
+              muted
               className={cn(
-                "relative w-full h-full rounded-2xl overflow-hidden",
-                "bg-background-secondary ring-1 ring-border",
-                "shadow-chat-lg cursor-move",
-                "active:ring-2 active:ring-primary/50"
+                "w-full h-full object-cover",
+                facingMode === "user" && "-scale-x-100",
+              )}
+            />
+            {/* Flip Camera Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                flipCamera();
+              }}
+              disabled={isFlipping || isVideoOff}
+              className={cn(
+                "absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/50 backdrop-blur-sm",
+                "flex items-center justify-center text-white/80 hover:text-white transition-all",
+                (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed",
               )}
             >
-              {/* Remote Video */}
-              <video
-                ref={remoteVideoMiniRef}
-                autoPlay
-                playsInline
-                className="absolute inset-0 w-full h-full object-cover"
-              />
-              
-              {/* ... (rest of the mini UI is same) ... */}
-              
-              <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
-              
-              <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
-                <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/40 backdrop-blur-sm">
-                  {getConnectionIcon()}
-                  <span className="text-[10px] font-medium text-white">
-                    {formatDuration(callDuration)}
+              <SwitchCamera className="w-3 h-3" />
+            </button>
+          </div>
+
+          {/* End Call Button */}
+          <div className="absolute bottom-2 left-0 right-0 flex justify-center">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                endCall();
+              }}
+              className="w-8 h-8 rounded-full bg-destructive flex items-center justify-center text-white shadow-lg active:scale-90 transition-transform"
+            >
+              <PhoneOff className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* FULL SCREEN VIEW - Always rendered, visibility controlled by CSS */}
+      <motion.div
+        initial={false}
+        animate={{
+          opacity: isMinimized ? 0 : 1,
+        }}
+        transition={{ duration: 0.25, ease: "easeOut" }}
+        style={{
+          visibility: isMinimized ? "hidden" : "visible",
+          pointerEvents: isMinimized ? "none" : "auto",
+        }}
+        className="fixed inset-0 z-50 bg-background"
+        onClick={() => setShowControls((p) => !p)}
+      >
+        {/* Remote Video Background */}
+        <div className="absolute inset-0 flex items-center justify-center bg-background-secondary">
+          <video
+            ref={fullscreenRemoteVideoRef}
+            autoPlay
+            playsInline
+            className="w-full h-full object-cover md:max-w-[1920px] md:max-h-[1080px] md:object-contain"
+          />
+
+          {/* Video Off Fallback */}
+          {(isConnecting || connectionStatus === "failed") && (
+            <div className="absolute inset-0 bg-background-secondary" />
+          )}
+
+          {/* Gradient Overlays */}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40 pointer-events-none" />
+        </div>
+
+        {/* Connecting State */}
+        <motion.div
+          initial={false}
+          animate={{ opacity: isConnecting ? 1 : 0 }}
+          transition={{ duration: 0.2 }}
+          className="absolute inset-0 flex flex-col items-center justify-center z-10"
+          style={{ pointerEvents: isConnecting ? "auto" : "none" }}
+        >
+          {isConnecting && (
+            <div className="flex flex-col items-center gap-6">
+              {/* Avatar with Pulse */}
+              <div className="relative mb-6">
+                <div
+                  className="absolute inset-0 rounded-full bg-primary/30 animate-ping"
+                  style={{ margin: "-12px" }}
+                />
+                <div
+                  className="absolute inset-0 rounded-full bg-primary/20 animate-pulse"
+                  style={{ margin: "-24px", transform: "scale(1.1)" }}
+                />
+                <div className="w-28 h-28 rounded-full bg-background-tertiary border-2 border-primary/50 flex items-center justify-center">
+                  <span className="text-4xl font-semibold text-foreground">
+                    {activeCall.otherUserName?.charAt(0)}
                   </span>
                 </div>
+              </div>
+
+              <h2 className="text-xl font-semibold text-foreground mb-1">
+                {activeCall.otherUserName}
+              </h2>
+
+              <p className="text-sm text-foreground-secondary animate-pulse">
+                {connectionStatus === "failed"
+                  ? "Connection Failed"
+                  : "Connecting..."}
+              </p>
+
+              {connectionStatus === "failed" && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setPipExpanded(!pipExpanded);
+                    pc.current?.restartIce();
                   }}
-                  className="w-6 h-6 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white/80 hover:text-white transition-colors"
+                  className="mt-6 px-5 py-2.5 bg-primary/10 border border-primary/30 rounded-full text-primary font-medium flex items-center gap-2 hover:bg-primary/20 transition-colors active:scale-95"
                 >
-                  {pipExpanded ? (
-                    <Minimize2 className="w-3 h-3" />
-                  ) : (
-                    <Maximize2 className="w-3 h-3" />
-                  )}
+                  <RefreshCw className="w-4 h-4" />
+                  Retry Connection
                 </button>
-              </div>
-
-              {/* Local Video Inset */}
-              <motion.div
-                layout
-                className="absolute bottom-10 right-2 w-12 h-16 rounded-lg overflow-hidden ring-1 ring-white/20 shadow-md"
-              >
-                <video
-                  ref={localVideoMiniRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover"
-                />
-              </motion.div>
-
-              <div className="absolute bottom-2 left-0 right-0 flex justify-center">
-                <motion.button
-                  whileTap={{ scale: 0.9 }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    endCall();
-                  }}
-                  className="w-8 h-8 rounded-full bg-destructive flex items-center justify-center text-white shadow-lg"
-                >
-                  <PhoneOff className="w-4 h-4" />
-                </motion.button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* FULL SCREEN VIEW */}
-      <AnimatePresence>
-        {!isMinimized && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className="fixed inset-0 z-50 bg-background"
-            onClick={() => setShowControls((p) => !p)}
-          >
-             {/* ... (The rest of Full Screen UI remains identical) ... */}
-             
-            <div className="absolute inset-0">
-              <video
-                ref={remoteVideoFullRef}
-                autoPlay
-                playsInline
-                className="w-full h-full object-cover"
-              />
-              {(isConnecting || connectionStatus === "failed") && (
-                <div className="absolute inset-0 bg-background-secondary" />
               )}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40" />
             </div>
+          )}
+        </motion.div>
 
-            <AnimatePresence>
-              {isConnecting && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  className="absolute inset-0 flex flex-col items-center justify-center z-10"
-                >
-                  <div className="relative mb-6">
-                    <motion.div
-                      animate={{ scale: [1, 1.2, 1], opacity: [0.5, 0.2, 0.5] }}
-                      transition={{ duration: 2, repeat: Infinity }}
-                      className="absolute inset-0 rounded-full bg-primary/30"
-                      style={{ margin: "-12px" }}
-                    />
-                    <motion.div
-                      animate={{ scale: [1, 1.4, 1], opacity: [0.3, 0.1, 0.3] }}
-                      transition={{ duration: 2, repeat: Infinity, delay: 0.3 }}
-                      className="absolute inset-0 rounded-full bg-primary/20"
-                      style={{ margin: "-24px" }}
-                    />
-                    <div className="w-28 h-28 rounded-full bg-background-tertiary border-2 border-primary/50 flex items-center justify-center">
-                      <span className="text-4xl font-semibold text-foreground">
-                        {activeCall.otherUserName?.charAt(0)}
-                      </span>
-                    </div>
-                  </div>
-                  <h2 className="text-xl font-semibold text-foreground mb-1">
-                    {activeCall.otherUserName}
-                  </h2>
-                  <motion.p
-                    animate={{ opacity: [0.5, 1, 0.5] }}
-                    transition={{ duration: 1.5, repeat: Infinity }}
-                    className="text-sm text-foreground-secondary"
-                  >
-                    {connectionStatus === "failed" ? "Connection Failed" : "Connecting..."}
-                  </motion.p>
-                  {connectionStatus === "failed" && (
-                    <motion.button
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        pc.current?.restartIce();
-                      }}
-                      className="mt-6 px-5 py-2.5 bg-primary/10 border border-primary/30 rounded-full text-primary font-medium flex items-center gap-2 hover:bg-primary/20 transition-colors"
-                    >
-                      <RefreshCw className="w-4 h-4" />
-                      Retry Connection
-                    </motion.button>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
+        {/* Media Error Banner */}
+        <motion.div
+          initial={false}
+          animate={{ opacity: mediaError ? 1 : 0, y: mediaError ? 0 : -20 }}
+          transition={{ duration: 0.2 }}
+          className="absolute top-4 left-4 right-4 z-30"
+          style={{ pointerEvents: mediaError ? "auto" : "none" }}
+        >
+          {mediaError && (
+            <div className="flex items-center gap-3 px-4 py-3 bg-destructive/10 border border-destructive/30 rounded-xl backdrop-blur-sm">
+              <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0" />
+              <p className="text-sm text-destructive">{mediaError}</p>
+            </div>
+          )}
+        </motion.div>
 
-            <AnimatePresence>
-              {mediaError && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  className="absolute top-4 left-4 right-4 z-30"
-                >
-                  <div className="flex items-center gap-3 px-4 py-3 bg-destructive/10 border border-destructive/30 rounded-xl backdrop-blur-sm">
-                    <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0" />
-                    <p className="text-sm text-destructive">{mediaError}</p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <motion.div
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : -20 }}
-              transition={{ duration: 0.2 }}
-              className="absolute top-0 left-0 right-0 z-20 safe-area-top"
-            >
-              <div className="flex items-center justify-between p-4">
-                <div className="flex items-center gap-3">
-                  {getConnectionIcon()}
-                  <div>
-                    <h3 className="text-sm font-semibold text-white">
-                      {activeCall.otherUserName}
-                    </h3>
-                    <p className="text-xs text-white/60">{formatDuration(callDuration)}</p>
-                  </div>
-                </div>
-                <motion.button
-                  whileTap={{ scale: 0.9 }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setIsMinimized(true);
-                  }}
-                  className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-                >
-                  <ChevronDown className="w-5 h-5" />
-                </motion.button>
+        {/* Top Header */}
+        <motion.div
+          initial={false}
+          animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : -20 }}
+          transition={{ duration: 0.2 }}
+          className="absolute top-0 left-0 right-0 z-20 safe-area-top"
+        >
+          <div className="flex items-center justify-between p-4">
+            <div className="flex items-center gap-3">
+              {getConnectionIcon()}
+              <div>
+                <h3 className="text-sm font-semibold text-white">
+                  {activeCall.otherUserName}
+                </h3>
+                <p className="text-xs text-white/60">
+                  {formatDuration(callDuration)}
+                </p>
               </div>
-            </motion.div>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsMinimized(true);
+              }}
+              className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center text-white hover:bg-white/20 transition-colors active:scale-90"
+            >
+              <ChevronDown className="w-5 h-5" />
+            </button>
+          </div>
+        </motion.div>
 
-            <motion.div
-              layout
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ type: "spring", damping: 20, stiffness: 200 }}
+        {/* Local Video PiP */}
+        <div
+          className={cn(
+            "absolute top-20 right-4 z-20",
+            "w-28 h-40 md:w-36 md:h-52",
+            "rounded-2xl overflow-hidden",
+            "ring-2 ring-white/20 shadow-chat-lg",
+          )}
+        >
+          <video
+            ref={fullscreenLocalVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={cn(
+              "w-full h-full object-cover",
+              facingMode === "user" && "-scale-x-100",
+            )}
+          />
+          {isVideoOff && (
+            <div className="absolute inset-0 bg-background-tertiary flex items-center justify-center">
+              <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
+                <User className="w-6 h-6 text-muted-foreground" />
+              </div>
+            </div>
+          )}
+          {/* Flip Camera Button on Local Video */}
+          {!isVideoOff && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                flipCamera();
+              }}
+              disabled={isFlipping}
               className={cn(
-                "absolute top-20 right-4 z-20",
-                "w-28 h-40 md:w-36 md:h-52",
-                "rounded-2xl overflow-hidden",
-                "ring-2 ring-white/20 shadow-chat-lg"
+                "absolute bottom-2 right-2 w-8 h-8 rounded-full bg-black/50 backdrop-blur-sm",
+                "flex items-center justify-center text-white/80 hover:text-white hover:bg-black/70 transition-all",
+                isFlipping && "opacity-50 cursor-not-allowed",
               )}
             >
-              <video
-                ref={localVideoPipRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-              {isVideoOff && (
-                <div className="absolute inset-0 bg-background-tertiary flex items-center justify-center">
-                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
-                    <User className="w-6 h-6 text-muted-foreground" />
-                  </div>
-                </div>
-              )}
-            </motion.div>
+              <SwitchCamera className="w-4 h-4" />
+            </button>
+          )}
+        </div>
 
-            <motion.div
-              initial={{ opacity: 0, y: 40 }}
-              animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : 40 }}
-              transition={{ duration: 0.2 }}
-              className="absolute bottom-0 left-0 right-0 z-20 safe-area-bottom"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="p-6 pb-8">
-                <div className="flex items-center justify-center gap-4">
-                  <motion.button
-                    whileTap={{ scale: 0.9 }}
-                    onClick={toggleAudio}
-                    className={cn(
-                      "w-14 h-14 rounded-full flex items-center justify-center transition-colors",
-                      isMuted
-                        ? "bg-destructive/20 text-destructive"
-                        : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20"
-                    )}
-                  >
-                    {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-                  </motion.button>
-                  <motion.button
-                    whileTap={{ scale: 0.9 }}
-                    onClick={endCall}
-                    className="w-16 h-16 rounded-full bg-destructive flex items-center justify-center text-white shadow-lg shadow-destructive/30"
-                  >
-                    <PhoneOff className="w-7 h-7" />
-                  </motion.button>
-                  <motion.button
-                    whileTap={{ scale: 0.9 }}
-                    onClick={toggleVideo}
-                    className={cn(
-                      "w-14 h-14 rounded-full flex items-center justify-center transition-colors",
-                      isVideoOff
-                        ? "bg-destructive/20 text-destructive"
-                        : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20"
-                    )}
-                  >
-                    {isVideoOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
-                  </motion.button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+        {/* Bottom Controls */}
+        <motion.div
+          initial={false}
+          animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : 40 }}
+          transition={{ duration: 0.2 }}
+          className="absolute bottom-0 left-0 right-0 z-20 safe-area-bottom"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="p-6 pb-8">
+            <div className="flex items-center justify-center gap-4">
+              {/* Mute Button */}
+              <button
+                onClick={toggleAudio}
+                className={cn(
+                  "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
+                  isMuted
+                    ? "bg-destructive/20 text-destructive"
+                    : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                )}
+              >
+                {isMuted ? (
+                  <MicOff className="w-6 h-6" />
+                ) : (
+                  <Mic className="w-6 h-6" />
+                )}
+              </button>
+
+              {/* Flip Camera Button */}
+              <button
+                onClick={flipCamera}
+                disabled={isFlipping || isVideoOff}
+                className={cn(
+                  "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
+                  "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                  (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed",
+                )}
+              >
+                <SwitchCamera className="w-6 h-6" />
+              </button>
+
+              {/* End Call Button */}
+              <button
+                onClick={endCall}
+                className="w-16 h-16 rounded-full bg-destructive flex items-center justify-center text-white shadow-lg shadow-destructive/30 active:scale-90 transition-transform"
+              >
+                <PhoneOff className="w-7 h-7" />
+              </button>
+
+              {/* Video Button */}
+              <button
+                onClick={toggleVideo}
+                className={cn(
+                  "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
+                  isVideoOff
+                    ? "bg-destructive/20 text-destructive"
+                    : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                )}
+              >
+                {isVideoOff ? (
+                  <VideoOff className="w-6 h-6" />
+                ) : (
+                  <Video className="w-6 h-6" />
+                )}
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      </motion.div>
     </>
   );
 };

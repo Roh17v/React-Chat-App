@@ -45,6 +45,23 @@ const userSchema = new mongoose.Schema({
       ref: "Channel",
     },
   ],
+  pushTokens: [
+    {
+      token: {
+        type: String,
+        required: true,
+      },
+      platform: {
+        type: String,
+        enum: ["web", "android"],
+        required: true,
+      },
+      createdAt: {
+        type: Date,
+        default: Date.now,
+      },
+    },
+  ],
 });
 
 userSchema.pre("save", async function (next) {
