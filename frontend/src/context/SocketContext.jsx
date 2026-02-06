@@ -31,6 +31,7 @@ export const SocketProvider = ({ children }) => {
     setCallAccepted,
     clearCallAccepted,
     setTypingIndicator,
+    updateContactLastSeen,
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
@@ -122,6 +123,10 @@ export const SocketProvider = ({ children }) => {
         }
       });
 
+      socket.current.on("user-last-seen", ({ userId, lastSeen }) => {
+        updateContactLastSeen(userId, lastSeen);
+      });
+
       return () => {
         if (socket.current) {
           socket.current.off("new-dm-contact");
@@ -133,6 +138,7 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("call-ended");
           socket.current.off("typing");
           socket.current.off("stop-typing");
+          socket.current.off("user-last-seen");
 
           socket.current.disconnect();
           socket.current = null;
@@ -150,6 +156,7 @@ export const SocketProvider = ({ children }) => {
     setCallAccepted,
     clearCallAccepted,
     stopMedia,
+    updateContactLastSeen,
   ]);
   useEffect(() => {
     if (!socket.current) return;

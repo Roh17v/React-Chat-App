@@ -43,11 +43,14 @@ const setupSocket = (server) => {
   };
 
   const removeUserSocket = (userId, socketId) => {
-    if (userSocketMap.has(userId)) {
-      const sockets = userSocketMap.get(userId);
-      sockets.delete(socketId);
-      if (sockets.size === 0) userSocketMap.delete(userId);
+    if (!userSocketMap.has(userId)) return false;
+    const sockets = userSocketMap.get(userId);
+    sockets.delete(socketId);
+    if (sockets.size === 0) {
+      userSocketMap.delete(userId);
+      return true;
     }
+    return false;
   };
 
   const sendMessage = async (message, socket) => {
@@ -58,8 +61,8 @@ const setupSocket = (server) => {
       });
 
       const messageData = await Message.findById(createdMessage._id)
-        .populate("sender", "id email firstName lastName image color")
-        .populate("receiver", "id email firstName lastName image color");
+        .populate("sender", "id email firstName lastName image color lastSeen")
+        .populate("receiver", "id email firstName lastName image color lastSeen");
 
       const receiverSockets = userSocketMap.get(message.receiver) || new Set();
       const senderSockets = userSocketMap.get(message.sender) || new Set();
@@ -354,8 +357,17 @@ const setupSocket = (server) => {
 
     socket.on("sendMessage", (message) => sendMessage(message, socket));
 
-    socket.on("disconnect", () => {
-      removeUserSocket(userId, socket.id);
+    socket.on("disconnect", async () => {
+      const becameOffline = removeUserSocket(userId, socket.id);
+      if (becameOffline && userId) {
+        try {
+          const lastSeen = new Date();
+          await User.findByIdAndUpdate(userId, { $set: { lastSeen } });
+          io.emit("user-last-seen", { userId, lastSeen });
+        } catch (error) {
+          console.error("Error updating last seen:", error);
+        }
+      }
       io.emit("onlineUsers", Array.from(userSocketMap.keys()));
       console.log(`Client Disconnected: ${socket.id}`);
     });

@@ -33,6 +33,10 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  lastSeen: {
+    type: Date,
+    default: null,
+  },
   contacts: [
     {
       type: mongoose.Schema.Types.ObjectId,

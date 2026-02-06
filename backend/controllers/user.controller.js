@@ -102,7 +102,7 @@ export const searchUsers = async (req, res, next) => {
           ],
         },
       ],
-    }).select("firstName lastName email image color");
+    }).select("firstName lastName email image color lastSeen");
 
     res.status(200).json(users);
   } catch (error) {
@@ -118,7 +118,10 @@ export const dmContacts = async (req, res, next) => {
       $or: [{ sender: userId }, { receiver: userId }],
       receiver: { $ne: null },
     })
-      .populate("sender receiver", "firstName lastName email image color _id")
+      .populate(
+        "sender receiver",
+        "firstName lastName email image color lastSeen _id",
+      )
       .sort({ createdAt: -1 });
 
     const contactsMap = new Map();
