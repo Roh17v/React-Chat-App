@@ -417,13 +417,13 @@ const MessageContainer = () => {
               className={cn(
                 "absolute -top-3 z-10",
                 isSent ? "-left-3" : "-right-3",
-                "hidden sm:flex w-7 h-7 rounded-full border border-border",
+                "hidden sm:flex w-7 h-7 items-center justify-center rounded-full border border-border",
                 "bg-background-secondary text-foreground-muted",
                 "hover:text-foreground hover:bg-accent transition-all duration-150",
                 "sm:opacity-0 sm:group-hover:opacity-100",
               )}
             >
-              <RiReplyLine className="w-3.5 h-3.5 mx-auto" />
+              <RiReplyLine className="w-3.5 h-3.5" />
             </button>
           )}
 
