@@ -231,6 +231,10 @@
   .touch-target {
     @apply min-w-[44px] min-h-[44px] flex items-center justify-center;
   }
+
+  .reply-highlight .message-bubble {
+    animation: replyPulse 2s ease-out 1;
+  }
 }
 
 @layer utilities {
@@ -310,6 +314,18 @@
     to {
       opacity: 1;
       transform: scale(1);
+    }
+  }
+
+  @keyframes replyPulse {
+    0% {
+      box-shadow:
+        0 0 0 2px hsl(var(--status-online) / 0.9),
+        0 0 0 10px hsl(var(--status-online) / 0.25),
+        var(--shadow-sm);
+    }
+    100% {
+      box-shadow: var(--shadow-sm);
     }
   }
 

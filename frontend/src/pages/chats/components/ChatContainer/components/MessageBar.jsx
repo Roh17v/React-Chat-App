@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { CgAttachment } from "react-icons/cg";
 import { RiEmojiStickerLine } from "react-icons/ri";
-import { IoSend } from "react-icons/io5";
+import { IoCloseSharp, IoSend } from "react-icons/io5";
 import EmojiPicker from "emoji-picker-react";
 import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
@@ -23,6 +23,8 @@ const MessageBar = () => {
     addMessage,
     setFileUploadingProgress,
     setIsUploading,
+    replyToMessage,
+    clearReplyToMessage,
   } = useAppStore();
   const { socket } = useSocket();
 
@@ -32,12 +34,14 @@ const MessageBar = () => {
     if (message.trim() === "") return;
 
     if (selectedChatType === "contact") {
+      const replyTo = buildReplyPayload(replyToMessage);
       const newMessage = {
         sender: user.id,
         content: message,
         receiver: selectedChatData._id,
         messageType: "text",
         fileUrl: undefined,
+        replyTo: replyTo || undefined,
       };
       socket.emit("sendMessage", newMessage);
     } else if (selectedChatType === "channel") {
@@ -59,6 +63,7 @@ const MessageBar = () => {
       isTypingRef.current = false;
     }
     setMessage("");
+    clearReplyToMessage();
   };
 
   const handleAddEmoji = (emoji) => {
@@ -93,12 +98,14 @@ const MessageBar = () => {
         if (response.status === 201 && response.data) {
           setIsUploading(false);
           if (selectedChatType === "contact") {
+            const replyTo = buildReplyPayload(replyToMessage);
             socket.emit("sendMessage", {
               sender: user.id,
               content: undefined,
               receiver: selectedChatData._id,
               messageType: "file",
               fileUrl: response.data.fileUrl,
+              replyTo: replyTo || undefined,
             });
           } else if (selectedChatType === "channel") {
             socket.emit("send-channel-message", {
@@ -109,12 +116,52 @@ const MessageBar = () => {
               channelId: selectedChatData._id,
             });
           }
+          clearReplyToMessage();
         }
       }
     } catch (error) {
       console.log("Error sending file: ", error);
       setIsUploading(false);
     }
+  };
+
+  const getReplySenderLabel = () => {
+    if (!replyToMessage?.sender) return "Unknown";
+    if (String(replyToMessage.sender) === String(user?.id)) return "You";
+    const contactName =
+      `${selectedChatData?.firstName || ""} ${selectedChatData?.lastName || ""}`.trim();
+    return contactName || selectedChatData?.email || "Contact";
+  };
+
+  const getReplyPreviewText = () => {
+    if (!replyToMessage) return "";
+    if (replyToMessage.messageType === "file") {
+      return (
+        replyToMessage.fileUrl?.split("/").pop() ||
+        "File"
+      );
+    }
+    return replyToMessage.content || "Message";
+  };
+
+  const buildReplyPayload = (sourceMessage) => {
+    if (!sourceMessage) return null;
+    const isFile = sourceMessage.messageType === "file";
+    const fileName = isFile
+      ? sourceMessage.fileUrl?.split("/").pop() || "File"
+      : null;
+    const previewText = isFile
+      ? fileName
+      : (sourceMessage.content || "").slice(0, 120);
+
+    return {
+      messageId: sourceMessage._id,
+      senderId: sourceMessage.sender,
+      messageType: sourceMessage.messageType,
+      previewText,
+      fileName,
+      createdAt: sourceMessage.createdAt,
+    };
   };
 
   useEffect(() => {
@@ -182,6 +229,18 @@ const MessageBar = () => {
   }, [message, selectedChatData, selectedChatType, socket]);
 
   useEffect(() => {
+    if (selectedChatType !== "contact" && replyToMessage) {
+      clearReplyToMessage();
+    }
+  }, [selectedChatType, replyToMessage, clearReplyToMessage]);
+
+  useEffect(() => {
+    if (replyToMessage && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [replyToMessage]);
+
+  useEffect(() => {
     return () => {
       if (!socket || !isTypingRef.current) return;
       socket.emit("stop-typing", {
@@ -198,7 +257,28 @@ const MessageBar = () => {
   return (
     <div className="p-2 sm:p-3 safe-area-bottom bg-background">
       {/* Floating input bar - Telegram style */}
-      <div className="input-bar">
+      <div className="input-bar relative">
+        {selectedChatType === "contact" && replyToMessage && (
+          <div className="absolute -top-12 left-2 right-2 sm:left-4 sm:right-4">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-background-secondary/95 px-3 py-2 shadow-md">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold text-foreground">
+                  Replying to {getReplySenderLabel()}
+                </p>
+                <p className="text-xs text-foreground-muted truncate">
+                  {getReplyPreviewText()}
+                </p>
+              </div>
+              <button
+                onClick={clearReplyToMessage}
+                className="touch-target rounded-full text-foreground-muted hover:text-foreground hover:bg-accent transition-colors"
+                title="Cancel reply"
+              >
+                <IoCloseSharp className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        )}
         {/* Attachment button */}
         <button
           onClick={handleAttachmentClick}

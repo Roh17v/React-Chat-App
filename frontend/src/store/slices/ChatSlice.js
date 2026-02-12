@@ -15,6 +15,7 @@ export const createChatSlice = (set, get) => ({
   pendingNotification: null, // { type, chatType, chatId, callId, callAction }
   callAccepted: false,
   typingIndicators: {},
+  replyToMessage: null,
 
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
@@ -39,7 +40,8 @@ export const createChatSlice = (set, get) => ({
       );
       return { directMessagesContacts: updated };
     }),
-  setSelectedChatData: (selectedChatData) => set({ selectedChatData }),
+  setSelectedChatData: (selectedChatData) =>
+    set({ selectedChatData, replyToMessage: null }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
   setSelectedChatMessages: (newMessages, reset = false) =>
     set((state) => {
@@ -70,6 +72,7 @@ export const createChatSlice = (set, get) => ({
       selectedChatData: undefined,
       selectedChatType: undefined,
       selectedChatMessages: [],
+      replyToMessage: null,
     }),
   addMessage: (message) => {
     console.log("Inside add message");
@@ -162,4 +165,6 @@ export const createChatSlice = (set, get) => ({
       const { [chatId]: _removed, ...rest } = state.typingIndicators;
       return { typingIndicators: rest };
     }),
+  setReplyToMessage: (message) => set({ replyToMessage: message }),
+  clearReplyToMessage: () => set({ replyToMessage: null }),
 });
