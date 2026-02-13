@@ -1,7 +1,7 @@
 import useAppStore from "@/store";
 import { HOST } from "@/utils/constants";
 import { io } from "socket.io-client";
-import { useRef, useEffect, useState, useMemo } from "react";
+import { useRef, useEffect, useState } from "react";
 import { createContext, useContext } from "react";
 import useMediaStream from "@/hooks/useMediaStream";
 
@@ -9,6 +9,46 @@ const SocketContext = createContext(null);
 
 export const useSocket = () => {
   return useContext(SocketContext);
+};
+
+const normalizeId = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value._id) {
+    return value._id.toString();
+  }
+  return value.toString();
+};
+
+const getFileNameFromUrl = (url) => {
+  if (!url) return "File";
+  try {
+    const parsedUrl = new URL(url);
+    const fileName = parsedUrl.pathname.split("/").pop();
+    return decodeURIComponent(fileName || "File");
+  } catch {
+    const fileName = url.split("/").pop();
+    return decodeURIComponent(fileName || "File");
+  }
+};
+
+const getMessagePreview = (message) => {
+  if (!message) return "No messages yet";
+
+  if (message.messageType === "text") {
+    const trimmed = (message.content || "").trim();
+    return trimmed || "Message";
+  }
+
+  if (message.messageType === "file") {
+    return `Attachment: ${getFileNameFromUrl(message.fileUrl)}`;
+  }
+
+  if (message.messageType === "call") {
+    return "Call";
+  }
+
+  return "Message";
 };
 
 export const SocketProvider = ({ children }) => {
@@ -162,43 +202,66 @@ export const SocketProvider = ({ children }) => {
     if (!socket.current) return;
 
     const handleReceiveMessage = (message) => {
-      console.log("Inside handle receive message");
+      const senderId = normalizeId(message.sender);
+      const receiverId = normalizeId(message.receiver);
+      const currentUserId = normalizeId(user?.id);
+      const selectedChatId = normalizeId(selectedChatData?._id);
+      const contactId = senderId === currentUserId ? receiverId : senderId;
+      const isIncoming = senderId !== currentUserId;
+      const isChatOpen =
+        selectedChatType === "contact" && selectedChatId === senderId;
+
       if (
         selectedChatData &&
         selectedChatType !== undefined &&
-        (selectedChatData._id === message.sender._id ||
-          selectedChatData._id === message.receiver._id)
+        (selectedChatId === senderId || selectedChatId === receiverId)
       ) {
-        if (selectedChatData._id === message.sender._id) {
+        if (selectedChatId === senderId) {
           socket.current.emit("confirm-read", {
             userId: user.id,
-            senderId: selectedChatData._id,
+            senderId: selectedChatId,
           });
         }
         addMessage(message);
       }
 
-      if (directMessagesContacts) {
-        const contactIndex = directMessagesContacts.findIndex((contact) => {
-          return contact._id === message.sender._id;
-        });
+      if (Array.isArray(directMessagesContacts) && contactId) {
+        const updatedContacts = [...directMessagesContacts];
+        const contactIndex = updatedContacts.findIndex(
+          (contact) => normalizeId(contact._id) === contactId,
+        );
+        const messagePreview = getMessagePreview(message);
+        const lastMessageAt = message.createdAt || new Date().toISOString();
 
-        if (
-          contactIndex !== -1 &&
-          (!selectedChatData || selectedChatData._id !== message.sender._id)
-        ) {
-          const updatedContacts = [...directMessagesContacts];
-          updatedContacts[contactIndex].unreadCount =
-            (updatedContacts[contactIndex].unreadCount || 0) + 1;
-
-          const [contact] = updatedContacts.splice(contactIndex, 1);
-
-          updatedContacts.unshift(contact);
+        if (contactIndex !== -1) {
+          const existingContact = updatedContacts[contactIndex];
+          const updatedContact = {
+            ...existingContact,
+            lastMessage: messagePreview,
+            lastMessageAt,
+            unreadCount: isIncoming
+              ? isChatOpen
+                ? 0
+                : (existingContact.unreadCount || 0) + 1
+              : existingContact.unreadCount || 0,
+          };
+          updatedContacts.splice(contactIndex, 1);
+          updatedContacts.unshift(updatedContact);
           setDirectMessagesContacts(updatedContacts);
-          console.log(updatedContacts[contactIndex].unreadCount);
+        } else {
+          const contactPayload =
+            senderId === currentUserId ? message.receiver : message.sender;
+          if (contactPayload && normalizeId(contactPayload._id)) {
+            updatedContacts.unshift({
+              ...contactPayload,
+              unreadCount: isIncoming && !isChatOpen ? 1 : 0,
+              lastMessage: messagePreview,
+              lastMessageAt,
+            });
+            setDirectMessagesContacts(updatedContacts);
+          }
         }
       }
-      console.log("Message Received: ", message);
     };
 
     const handleChannelReceiveMessage = (message) => {

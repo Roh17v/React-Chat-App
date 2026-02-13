@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, lazy, Suspense } from "react";
 import { CgAttachment } from "react-icons/cg";
 import { RiEmojiStickerLine } from "react-icons/ri";
 import { IoCloseSharp, IoSend } from "react-icons/io5";
-import EmojiPicker from "emoji-picker-react";
+const EmojiPicker = lazy(() => import("emoji-picker-react"));
 import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
 import axios from "axios";
@@ -344,15 +344,17 @@ const MessageBar = () => {
               !emojiPickerOpen && "hidden",
             )}
           >
-            <EmojiPicker
-              theme="dark"
-              onEmojiClick={(emojiObject) => handleAddEmoji(emojiObject)}
-              autoFocusSearch={false}
-              emojiStyle="native"
-              searchPlaceHolder="Search emoji..."
-              width={300}
-              height={400}
-            />
+            <Suspense fallback={<div className="flex items-center justify-center w-[300px] h-[400px] bg-background-secondary rounded-xl"><span className="text-foreground-muted text-sm">Loading...</span></div>}>
+              <EmojiPicker
+                theme="dark"
+                onEmojiClick={(emojiObject) => handleAddEmoji(emojiObject)}
+                autoFocusSearch={false}
+                emojiStyle="native"
+                searchPlaceHolder="Search emoji..."
+                width={300}
+                height={400}
+              />
+            </Suspense>
           </div>
         </div>
 
