@@ -5,6 +5,37 @@ import fs from "fs";
 import Message from "../models/message.model.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
 
+const getFileNameFromUrl = (url) => {
+  if (!url) return "File";
+  try {
+    const parsedUrl = new URL(url);
+    const fileName = parsedUrl.pathname.split("/").pop();
+    return decodeURIComponent(fileName || "File");
+  } catch {
+    const fileName = url.split("/").pop();
+    return decodeURIComponent(fileName || "File");
+  }
+};
+
+const getMessagePreview = (message) => {
+  if (!message) return "No messages yet";
+
+  if (message.messageType === "text") {
+    const trimmed = (message.content || "").trim();
+    return trimmed || "Message";
+  }
+
+  if (message.messageType === "file") {
+    return `Attachment: ${getFileNameFromUrl(message.fileUrl)}`;
+  }
+
+  if (message.messageType === "call") {
+    return "Call";
+  }
+
+  return "Message";
+};
+
 export const updateProfile = async (req, res, next) => {
   try {
     const { userId } = req.params;
@@ -135,7 +166,12 @@ export const dmContacts = async (req, res, next) => {
       const contactId = contact._id.toString();
 
       if (!contactsMap.has(contactId)) {
-        contactsMap.set(contactId, { ...contact._doc, unreadCount: 0 });
+        contactsMap.set(contactId, {
+          ...contact._doc,
+          unreadCount: 0,
+          lastMessage: getMessagePreview(msg),
+          lastMessageAt: msg.createdAt || null,
+        });
       }
 
       if (
