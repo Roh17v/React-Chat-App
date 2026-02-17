@@ -522,6 +522,14 @@ const setupSocket = (server) => {
       });
     });
 
+    socket.on("call:ice-candidates", ({ to, candidates }) => {
+      if (!Array.isArray(candidates) || candidates.length === 0) return;
+      emitToUser(to, "call:ice-candidates", {
+        candidates,
+        from: userId,
+      });
+    });
+
     socket.on("typing", ({ chatType, receiverId, channelId }) => {
       emitTypingEvent({
         event: "typing",
