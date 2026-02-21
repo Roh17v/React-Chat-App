@@ -3,6 +3,8 @@ import {
   getChannelMessages,
   getMessages,
   uploadFile,
+  deleteForMe,
+  deleteForEveryone,
 } from "../controllers/message.controller.js";
 import { validateToken } from "../middlewares/auth.js";
 import upload from "../middlewares/upload.middleware.js";
@@ -16,6 +18,12 @@ messageRouter.post(
   validateToken,
   upload.single("file"),
   uploadFile
+);
+messageRouter.patch("/:messageId/delete-for-me", validateToken, deleteForMe);
+messageRouter.patch(
+  "/:messageId/delete-for-everyone",
+  validateToken,
+  deleteForEveryone
 );
 
 export default messageRouter;
