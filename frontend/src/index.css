@@ -129,11 +129,32 @@
 @layer base {
   * {
     @apply border-border;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
   }
 
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Allow text selection in message content and inputs */
+  .message-bubble,
+  input,
+  textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* GPU compositing hints for smooth scrolling */
+  [class*="overflow-y"],
+  [class*="overflow-auto"],
+  [class*="overflow-scroll"] {
+    will-change: scroll-position;
   }
 
   /* Custom scrollbar for dark theme */
@@ -184,7 +205,15 @@
   .contact-item {
     @apply relative flex items-center gap-3 p-3 rounded-xl cursor-pointer;
     @apply transition-all duration-200 ease-out;
-    @apply hover:bg-accent active:scale-[0.98];
+    @apply active:scale-[0.98];
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Only apply hover background on devices with a real pointer (mouse) */
+  @media (hover: hover) {
+    .contact-item:hover {
+      @apply bg-accent;
+    }
   }
 
   .contact-item.active {

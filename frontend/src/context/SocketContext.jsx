@@ -81,6 +81,9 @@ export const SocketProvider = ({ children }) => {
       socket.current = io(HOST, {
         withCredentials: true,
         query: { userId: user.id },
+        transports: ["websocket"],
+        pingInterval: 30000,
+        pingTimeout: 30000,
       });
 
       socket.current.on("connect", () => {

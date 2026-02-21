@@ -6,18 +6,21 @@ import {
   useLocation,
   useNavigate,
 } from "react-router-dom";
-import Auth from "./pages/auth/Auth";
-import Chats from "./pages/chats";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import ProtectedRoute from "./components/ProtectedRoutes.jsx";
-import Profile from "./pages/profile/Profile";
 import useAppStore from "./store";
-import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { HOST } from "./utils/constants";
 import { AUTH_ROUTES } from "./utils/constants";
 import Loader from "./components/Loader";
 import { initializePushNotifications } from "./utils/pushNotifications";
 import { useSocket } from "./context/SocketContext";
+import { App as CapacitorApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
+
+const Auth = lazy(() => import("./pages/auth/Auth"));
+const Chats = lazy(() => import("./pages/chats"));
+const Profile = lazy(() => import("./pages/profile/Profile"));
 
 function App() {
   const checkAuth = useAppStore((state) => state.checkAuth);
@@ -47,6 +50,76 @@ function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const { socket } = useSocket();
+  const closeChat = useAppStore((state) => state.closeChat);
+  const selectedChatData = useAppStore((state) => state.selectedChatData);
+  const chatHistoryPushedRef = useRef(false);
+
+  // Push/pop browser history entry when chat opens/closes
+  // so that the back button (hardware or browser) can close the chat
+  useEffect(() => {
+    if (selectedChatData && !chatHistoryPushedRef.current) {
+      chatHistoryPushedRef.current = true;
+      window.history.pushState({ chatOpen: true }, "");
+    } else if (!selectedChatData && chatHistoryPushedRef.current) {
+      chatHistoryPushedRef.current = false;
+      window.history.back();
+    }
+  }, [selectedChatData?._id]);
+
+  // Listen for popstate (back button) to close the chat
+  useEffect(() => {
+    const handlePopState = () => {
+      const state = useAppStore.getState();
+      if (state.selectedChatData) {
+        chatHistoryPushedRef.current = false;
+        state.closeChat();
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  // Handle Android hardware back button
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const listener = CapacitorApp.addListener("backButton", ({ canGoBack }) => {
+      const state = useAppStore.getState();
+
+      // Priority 1: If a call is active and fullscreen, minimize it first
+      if (state.activeCall && !state.isCallMinimized) {
+        state.setCallMinimized(true);
+        return;
+      }
+
+      // Priority 2: If avatar preview is showing, close it
+      if (state.showAvatarPreview) {
+        state.setShowAvatarPreview(false);
+        return;
+      }
+
+      // Priority 3: If a chat is open, close it directly
+      // (the useEffect watching selectedChatData will pop the history entry)
+      if (state.selectedChatData) {
+        state.closeChat();
+        return;
+      }
+
+      // Priority 3: If on a sub-page (profile, etc.), go back in history
+      if (window.location.pathname === "/profile" && canGoBack) {
+        window.history.back();
+        return;
+      }
+
+      // On main pages (/chats, /auth), minimize the app instead of exiting
+      CapacitorApp.minimizeApp();
+    });
+
+    return () => {
+      listener.then((l) => l.remove());
+    };
+  }, []);
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -303,28 +376,30 @@ function App() {
   if (isLoading) return <Loader />;
 
   return (
-    <Routes>
-      <Route path="/auth" element={<Auth />} />
+    <Suspense fallback={<Loader />}>
+      <Routes>
+        <Route path="/auth" element={<Auth />} />
 
-      <Route
-        path="/profile"
-        element={
-          <ProtectedRoute requireProfileSetup={false}>
-            <Profile />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/chats"
-        element={
-          <ProtectedRoute requireProfileSetup={true}>
-            <Chats />
-          </ProtectedRoute>
-        }
-      ></Route>
+        <Route
+          path="/profile"
+          element={
+            <ProtectedRoute requireProfileSetup={false}>
+              <Profile />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/chats"
+          element={
+            <ProtectedRoute requireProfileSetup={true}>
+              <Chats />
+            </ProtectedRoute>
+          }
+        ></Route>
 
-      <Route path="*" element={<Navigate to="/auth" />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/auth" />} />
+      </Routes>
+    </Suspense>
   );
 }
 
