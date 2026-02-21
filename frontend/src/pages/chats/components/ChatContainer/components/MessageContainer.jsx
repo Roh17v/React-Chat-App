@@ -4,6 +4,8 @@ import {
   HOST,
   MESSAGES_ROUTE,
   PRIVATE_CONTACT_MESSAGES_ROUTE,
+  DELETE_FOR_ME_ROUTE,
+  DELETE_FOR_EVERYONE_ROUTE,
 } from "@/utils/constants";
 import moment from "moment";
 import React, { useEffect, useRef, useState, useCallback } from "react";
@@ -12,7 +14,7 @@ import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Trash2, Ban } from "lucide-react";
 import { RiReplyLine } from "react-icons/ri";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
@@ -35,6 +37,10 @@ const MessageContainer = () => {
     clearTypingIndicatorsForChat,
     resetUnreadCount,
     setReplyToMessage,
+    deleteMessageForMe,
+    replaceWithDeletedPlaceholder,
+    messageActionMenu,
+    setMessageActionMenu,
   } = useAppStore();
   const { socket } = useSocket();
 
@@ -48,6 +54,9 @@ const MessageContainer = () => {
   const isInitialLoad = useRef(true);
   const lastMessageCountRef = useRef(0);
   const wasNearBottomRef = useRef(true);
+  const longPressTimerRef = useRef(null);
+  const menuRef = useRef(null);
+  const [menuPosition, setMenuPosition] = useState(null); // { top, left, direction }
   const prevTypingUsersLengthRef = useRef(0);
   const selectedChatId = selectedChatData?._id;
   const highlightTimeoutRef = useRef(null);
@@ -338,8 +347,119 @@ const MessageContainer = () => {
     </span>
   );
 
+  const handleDeleteForMe = async (messageId) => {
+    try {
+      await axios.patch(
+        `${HOST}${DELETE_FOR_ME_ROUTE}/${messageId}/delete-for-me`,
+        {},
+        { withCredentials: true }
+      );
+      deleteMessageForMe(messageId);
+    } catch (error) {
+      console.error("Delete for me failed:", error);
+    } finally {
+      closeActionMenu();
+    }
+  };
+
+  const handleDeleteForEveryone = async (messageId) => {
+    try {
+      await axios.patch(
+        `${HOST}${DELETE_FOR_EVERYONE_ROUTE}/${messageId}/delete-for-everyone`,
+        {},
+        { withCredentials: true }
+      );
+      replaceWithDeletedPlaceholder(messageId);
+    } catch (error) {
+      console.error("Delete for everyone failed:", error);
+    } finally {
+      closeActionMenu();
+    }
+  };
+
+  const handleReplyFromMenu = () => {
+    if (messageActionMenu?.message) {
+      setReplyToMessage(messageActionMenu.message);
+    }
+    closeActionMenu();
+  };
+
+  const openActionMenu = (message, isSent, anchorEl) => {
+    const isDesktop = window.innerWidth >= 640; // sm breakpoint
+    if (isDesktop && anchorEl) {
+      const rect = anchorEl.closest('.message-bubble')?.getBoundingClientRect() || anchorEl.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      const spaceBelow = viewportHeight - rect.bottom;
+      const direction = spaceBelow >= 160 ? 'below' : 'above';
+
+      setMenuPosition({
+        top: direction === 'below' ? rect.bottom + 4 : rect.top - 4,
+        left: isSent ? rect.right - 180 : rect.left,
+        direction,
+      });
+    } else {
+      setMenuPosition(null);
+    }
+    setMessageActionMenu({ message, isSent });
+  };
+
+  const closeActionMenu = () => {
+    setMessageActionMenu(null);
+    setMenuPosition(null);
+  };
+
+  const startLongPress = (message, isSent) => {
+    longPressTimerRef.current = setTimeout(() => {
+      openActionMenu(message, isSent, null);
+    }, 500);
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const renderDeletedPlaceholder = (message, isSent) => (
+    <div
+      className={cn(
+        "flex w-full animate-message-in",
+        isSent ? "justify-end" : "justify-start"
+      )}
+    >
+      <div
+        className={cn(
+          "message-bubble",
+          isSent ? "message-bubble-sent opacity-60" : "message-bubble-received opacity-60"
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <Ban className="w-4 h-4 shrink-0" />
+          <p className="text-sm italic">This message was deleted</p>
+        </div>
+        <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
+          <span
+            className={cn(
+              "text-[10px]",
+              isSent ? "text-primary-foreground/70" : "text-foreground-muted"
+            )}
+          >
+            {moment(message.createdAt).format("LT")}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+
   const renderDMMessages = (message, index) => {
     const isSent = message.sender === user.id;
+
+    // Render deleted placeholder
+    if (message.deletedForEveryone) {
+      return renderDeletedPlaceholder(message, isSent);
+    }
+
     const fileName = message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const canReply =
@@ -399,10 +519,26 @@ const MessageContainer = () => {
             isSent ? "message-bubble-sent" : "message-bubble-received",
             emoji?.isEmojiOnly && "!bg-transparent !shadow-none !px-1 !py-0"
           )}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onTouchCancel={handleTouchEnd}
+          onTouchStart={(e) => {
+            handleTouchStart(e);
+            startLongPress(message, isSent);
+          }}
+          onTouchMove={(e) => {
+            handleTouchMove(e);
+            cancelLongPress();
+          }}
+          onTouchEnd={(e) => {
+            handleTouchEnd(e);
+            cancelLongPress();
+          }}
+          onTouchCancel={(e) => {
+            handleTouchEnd(e);
+            cancelLongPress();
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            openActionMenu(message, isSent, e.currentTarget);
+          }}
           style={{
             transform: isSwipingThis ? `translateX(${swipeState.offset}px)` : undefined,
             transition:
@@ -412,23 +548,24 @@ const MessageContainer = () => {
             touchAction: "pan-y",
           }}
         >
-          {/* Reply button */}
-          {canReply && (
-            <button
-              onClick={() => setReplyToMessage(message)}
-              title="Reply"
-              className={cn(
-                "absolute -top-3 z-10",
-                isSent ? "-left-3" : "-right-3",
-                "hidden sm:flex w-7 h-7 items-center justify-center rounded-full border border-border",
-                "bg-background-secondary text-foreground-muted",
-                "hover:text-foreground hover:bg-accent transition-all duration-150",
-                "sm:opacity-0 sm:group-hover:opacity-100",
-              )}
-            >
-              <RiReplyLine className="w-3.5 h-3.5" />
-            </button>
-          )}
+          {/* Hover actions dropdown arrow (WhatsApp style) */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              openActionMenu(message, isSent, e.currentTarget);
+            }}
+            className={cn(
+              "absolute top-0.5 right-0.5 z-10",
+              "hidden sm:flex w-6 h-6 items-center justify-center rounded-md",
+              "transition-all duration-150",
+              "sm:opacity-0 sm:group-hover:opacity-100",
+              isSent
+                ? "bg-black/15 text-primary-foreground hover:bg-black/25"
+                : "bg-black/10 text-foreground hover:bg-black/20"
+            )}
+          >
+            <ChevronDown className="w-4 h-4 drop-shadow-sm" />
+          </button>
 
           {/* Reply preview */}
           {message.replyTo?.messageId && (
@@ -540,6 +677,12 @@ const MessageContainer = () => {
 
   const renderChannelMessage = (message, index) => {
     const isSent = message.sender?._id === user.id;
+
+    // Render deleted placeholder
+    if (message.deletedForEveryone) {
+      return renderDeletedPlaceholder(message, isSent);
+    }
+
     const fileName = message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
@@ -553,11 +696,18 @@ const MessageContainer = () => {
       >
         <div
           className={cn(
-            "message-bubble",
+            "message-bubble group",
             isSent ? "message-bubble-sent" : "message-bubble-received",
             emoji?.isEmojiOnly && "!bg-transparent !shadow-none !px-1 !py-0"
           )}
-
+          onTouchStart={() => startLongPress(message, isSent)}
+          onTouchMove={cancelLongPress}
+          onTouchEnd={cancelLongPress}
+          onTouchCancel={cancelLongPress}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            openActionMenu(message, isSent, e.currentTarget);
+          }}
         >
           {/* Sender name for channel messages (received only) */}
           {!isSent && message.sender && (
@@ -565,6 +715,25 @@ const MessageContainer = () => {
               {message.sender?.firstName} {message.sender?.lastName}
             </p>
           )}
+
+          {/* Hover actions dropdown arrow (WhatsApp style) */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              openActionMenu(message, isSent, e.currentTarget);
+            }}
+            className={cn(
+              "absolute top-0.5 right-0.5 z-10",
+              "hidden sm:flex w-6 h-6 items-center justify-center rounded-md",
+              "transition-all duration-150",
+              "sm:opacity-0 sm:group-hover:opacity-100",
+              isSent
+                ? "bg-black/15 text-primary-foreground hover:bg-black/25"
+                : "bg-black/10 text-foreground hover:bg-black/20"
+            )}
+          >
+            <ChevronDown className="w-4 h-4 drop-shadow-sm" />
+          </button>
 
           {/* Text Message */}
           {message.messageType === "text" && (
@@ -809,6 +978,9 @@ const MessageContainer = () => {
       if (observerRef.current) {
         observerRef.current.disconnect();
       }
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+      }
     };
   }, []);
 
@@ -893,6 +1065,96 @@ const MessageContainer = () => {
               <IoCloseSharp className="w-7 h-7 text-foreground" />
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Message Action Menu */}
+      {messageActionMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onClick={closeActionMenu}
+        >
+          {/* Desktop: positioned contextual dropdown */}
+          {menuPosition ? (
+            <div
+              ref={menuRef}
+              className="fixed z-50 w-44 bg-background-secondary border border-border rounded-xl shadow-chat-lg py-1 animate-fade-in"
+              style={{
+                top: menuPosition.top,
+                left: menuPosition.left,
+                ...(menuPosition.direction === 'above' && { transform: 'translateY(-100%)' }),
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={handleReplyFromMenu}
+                className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-foreground hover:bg-accent transition-colors"
+              >
+                <RiReplyLine className="w-4 h-4 text-foreground-muted" />
+                Reply
+              </button>
+              <button
+                onClick={() => handleDeleteForMe(messageActionMenu.message._id)}
+                className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-foreground hover:bg-accent transition-colors"
+              >
+                <Trash2 className="w-4 h-4 text-foreground-muted" />
+                Delete for Me
+              </button>
+              {messageActionMenu.isSent && (
+                <button
+                  onClick={() => handleDeleteForEveryone(messageActionMenu.message._id)}
+                  className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-destructive hover:bg-destructive/10 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete for Everyone
+                </button>
+              )}
+            </div>
+          ) : (
+            /* Mobile: bottom sheet */
+            <div
+              className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
+              onClick={closeActionMenu}
+            >
+              <div
+                className="w-full max-w-md pb-[env(safe-area-inset-bottom,16px)] bg-background-secondary rounded-t-2xl shadow-chat-lg p-4 animate-sheet-up"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="w-10 h-1 bg-border rounded-full mx-auto mb-4" />
+                <div className="flex flex-col gap-1">
+                  <button
+                    onClick={handleReplyFromMenu}
+                    className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                  >
+                    <RiReplyLine className="w-5 h-5 text-foreground-muted" />
+                    Reply
+                  </button>
+                  <button
+                    onClick={() => handleDeleteForMe(messageActionMenu.message._id)}
+                    className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                  >
+                    <Trash2 className="w-5 h-5 text-foreground-muted" />
+                    Delete for Me
+                  </button>
+                  {messageActionMenu.isSent && (
+                    <button
+                      onClick={() => handleDeleteForEveryone(messageActionMenu.message._id)}
+                      className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                      Delete for Everyone
+                    </button>
+                  )}
+                  <button
+                    onClick={closeActionMenu}
+                    className="w-full px-4 py-3 rounded-xl text-sm font-medium text-foreground-muted hover:bg-accent transition-colors mt-1"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

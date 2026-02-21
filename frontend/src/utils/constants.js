@@ -33,3 +33,6 @@ export const GET_USER_CHANNELS_ROUTE = `${HOST}${CHANNEL_ROUTE}`;
 export const TURN_CREDENTIALS_ROUTE = `/api/turn`;
 
 export const GET_TURN_CREDENTIALS = `${HOST}${TURN_CREDENTIALS_ROUTE}/credentials`;
+
+export const DELETE_FOR_ME_ROUTE = `${MESSAGES_ROUTE}`;
+export const DELETE_FOR_EVERYONE_ROUTE = `${MESSAGES_ROUTE}`;

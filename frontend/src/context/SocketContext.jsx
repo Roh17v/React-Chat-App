@@ -72,6 +72,7 @@ export const SocketProvider = ({ children }) => {
     clearCallAccepted,
     setTypingIndicator,
     updateContactLastSeen,
+    replaceWithDeletedPlaceholder,
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
@@ -170,6 +171,12 @@ export const SocketProvider = ({ children }) => {
         updateContactLastSeen(userId, lastSeen);
       });
 
+      socket.current.on("message-deleted", ({ messageId }) => {
+        if (messageId) {
+          replaceWithDeletedPlaceholder(messageId);
+        }
+      });
+
       return () => {
         if (socket.current) {
           socket.current.off("new-dm-contact");
@@ -182,6 +189,7 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("typing");
           socket.current.off("stop-typing");
           socket.current.off("user-last-seen");
+          socket.current.off("message-deleted");
 
           socket.current.disconnect();
           socket.current = null;

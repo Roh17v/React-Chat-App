@@ -18,6 +18,7 @@ export const createChatSlice = (set, get) => ({
   typingIndicators: {},
   replyToMessage: null,
   showAvatarPreview: false,
+  messageActionMenu: null, // { message, isSent }
 
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
@@ -76,6 +77,7 @@ export const createChatSlice = (set, get) => ({
       selectedChatMessages: [],
       replyToMessage: null,
       showAvatarPreview: false,
+      messageActionMenu: null,
     }),
   addMessage: (message) => {
     console.log("Inside add message");
@@ -172,4 +174,53 @@ export const createChatSlice = (set, get) => ({
   setReplyToMessage: (message) => set({ replyToMessage: message }),
   clearReplyToMessage: () => set({ replyToMessage: null }),
   setShowAvatarPreview: (show) => set({ showAvatarPreview: show }),
+  setMessageActionMenu: (menu) => set({ messageActionMenu: menu }),
+  deleteMessageForMe: (messageId) =>
+    set((state) => {
+      const filtered = state.selectedChatMessages.filter(
+        (msg) => msg._id !== messageId
+      );
+      // Update sidebar preview if the deleted msg was the last one
+      const lastMsg = filtered[filtered.length - 1];
+      const contacts = state.directMessagesContacts?.map((c) => {
+        if (c.lastMessage && c._id === state.selectedChatData?._id) {
+          return {
+            ...c,
+            lastMessage: lastMsg
+              ? lastMsg.messageType === "text"
+                ? lastMsg.content || "Message"
+                : "Attachment"
+              : "No messages yet",
+          };
+        }
+        return c;
+      });
+      return {
+        selectedChatMessages: filtered,
+        ...(contacts && { directMessagesContacts: contacts }),
+      };
+    }),
+  replaceWithDeletedPlaceholder: (messageId) =>
+    set((state) => {
+      const updatedMessages = state.selectedChatMessages.map((msg) =>
+        msg._id === messageId
+          ? { ...msg, deletedForEveryone: true, content: null, fileUrl: null }
+          : msg
+      );
+      // Update sidebar preview if the deleted msg was the last one
+      const lastMsg = updatedMessages[updatedMessages.length - 1];
+      const isLastDeleted = lastMsg?._id === messageId;
+      const contacts = isLastDeleted
+        ? state.directMessagesContacts?.map((c) => {
+            if (c._id === state.selectedChatData?._id) {
+              return { ...c, lastMessage: "This message was deleted" };
+            }
+            return c;
+          })
+        : state.directMessagesContacts;
+      return {
+        selectedChatMessages: updatedMessages,
+        ...(contacts && { directMessagesContacts: contacts }),
+      };
+    }),
 });
