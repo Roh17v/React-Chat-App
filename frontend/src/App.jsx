@@ -93,7 +93,13 @@ function App() {
         return;
       }
 
-      // Priority 2: If avatar preview is showing, close it
+      // Priority 2: If message action menu is showing, close it
+      if (state.messageActionMenu) {
+        state.setMessageActionMenu(null);
+        return;
+      }
+
+      // Priority 3: If avatar preview is showing, close it
       if (state.showAvatarPreview) {
         state.setShowAvatarPreview(false);
         return;

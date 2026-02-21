@@ -138,6 +138,14 @@ module.exports = {
           from: { opacity: "0", transform: "translateY(8px) scale(0.96)" },
           to: { opacity: "1", transform: "translateY(0) scale(1)" },
         },
+        "fade-in": {
+          from: { opacity: "0" },
+          to: { opacity: "1" },
+        },
+        "sheet-up": {
+          from: { opacity: "0", transform: "translateY(100%)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -146,6 +154,8 @@ module.exports = {
         "slide-in-left": "slide-in-left 0.3s ease-out",
         "slide-in-right": "slide-in-right 0.3s ease-out",
         "message-in": "message-in 0.2s ease-out",
+        "fade-in": "fade-in 0.2s ease-out",
+        "sheet-up": "sheet-up 0.3s cubic-bezier(0.32, 0.72, 0, 1)",
       },
     },
   },
