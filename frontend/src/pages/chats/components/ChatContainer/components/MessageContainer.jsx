@@ -16,6 +16,7 @@ import { ChevronDown } from "lucide-react";
 import { RiReplyLine } from "react-icons/ri";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
+import { analyzeEmoji } from "@/utils/emojiUtils";
 
 const MessageContainer = () => {
   const scrollRef = useRef(null);
@@ -343,6 +344,7 @@ const MessageContainer = () => {
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const canReply =
       message.messageType === "text" || message.messageType === "file";
+    const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
     const isSwipingThis = swipeState.id === message._id;
 
     const handleTouchStart = (e) => {
@@ -394,7 +396,8 @@ const MessageContainer = () => {
         <div
           className={cn(
             "message-bubble group",
-            isSent ? "message-bubble-sent" : "message-bubble-received"
+            isSent ? "message-bubble-sent" : "message-bubble-received",
+            emoji?.isEmojiOnly && "!bg-transparent !shadow-none !px-1 !py-0"
           )}
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
@@ -448,7 +451,10 @@ const MessageContainer = () => {
           {/* Text Message */}
           {message.messageType === "text" && (
             <div className="flex flex-col">
-              <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+              <p className={cn(
+                "leading-relaxed break-words whitespace-pre-wrap",
+                emoji?.isEmojiOnly ? emoji.sizeClass : "text-sm"
+              )}>
                 {message.content}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
@@ -536,6 +542,7 @@ const MessageContainer = () => {
     const isSent = message.sender?._id === user.id;
     const fileName = message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
+    const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
 
     return (
       <div
@@ -547,8 +554,10 @@ const MessageContainer = () => {
         <div
           className={cn(
             "message-bubble",
-            isSent ? "message-bubble-sent" : "message-bubble-received"
+            isSent ? "message-bubble-sent" : "message-bubble-received",
+            emoji?.isEmojiOnly && "!bg-transparent !shadow-none !px-1 !py-0"
           )}
+
         >
           {/* Sender name for channel messages (received only) */}
           {!isSent && message.sender && (
@@ -560,7 +569,10 @@ const MessageContainer = () => {
           {/* Text Message */}
           {message.messageType === "text" && (
             <div className="flex flex-col">
-              <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+              <p className={cn(
+                "leading-relaxed break-words whitespace-pre-wrap",
+                emoji?.isEmojiOnly ? emoji.sizeClass : "text-sm"
+              )}>
                 {message.content}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
