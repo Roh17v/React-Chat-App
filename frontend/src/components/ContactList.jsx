@@ -2,6 +2,7 @@ import useAppStore from "@/store";
 import React from "react";
 import { Avatar, AvatarImage } from "./ui/avatar";
 import { useSocket } from "@/context/SocketContext";
+import moment from "moment";
 
 const ContactList = ({ contacts, isChannel = false }) => {
   const { socket } = useSocket();
@@ -12,6 +13,7 @@ const ContactList = ({ contacts, isChannel = false }) => {
     setSelectedChatMessages,
     setPage,
     user,
+    resetUnreadCount,
   } = useAppStore();
 
   const { onlineUsers } = useSocket();
@@ -19,8 +21,10 @@ const ContactList = ({ contacts, isChannel = false }) => {
   const handleClick = (contact) => {
     setSelectedChatType(isChannel ? "channel" : "contact");
     setSelectedChatData(contact);
-    contact.unreadCount = 0;
-    socket.emit("confirm-read", { userId: user.id, senderId: contact._id });
+    if (!isChannel) {
+      resetUnreadCount(contact._id);
+      socket.emit("confirm-read", { userId: user.id, senderId: contact._id });
+    }
     if (selectedChatData && selectedChatData._id !== contact._id) {
       setSelectedChatMessages([], true);
       setPage(1);
@@ -31,6 +35,22 @@ const ContactList = ({ contacts, isChannel = false }) => {
     selectedChatData && selectedChatData._id === contact._id;
 
   const isOnline = (contact) => onlineUsers?.includes(contact._id);
+
+  const formatMessageTime = (value) => {
+    if (!value) return "";
+    const time = moment(value);
+    if (!time.isValid()) return "";
+    if (time.isSame(moment(), "day")) return time.format("h:mm A");
+    if (time.isSame(moment().subtract(1, "day"), "day")) return "Yesterday";
+    if (time.isSame(moment(), "year")) return time.format("MMM D");
+    return time.format("DD/MM/YY");
+  };
+
+  const getDmPreview = (contact) => {
+    const preview = (contact.lastMessage || "").trim();
+    if (preview) return preview;
+    return "No messages yet";
+  };
 
   if (!contacts || contacts.length === 0) {
     return (
@@ -91,27 +111,31 @@ const ContactList = ({ contacts, isChannel = false }) => {
           {/* Contact info */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-foreground font-medium text-sm truncate">
+              <span className="text-foreground font-medium text-sm truncate pr-2">
                 {isChannel
                   ? contact.channelName
                   : `${contact.firstName || ""} ${contact.lastName || ""}`.trim() ||
                     contact.email}
               </span>
-              {/* Timestamp placeholder - you can add lastMessageTime here */}
-              {contact.lastMessageTime && (
-                <span className="text-foreground-muted text-xs flex-shrink-0">
-                  {contact.lastMessageTime}
+              {!isChannel && contact.lastMessageAt && (
+                <span className="text-foreground-muted text-[11px] sm:text-xs flex-shrink-0">
+                  {formatMessageTime(contact.lastMessageAt)}
                 </span>
               )}
             </div>
 
             <div className="flex items-center justify-between gap-2 mt-0.5">
               {/* Last message preview */}
-              <p className="text-foreground-muted text-xs truncate">
-                {contact.lastMessage ||
-                  (isChannel
-                    ? `${contact.members?.length || 0} members`
-                    : contact.email)}
+              <p
+                className={`text-xs truncate leading-5 ${
+                  !isChannel && contact?.unreadCount > 0
+                    ? "text-foreground"
+                    : "text-foreground-muted"
+                }`}
+              >
+                {isChannel
+                  ? `${contact.members?.length || 0} members`
+                  : getDmPreview(contact)}
               </p>
 
               {/* Unread badge */}

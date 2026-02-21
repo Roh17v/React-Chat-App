@@ -14,7 +14,10 @@ export const createChatSlice = (set, get) => ({
   activeCall: null, // { callId, otherUserId, callType }
   pendingNotification: null, // { type, chatType, chatId, callId, callAction }
   callAccepted: false,
+  isCallMinimized: false,
   typingIndicators: {},
+  replyToMessage: null,
+  showAvatarPreview: false,
 
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
@@ -39,7 +42,8 @@ export const createChatSlice = (set, get) => ({
       );
       return { directMessagesContacts: updated };
     }),
-  setSelectedChatData: (selectedChatData) => set({ selectedChatData }),
+  setSelectedChatData: (selectedChatData) =>
+    set({ selectedChatData, replyToMessage: null }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
   setSelectedChatMessages: (newMessages, reset = false) =>
     set((state) => {
@@ -70,6 +74,8 @@ export const createChatSlice = (set, get) => ({
       selectedChatData: undefined,
       selectedChatType: undefined,
       selectedChatMessages: [],
+      replyToMessage: null,
+      showAvatarPreview: false,
     }),
   addMessage: (message) => {
     console.log("Inside add message");
@@ -129,10 +135,11 @@ export const createChatSlice = (set, get) => ({
   clearIncomingCall: () => set({ incomingCall: null }),
 
   setActiveCall: (call) => set({ activeCall: call }),
-  clearActiveCall: () => set({ activeCall: null }),
+  clearActiveCall: () => set({ activeCall: null, isCallMinimized: false }),
 
   setCallAccepted: (accepted = true) => set({ callAccepted: accepted }),
   clearCallAccepted: () => set({ callAccepted: false }),
+  setCallMinimized: (minimized) => set({ isCallMinimized: minimized }),
 
   setPendingNotification: (payload) => set({ pendingNotification: payload }),
   clearPendingNotification: () => set({ pendingNotification: null }),
@@ -162,4 +169,7 @@ export const createChatSlice = (set, get) => ({
       const { [chatId]: _removed, ...rest } = state.typingIndicators;
       return { typingIndicators: rest };
     }),
+  setReplyToMessage: (message) => set({ replyToMessage: message }),
+  clearReplyToMessage: () => set({ replyToMessage: null }),
+  setShowAvatarPreview: (show) => set({ showAvatarPreview: show }),
 });

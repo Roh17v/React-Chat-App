@@ -44,6 +44,35 @@ const messageSchema = new mongoose.Schema(
       enum: ["sent", "delivered", "read"],
       default: "sent",
     },
+    replyTo: {
+      messageId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Message",
+        default: null,
+      },
+      senderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
+      },
+      messageType: {
+        type: String,
+        enum: ["text", "file"],
+        default: null,
+      },
+      previewText: {
+        type: String,
+        default: null,
+      },
+      fileName: {
+        type: String,
+        default: null,
+      },
+      createdAt: {
+        type: Date,
+        default: null,
+      },
+    },
   },
   { timestamps: true }
 );

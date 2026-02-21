@@ -13,8 +13,10 @@ import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
 import { ChevronDown } from "lucide-react";
+import { RiReplyLine } from "react-icons/ri";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
+import { analyzeEmoji } from "@/utils/emojiUtils";
 
 const MessageContainer = () => {
   const scrollRef = useRef(null);
@@ -32,6 +34,7 @@ const MessageContainer = () => {
     typingIndicators,
     clearTypingIndicatorsForChat,
     resetUnreadCount,
+    setReplyToMessage,
   } = useAppStore();
   const { socket } = useSocket();
 
@@ -47,6 +50,18 @@ const MessageContainer = () => {
   const wasNearBottomRef = useRef(true);
   const prevTypingUsersLengthRef = useRef(0);
   const selectedChatId = selectedChatData?._id;
+  const highlightTimeoutRef = useRef(null);
+  const lastHighlightedRef = useRef(null);
+  const pendingHighlightRef = useRef(null);
+  const observerRef = useRef(null);
+  const touchStateRef = useRef({
+    id: null,
+    startX: 0,
+    startY: 0,
+    lastDx: 0,
+    active: false,
+  });
+  const [swipeState, setSwipeState] = useState({ id: null, offset: 0 });
 
   // Typing indicator state
   const typingUsers = selectedChatId
@@ -167,6 +182,89 @@ const MessageContainer = () => {
 
   const messagesRef = useRef(new Map());
 
+  const applyReplyHighlight = (target) => {
+    if (!target) return;
+    if (lastHighlightedRef.current && lastHighlightedRef.current !== target) {
+      lastHighlightedRef.current.classList.remove("reply-highlight");
+    }
+    target.classList.remove("reply-highlight");
+    void target.offsetWidth;
+    target.classList.add("reply-highlight");
+    lastHighlightedRef.current = target;
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    highlightTimeoutRef.current = setTimeout(() => {
+      target.classList.remove("reply-highlight");
+    }, 2600);
+  };
+
+  const observeHighlightWhenVisible = (messageId) => {
+    if (!messageId || !containerRef.current) return;
+    const target = document.getElementById(`msg-${messageId}`);
+    if (!target) return;
+
+    pendingHighlightRef.current = messageId;
+
+    if (!observerRef.current) {
+      observerRef.current = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            const entryId = entry.target.dataset.messageId;
+            if (!entryId || entryId !== pendingHighlightRef.current) return;
+            applyReplyHighlight(entry.target);
+            observerRef.current?.unobserve(entry.target);
+            pendingHighlightRef.current = null;
+          });
+        },
+        {
+          root: containerRef.current,
+          threshold: 0.6,
+        },
+      );
+    }
+
+    const rootBounds = containerRef.current.getBoundingClientRect();
+    const targetBounds = target.getBoundingClientRect();
+    const alreadyVisible =
+      targetBounds.top >= rootBounds.top &&
+      targetBounds.bottom <= rootBounds.bottom;
+
+    if (alreadyVisible) {
+      applyReplyHighlight(target);
+      pendingHighlightRef.current = null;
+      return;
+    }
+
+    observerRef.current.observe(target);
+  };
+
+  const scrollToMessage = (messageId) => {
+    if (!messageId) return;
+    const target = document.getElementById(`msg-${messageId}`);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      observeHighlightWhenVisible(messageId);
+    }
+  };
+
+  const getReplyPreviewText = (replyTo) => {
+    if (!replyTo) return "";
+    if (replyTo.messageType === "file") {
+      return replyTo.fileName || "File";
+    }
+    return replyTo.previewText || "Message";
+  };
+
+  const getReplySenderLabel = (replyTo) => {
+    if (!replyTo?.senderId) return "Unknown";
+    if (String(replyTo.senderId) === String(user?.id)) return "You";
+    const contactName =
+      `${selectedChatData?.firstName || ""} ${selectedChatData?.lastName || ""}`.trim();
+    return contactName || selectedChatData?.email || "Contact";
+  };
+
   // Format typing indicator label
   const formatTypingLabel = () => {
     if (typingUsers.length === 0) return "";
@@ -244,6 +342,49 @@ const MessageContainer = () => {
     const isSent = message.sender === user.id;
     const fileName = message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
+    const canReply =
+      message.messageType === "text" || message.messageType === "file";
+    const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
+    const isSwipingThis = swipeState.id === message._id;
+
+    const handleTouchStart = (e) => {
+      if (!canReply || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      touchStateRef.current = {
+        id: message._id,
+        startX: touch.clientX,
+        startY: touch.clientY,
+        lastDx: 0,
+        active: true,
+      };
+    };
+
+    const handleTouchMove = (e) => {
+      if (!canReply || !touchStateRef.current.active) return;
+      if (touchStateRef.current.id !== message._id) return;
+      const touch = e.touches[0];
+      const dx = touch.clientX - touchStateRef.current.startX;
+      const dy = touch.clientY - touchStateRef.current.startY;
+
+      if (Math.abs(dy) > 40 && Math.abs(dx) < 20) return;
+      if (dx < 0) return;
+
+      const offset = Math.min(dx, 72);
+      touchStateRef.current.lastDx = dx;
+      setSwipeState({ id: message._id, offset });
+    };
+
+    const handleTouchEnd = () => {
+      if (!touchStateRef.current.active) return;
+      if (touchStateRef.current.id !== message._id) return;
+      const shouldTrigger = touchStateRef.current.lastDx > 55;
+      touchStateRef.current.active = false;
+      touchStateRef.current.lastDx = 0;
+      setSwipeState({ id: message._id, offset: 0 });
+      if (shouldTrigger && canReply) {
+        setReplyToMessage(message);
+      }
+    };
 
     return (
       <div
@@ -254,14 +395,66 @@ const MessageContainer = () => {
       >
         <div
           className={cn(
-            "message-bubble",
-            isSent ? "message-bubble-sent" : "message-bubble-received"
+            "message-bubble group",
+            isSent ? "message-bubble-sent" : "message-bubble-received",
+            emoji?.isEmojiOnly && "!bg-transparent !shadow-none !px-1 !py-0"
           )}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onTouchCancel={handleTouchEnd}
+          style={{
+            transform: isSwipingThis ? `translateX(${swipeState.offset}px)` : undefined,
+            transition:
+              isSwipingThis && swipeState.offset > 0
+                ? "none"
+                : "transform 150ms ease-out",
+            touchAction: "pan-y",
+          }}
         >
+          {/* Reply button */}
+          {canReply && (
+            <button
+              onClick={() => setReplyToMessage(message)}
+              title="Reply"
+              className={cn(
+                "absolute -top-3 z-10",
+                isSent ? "-left-3" : "-right-3",
+                "hidden sm:flex w-7 h-7 items-center justify-center rounded-full border border-border",
+                "bg-background-secondary text-foreground-muted",
+                "hover:text-foreground hover:bg-accent transition-all duration-150",
+                "sm:opacity-0 sm:group-hover:opacity-100",
+              )}
+            >
+              <RiReplyLine className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {/* Reply preview */}
+          {message.replyTo?.messageId && (
+            <button
+              onClick={() => scrollToMessage(message.replyTo.messageId)}
+              className={cn(
+                "mb-1.5 w-full rounded-lg px-2 py-1 text-left text-xs",
+                "border-l-2 border-primary/70",
+                isSent ? "bg-black/20" : "bg-background-tertiary/60",
+              )}
+            >
+              <span className="block font-semibold text-foreground/90">
+                {getReplySenderLabel(message.replyTo)}
+              </span>
+              <span className="block truncate text-foreground/80">
+                {getReplyPreviewText(message.replyTo)}
+              </span>
+            </button>
+          )}
           {/* Text Message */}
           {message.messageType === "text" && (
             <div className="flex flex-col">
-              <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+              <p className={cn(
+                "leading-relaxed break-words whitespace-pre-wrap",
+                emoji?.isEmojiOnly ? emoji.sizeClass : "text-sm"
+              )}>
                 {message.content}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
@@ -349,6 +542,7 @@ const MessageContainer = () => {
     const isSent = message.sender?._id === user.id;
     const fileName = message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
+    const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
 
     return (
       <div
@@ -360,8 +554,10 @@ const MessageContainer = () => {
         <div
           className={cn(
             "message-bubble",
-            isSent ? "message-bubble-sent" : "message-bubble-received"
+            isSent ? "message-bubble-sent" : "message-bubble-received",
+            emoji?.isEmojiOnly && "!bg-transparent !shadow-none !px-1 !py-0"
           )}
+
         >
           {/* Sender name for channel messages (received only) */}
           {!isSent && message.sender && (
@@ -373,7 +569,10 @@ const MessageContainer = () => {
           {/* Text Message */}
           {message.messageType === "text" && (
             <div className="flex flex-col">
-              <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+              <p className={cn(
+                "leading-relaxed break-words whitespace-pre-wrap",
+                emoji?.isEmojiOnly ? emoji.sizeClass : "text-sm"
+              )}>
                 {message.content}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
@@ -467,7 +666,12 @@ const MessageContainer = () => {
       }
 
       return (
-        <div key={message._id} className="flex flex-col gap-2">
+        <div
+          key={message._id}
+          id={`msg-${message._id}`}
+          data-message-id={message._id}
+          className="flex flex-col gap-2"
+        >
           {showDate && (
             <div className="flex justify-center my-4">
               <span className="date-separator">
@@ -596,6 +800,17 @@ const MessageContainer = () => {
       }
     };
   }, [handleScroll]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+      }
+    };
+  }, []);
 
   return (
     <div

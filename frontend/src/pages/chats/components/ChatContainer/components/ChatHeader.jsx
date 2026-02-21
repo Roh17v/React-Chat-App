@@ -1,15 +1,14 @@
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
 import useAppStore from "@/store";
-import React, { useState } from "react";
+import React from "react";
 import { RiCloseFill } from "react-icons/ri";
 import { useSocket } from "@/context/SocketContext";
 import { IoCall, IoVideocam, IoCloseSharp } from "react-icons/io5";
 
 const ChatHeader = () => {
-  const { closeChat, selectedChatData, selectedChatType, setActiveCall } =
+  const { closeChat, selectedChatData, selectedChatType, setActiveCall, showAvatarPreview, setShowAvatarPreview } =
     useAppStore();
   const { socket, onlineUsers } = useSocket();
-  const [showAvatarPreview, setShowAvatarPreview] = useState(false);
 
   const initiateCall = (callType) => {
     if (!selectedChatData?._id) return;

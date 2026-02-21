@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { motion } from "framer-motion";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
 import {
   Phone,
   PhoneOff,
@@ -23,25 +22,56 @@ import { useSocket } from "@/context/SocketContext";
 import axios from "axios";
 import { GET_TURN_CREDENTIALS } from "@/utils/constants";
 import { cn } from "@/lib/utils";
+import CallTimer from "@/components/CallTimer";
+import { Capacitor } from "@capacitor/core";
+import { App as CapacitorApp } from "@capacitor/app";
+
+const VIDEO_CONSTRAINTS = {
+  width: { ideal: 640, max: 720 },
+  height: { ideal: 480, max: 540 },
+  frameRate: { ideal: 24, max: 30 },
+};
+
+const AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+
+const MAX_VIDEO_BITRATE = 500_000;
+
+
+const ConnectionIcon = memo(({ connectionStatus }) => {
+  switch (connectionStatus) {
+    case "connected":
+    case "completed":
+      return <Signal className="w-3.5 h-3.5 text-status-online" />;
+    case "checking":
+    case "new":
+      return (
+        <SignalLow className="w-3.5 h-3.5 text-yellow-400 animate-pulse" />
+      );
+    default:
+      return <SignalZero className="w-3.5 h-3.5 text-destructive" />;
+  }
+});
+ConnectionIcon.displayName = "ConnectionIcon";
 
 const VideoCallScreen = () => {
-  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted } =
+  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted, isCallMinimized, setCallMinimized } =
     useAppStore();
   const { socket } = useSocket();
 
+  const isMinimized = isCallMinimized;
+  const setIsMinimized = setCallMinimized;
+
   // UI STATE
-  const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
-  const [isMinimized, setIsMinimized] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [pipExpanded, setPipExpanded] = useState(false);
   const [facingMode, setFacingMode] = useState("user");
   const [isFlipping, setIsFlipping] = useState(false);
-  
-  // Track when streams are ready to trigger video element updates
-  const [localStreamReady, setLocalStreamReady] = useState(false);
-  const [remoteStreamReady, setRemoteStreamReady] = useState(false);
 
   // Connection State
   const [callStatus, setCallStatus] = useState(
@@ -66,17 +96,20 @@ const VideoCallScreen = () => {
   const acceptRetryRef = useRef(null);
   const hasReceivedOffer = useRef(false);
 
-  // SINGLE SET OF PERSISTENT VIDEO REFS - Never remounted
-  const remoteVideoRef = useRef(null);
-  const localVideoRef = useRef(null);
-  
-  // Display video refs for PiP and fullscreen
+  // ICE candidate batching refs
+  const candidateBuffer = useRef([]);
+  const candidateTimer = useRef(null);
+
+  // Wake lock ref
+  const wakeLockRef = useRef(null);
+
+  // Video refs - only 2 pairs (PiP + fullscreen), no hidden persistent elements
   const pipRemoteVideoRef = useRef(null);
   const pipLocalVideoRef = useRef(null);
   const fullscreenRemoteVideoRef = useRef(null);
   const fullscreenLocalVideoRef = useRef(null);
 
-  // Drag Logic Refs - Using refs for smooth dragging without re-renders
+  // Drag Logic Refs
   const isDragging = useRef(false);
   const hasDragged = useRef(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
@@ -88,6 +121,10 @@ const VideoCallScreen = () => {
   const pipContainerRef = useRef(null);
   const animationFrameRef = useRef(null);
 
+  // WebRTC stats monitoring ref
+  const statsIntervalRef = useRef(null);
+
+
   // PiP sizes
   const pipSize = pipExpanded
     ? { width: 200, height: 280 }
@@ -95,17 +132,11 @@ const VideoCallScreen = () => {
 
   if (!activeCall || activeCall.callType !== "video") return null;
 
-  // Helper to update all local video elements
-  const updateAllLocalVideos = useCallback((stream) => {
+  // Keep all 4 video elements always connected — never detach srcObject.
+  // This prevents the black flicker on Capacitor Android WebView during layout switches.
+  const updateVisibleLocalVideo = useCallback((stream) => {
     if (!stream) return;
-    
-    const videos = [
-      localVideoRef.current,
-      pipLocalVideoRef.current,
-      fullscreenLocalVideoRef.current,
-    ];
-    
-    videos.forEach((video) => {
+    [pipLocalVideoRef.current, fullscreenLocalVideoRef.current].forEach((video) => {
       if (video && video.srcObject !== stream) {
         video.srcObject = stream;
         video.muted = true;
@@ -113,36 +144,95 @@ const VideoCallScreen = () => {
     });
   }, []);
 
-  // Helper to update all remote video elements
-  const updateAllRemoteVideos = useCallback((stream) => {
+  const updateVisibleRemoteVideo = useCallback((stream) => {
     if (!stream) return;
-    
-    const videos = [
-      remoteVideoRef.current,
-      pipRemoteVideoRef.current,
-      fullscreenRemoteVideoRef.current,
-    ];
-    
-    videos.forEach((video) => {
+    [pipRemoteVideoRef.current, fullscreenRemoteVideoRef.current].forEach((video) => {
       if (video && video.srcObject !== stream) {
         video.srcObject = stream;
       }
     });
   }, []);
 
-  // Effect to sync local stream to all video elements when ready
+  // Wake lock - keep screen on during video call
   useEffect(() => {
-    if (localStreamReady && localStreamRef.current) {
-      updateAllLocalVideos(localStreamRef.current);
-    }
-  }, [localStreamReady, updateAllLocalVideos, isMinimized]);
+    const requestWakeLock = async () => {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLockRef.current = await navigator.wakeLock.request("screen");
+        }
+      } catch (err) {
+        // Wake lock may fail silently
+      }
+    };
+    requestWakeLock();
 
-  // Effect to sync remote stream to all video elements when ready
+    const handleVisibilityChange = async () => {
+      if (wakeLockRef.current !== null && document.visibilityState === "visible") {
+        try {
+          wakeLockRef.current = await navigator.wakeLock.request("screen");
+        } catch (err) {
+          // Ignore
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    };
+  }, []);
+
+  // Background/foreground handling - disable video when app is backgrounded
   useEffect(() => {
-    if (remoteStreamReady && remoteStreamRef.current) {
-      updateAllRemoteVideos(remoteStreamRef.current);
+    if (!Capacitor.isNativePlatform()) return;
+
+    const listener = CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+      const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = isActive && !isVideoOff;
+      }
+    });
+
+    return () => {
+      listener.then((l) => l.remove());
+    };
+  }, [isVideoOff]);
+
+  // Apply bitrate cap on the video sender
+  const applyBitrateCap = useCallback(async () => {
+    if (!pc.current) return;
+    const sender = pc.current.getSenders().find((s) => s.track?.kind === "video");
+    if (!sender) return;
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = MAX_VIDEO_BITRATE;
+      params.encodings[0].maxFramerate = 24;
+      await sender.setParameters(params);
+    } catch (err) {
+      // Bitrate cap is best-effort
     }
-  }, [remoteStreamReady, updateAllRemoteVideos, isMinimized]);
+  }, []);
+
+  // Flush batched ICE candidates
+  const flushCandidates = useCallback(() => {
+    if (candidateBuffer.current.length === 0) return;
+    const targetId = activeCall?.otherUserId || activeCall?.callerId;
+    if (!targetId) return;
+
+    // Send batched candidates
+    socket.emit("call:ice-candidates", {
+      to: targetId,
+      candidates: candidateBuffer.current,
+    });
+    candidateBuffer.current = [];
+  }, [socket, activeCall?.otherUserId, activeCall?.callerId]);
 
   const flipCamera = async () => {
     if (isFlipping || isVideoOff) return;
@@ -158,10 +248,8 @@ const VideoCallScreen = () => {
         oldVideoTrack.stop();
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
       const videoStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newFacingMode },
+        video: { facingMode: newFacingMode, ...VIDEO_CONSTRAINTS },
         audio: false,
       });
 
@@ -172,20 +260,19 @@ const VideoCallScreen = () => {
       const newStream = new MediaStream(tracks);
       localStreamRef.current = newStream;
 
-      // Update all local video elements
-      updateAllLocalVideos(newStream);
+      updateVisibleLocalVideo(newStream);
 
       if (pc.current) {
         const senders = pc.current.getSenders();
         const videoSender = senders.find((s) => s.track?.kind === "video");
         if (videoSender && newVideoTrack) {
           await videoSender.replaceTrack(newVideoTrack);
+          applyBitrateCap();
         }
       }
 
       setFacingMode(newFacingMode);
     } catch (err) {
-      console.error("Failed to flip camera:", err);
       setMediaError("Failed to switch camera. Please try again.");
     } finally {
       setIsFlipping(false);
@@ -193,16 +280,14 @@ const VideoCallScreen = () => {
   };
 
   const handleDeviceChange = async () => {
-    console.log("Device change detected. Refreshing stream...");
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode },
-        audio: true,
+        video: { facingMode, ...VIDEO_CONSTRAINTS },
+        audio: AUDIO_CONSTRAINTS,
       });
       localStreamRef.current = newStream;
 
-      // Update all local video elements
-      updateAllLocalVideos(newStream);
+      updateVisibleLocalVideo(newStream);
 
       if (pc.current) {
         const senders = pc.current.getSenders();
@@ -210,34 +295,29 @@ const VideoCallScreen = () => {
           const sender = senders.find((s) => s.track?.kind === newTrack.kind);
           if (sender) sender.replaceTrack(newTrack);
         });
+        applyBitrateCap();
       }
     } catch (err) {
-      console.error("Failed to refresh media on device change", err);
       setMediaError("Device disconnected. Please check camera/mic.");
     }
   };
 
-  // INITIALIZE MEDIA
+  // INITIALIZE MEDIA with constrained resolution/framerate + audio constraints
   useEffect(() => {
     const startMedia = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode },
-          audio: true,
+          video: { facingMode, ...VIDEO_CONSTRAINTS },
+          audio: AUDIO_CONSTRAINTS,
         });
         localStreamRef.current = stream;
 
-        // Update all local video elements
-        updateAllLocalVideos(stream);
-        
-        // Mark local stream as ready
-        setLocalStreamReady(true);
+        updateVisibleLocalVideo(stream);
 
         setMediaError(null);
 
         stream.getTracks().forEach((track) => {
           track.onended = () => {
-            console.warn("Track ended unexpectedly. Restarting media...");
             handleDeviceChange();
           };
         });
@@ -248,7 +328,6 @@ const VideoCallScreen = () => {
           initializePeerConnection(stream);
         }
       } catch (err) {
-        console.error("Media Error:", err);
         setMediaError("Camera/Mic access denied.");
       }
     };
@@ -311,7 +390,7 @@ const VideoCallScreen = () => {
         config.iceServers = response.data.iceServers;
       }
     } catch (error) {
-      console.error("Failed to fetch TURN credentials:", error);
+      // Use default STUN servers
     }
 
     pc.current = new RTCPeerConnection(config);
@@ -319,20 +398,15 @@ const VideoCallScreen = () => {
 
     pc.current.ontrack = ({ track }) => {
       remoteStreamRef.current.addTrack(track);
-
-      // Update all remote video elements
-      updateAllRemoteVideos(remoteStreamRef.current);
-      
-      // Mark remote stream as ready
-      setRemoteStreamReady(true);
+      updateVisibleRemoteVideo(remoteStreamRef.current);
     };
 
+    // Batched ICE candidates instead of sending one at a time
     pc.current.onicecandidate = ({ candidate }) => {
       if (candidate) {
-        socket.emit("call:ice-candidate", {
-          to: activeCall.otherUserId || activeCall.callerId,
-          candidate,
-        });
+        candidateBuffer.current.push(candidate);
+        if (candidateTimer.current) clearTimeout(candidateTimer.current);
+        candidateTimer.current = setTimeout(flushCandidates, 100);
       }
     };
 
@@ -343,6 +417,10 @@ const VideoCallScreen = () => {
       if (connectionTimeout.current) {
         clearTimeout(connectionTimeout.current);
         connectionTimeout.current = null;
+      }
+
+      if (state === "connected" || state === "completed") {
+        applyBitrateCap();
       }
 
       if (state === "disconnected") {
@@ -365,7 +443,7 @@ const VideoCallScreen = () => {
           description: pc.current?.localDescription,
         });
       } catch (err) {
-        console.error(err);
+        // Negotiation error
       } finally {
         makingOffer.current = false;
       }
@@ -424,7 +502,7 @@ const VideoCallScreen = () => {
         });
       }
     } catch (err) {
-      console.error("Signaling Error:", err);
+      // Signaling error
     }
   };
 
@@ -433,28 +511,48 @@ const VideoCallScreen = () => {
 
     const onDescription = ({ description, from }) =>
       handleDescription(description, from);
+
     const onCandidate = async ({ candidate }) => {
       if (pc.current?.remoteDescription) {
         try {
           await pc.current.addIceCandidate(candidate);
         } catch (e) {
-          console.error(e);
+          // ICE candidate error
         }
       } else {
         pendingCandidates.current.push(candidate);
       }
     };
+
+    // Handle batched ICE candidates from the other peer
+    const onCandidates = async ({ candidates }) => {
+      if (!candidates || !Array.isArray(candidates)) return;
+      for (const candidate of candidates) {
+        if (pc.current?.remoteDescription) {
+          try {
+            await pc.current.addIceCandidate(candidate);
+          } catch (e) {
+            // ICE candidate error
+          }
+        } else {
+          pendingCandidates.current.push(candidate);
+        }
+      }
+    };
+
     const onEnd = () => cleanup();
 
     socket.on("call:offer", onDescription);
     socket.on("call:answer", onDescription);
     socket.on("call:ice-candidate", onCandidate);
+    socket.on("call:ice-candidates", onCandidates);
     socket.on("call:end", onEnd);
 
     return () => {
       socket.off("call:offer", onDescription);
       socket.off("call:answer", onDescription);
       socket.off("call:ice-candidate", onCandidate);
+      socket.off("call:ice-candidates", onCandidates);
       socket.off("call:end", onEnd);
     };
   }, [socket]);
@@ -487,6 +585,43 @@ const VideoCallScreen = () => {
     };
   }, [socket, activeCall?.isCaller, activeCall?.callId, activeCall?.otherUserId, activeCall?.callerId]);
 
+  // WebRTC stats monitoring for adaptive quality
+  useEffect(() => {
+    if (connectionStatus !== "connected" && connectionStatus !== "completed") return;
+    if (!pc.current) return;
+
+    statsIntervalRef.current = setInterval(async () => {
+      if (!pc.current) return;
+      try {
+        const stats = await pc.current.getStats();
+        stats.forEach((report) => {
+          if (report.type === "outbound-rtp" && report.kind === "video") {
+            if (report.qualityLimitationReason === "cpu") {
+              const sender = pc.current?.getSenders().find((s) => s.track?.kind === "video");
+              if (sender) {
+                const params = sender.getParameters();
+                if (params.encodings?.[0]) {
+                  const currentBitrate = params.encodings[0].maxBitrate || MAX_VIDEO_BITRATE;
+                  params.encodings[0].maxBitrate = Math.max(200_000, currentBitrate * 0.8);
+                  sender.setParameters(params).catch(() => {});
+                }
+              }
+            }
+          }
+        });
+      } catch (e) {
+        // Stats monitoring is best-effort
+      }
+    }, 10000);
+
+    return () => {
+      if (statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current);
+        statsIntervalRef.current = null;
+      }
+    };
+  }, [connectionStatus]);
+
   const cleanup = useCallback(() => {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
@@ -497,6 +632,15 @@ const VideoCallScreen = () => {
     if (acceptRetryRef.current) {
       clearInterval(acceptRetryRef.current);
       acceptRetryRef.current = null;
+    }
+    if (candidateTimer.current) {
+      clearTimeout(candidateTimer.current);
+      candidateTimer.current = null;
+    }
+
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = null;
     }
     clearActiveCall();
     clearCallAccepted();
@@ -524,18 +668,6 @@ const VideoCallScreen = () => {
       setIsVideoOff(!t.enabled);
     }
   };
-
-  useEffect(() => {
-    const t = setInterval(() => {
-      if (connectionStatus === "connected") setCallDuration((p) => p + 1);
-    }, 1000);
-    return () => clearInterval(t);
-  }, [connectionStatus]);
-
-  const formatDuration = (s) =>
-    `${Math.floor(s / 60)
-      .toString()
-      .padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
   // Smooth drag handlers
   const updatePipPosition = useCallback(() => {
@@ -565,21 +697,18 @@ const VideoCallScreen = () => {
       pipContainerRef.current.style.transition = "none";
       pipContainerRef.current.style.willChange = "left, top";
     }
-  }, []);
 
-  const handleDragMove = useCallback(
-    (e) => {
-      if (!isDragging.current) return;
-
+    // Register move/end listeners only during active drag
+    const moveHandler = (ev) => {
       hasDragged.current = true;
 
-      const clientX = "clientX" in e ? e.clientX : e.touches?.[0]?.clientX;
-      const clientY = "clientY" in e ? e.clientY : e.touches?.[0]?.clientY;
+      const cx = "clientX" in ev ? ev.clientX : ev.touches?.[0]?.clientX;
+      const cy = "clientY" in ev ? ev.clientY : ev.touches?.[0]?.clientY;
 
-      if (clientX === undefined || clientY === undefined) return;
+      if (cx === undefined || cy === undefined) return;
 
-      const deltaX = clientX - dragStartMouse.current.x;
-      const deltaY = clientY - dragStartMouse.current.y;
+      const deltaX = cx - dragStartMouse.current.x;
+      const deltaY = cy - dragStartMouse.current.y;
 
       const newX = dragStartPos.current.x + deltaX;
       const newY = dragStartPos.current.y + deltaY;
@@ -596,60 +725,51 @@ const VideoCallScreen = () => {
         cancelAnimationFrame(animationFrameRef.current);
       }
       animationFrameRef.current = requestAnimationFrame(updatePipPosition);
-    },
-    [pipSize.width, pipSize.height, updatePipPosition],
-  );
-
-  const handleDragEnd = useCallback(() => {
-    if (!isDragging.current) return;
-    isDragging.current = false;
-
-    if (pipContainerRef.current) {
-      pipContainerRef.current.style.willChange = "auto";
-    }
-  }, []);
-
-  useEffect(() => {
-    const moveHandler = (e) => {
-      if (isDragging.current && e.type === "touchmove") {
-        e.preventDefault();
-      }
-      handleDragMove(e);
     };
 
-    const handleResize = () => {
-      const maxX = window.innerWidth - pipSize.width - 16;
-      const maxY = window.innerHeight - pipSize.height - 16;
-      currentPosition.current = {
-        x: Math.max(16, Math.min(currentPosition.current.x, maxX)),
-        y: Math.max(16, Math.min(currentPosition.current.y, maxY)),
-      };
-      updatePipPosition();
+    const endHandler = () => {
+      isDragging.current = false;
+      if (pipContainerRef.current) {
+        pipContainerRef.current.style.willChange = "auto";
+      }
+      window.removeEventListener("mousemove", moveHandler);
+      window.removeEventListener("touchmove", moveHandler);
+      window.removeEventListener("mouseup", endHandler);
+      window.removeEventListener("touchend", endHandler);
     };
 
     window.addEventListener("mousemove", moveHandler);
-    window.addEventListener("touchmove", moveHandler, { passive: false });
-    window.addEventListener("mouseup", handleDragEnd);
-    window.addEventListener("touchend", handleDragEnd);
+    window.addEventListener("touchmove", moveHandler, { passive: true });
+    window.addEventListener("mouseup", endHandler);
+    window.addEventListener("touchend", endHandler);
+  }, [pipSize.width, pipSize.height, updatePipPosition]);
+
+  // Debounced resize handler only
+  useEffect(() => {
+    let resizeTimer;
+    const handleResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        const maxX = window.innerWidth - pipSize.width - 16;
+        const maxY = window.innerHeight - pipSize.height - 16;
+        currentPosition.current = {
+          x: Math.max(16, Math.min(currentPosition.current.x, maxX)),
+          y: Math.max(16, Math.min(currentPosition.current.y, maxY)),
+        };
+        updatePipPosition();
+      }, 150);
+    };
+
     window.addEventListener("resize", handleResize);
 
     return () => {
-      window.removeEventListener("mousemove", moveHandler);
-      window.removeEventListener("touchmove", moveHandler);
-      window.removeEventListener("mouseup", handleDragEnd);
-      window.removeEventListener("touchend", handleDragEnd);
       window.removeEventListener("resize", handleResize);
+      clearTimeout(resizeTimer);
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [
-    handleDragMove,
-    handleDragEnd,
-    pipSize.width,
-    pipSize.height,
-    updatePipPosition,
-  ]);
+  }, [pipSize.width, pipSize.height, updatePipPosition]);
 
   useEffect(() => {
     hasDragged.current = false;
@@ -681,49 +801,13 @@ const VideoCallScreen = () => {
     }
   }, [pipSize.width, pipSize.height, updatePipPosition]);
 
-  const getConnectionIcon = () => {
-    switch (connectionStatus) {
-      case "connected":
-      case "completed":
-        return <Signal className="w-3.5 h-3.5 text-status-online" />;
-      case "checking":
-      case "new":
-        return (
-          <SignalLow className="w-3.5 h-3.5 text-yellow-400 animate-pulse" />
-        );
-      default:
-        return <SignalZero className="w-3.5 h-3.5 text-destructive" />;
-    }
-  };
-
   const isConnecting =
     callStatus === "ringing" ||
     (connectionStatus !== "connected" && connectionStatus !== "completed");
 
   return (
     <>
-      {/* PERSISTENT HIDDEN VIDEO ELEMENTS - Source of truth, never remounted */}
-      <div
-        className="fixed pointer-events-none"
-        style={{ opacity: 0, position: "fixed", top: -9999, left: -9999 }}
-        aria-hidden="true"
-      >
-        <video
-          ref={remoteVideoRef}
-          autoPlay
-          playsInline
-          className="w-1 h-1"
-        />
-        <video
-          ref={localVideoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-1 h-1"
-        />
-      </div>
-
-      {/* MINIMIZED PIP VIEW - Always rendered, visibility controlled by CSS */}
+      {/* MINIMIZED PIP VIEW */}
       <div
         ref={pipContainerRef}
         style={{
@@ -731,7 +815,6 @@ const VideoCallScreen = () => {
           height: pipSize.height,
           left: currentPosition.current.x,
           top: currentPosition.current.y,
-          visibility: isMinimized ? "visible" : "hidden",
           opacity: isMinimized ? 1 : 0,
           transform: isMinimized ? "scale(1)" : "scale(0.8)",
           transition:
@@ -762,20 +845,18 @@ const VideoCallScreen = () => {
           {/* Gradient Overlay */}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
 
-          {/* Top Bar */}
+          {/* Top Bar - replaced backdrop-blur with solid bg */}
           <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
-            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/40 backdrop-blur-sm">
-              {getConnectionIcon()}
-              <span className="text-[10px] font-medium text-white">
-                {formatDuration(callDuration)}
-              </span>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/60">
+              <ConnectionIcon connectionStatus={connectionStatus} />
+              <CallTimer connectionStatus={connectionStatus} className="text-[10px] font-medium text-white" />
             </div>
             <button
               onClick={(e) => {
                 e.stopPropagation();
                 setPipExpanded(!pipExpanded);
               }}
-              className="w-6 h-6 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center text-white/80 hover:text-white transition-colors"
+              className="w-6 h-6 rounded-full bg-black/60 flex items-center justify-center text-white/80 hover:text-white transition-colors"
             >
               {pipExpanded ? (
                 <Minimize2 className="w-3 h-3" />
@@ -805,7 +886,7 @@ const VideoCallScreen = () => {
               }}
               disabled={isFlipping || isVideoOff}
               className={cn(
-                "absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/50 backdrop-blur-sm",
+                "absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/50",
                 "flex items-center justify-center text-white/80 hover:text-white transition-all",
                 (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed",
               )}
@@ -829,16 +910,12 @@ const VideoCallScreen = () => {
         </div>
       </div>
 
-      {/* FULL SCREEN VIEW - Always rendered, visibility controlled by CSS */}
-      <motion.div
-        initial={false}
-        animate={{
-          opacity: isMinimized ? 0 : 1,
-        }}
-        transition={{ duration: 0.25, ease: "easeOut" }}
+      {/* FULL SCREEN VIEW - CSS transitions instead of Framer Motion */}
+      <div
         style={{
-          visibility: isMinimized ? "hidden" : "visible",
+          opacity: isMinimized ? 0 : 1,
           pointerEvents: isMinimized ? "none" : "auto",
+          transition: "opacity 0.25s ease-out",
         }}
         className="fixed inset-0 z-50 bg-background"
         onClick={() => setShowControls((p) => !p)}
@@ -861,13 +938,14 @@ const VideoCallScreen = () => {
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40 pointer-events-none" />
         </div>
 
-        {/* Connecting State */}
-        <motion.div
-          initial={false}
-          animate={{ opacity: isConnecting ? 1 : 0 }}
-          transition={{ duration: 0.2 }}
+        {/* Connecting State - CSS transitions instead of Framer Motion */}
+        <div
+          style={{
+            opacity: isConnecting ? 1 : 0,
+            transition: "opacity 0.2s ease-out",
+            pointerEvents: isConnecting ? "auto" : "none",
+          }}
           className="absolute inset-0 flex flex-col items-center justify-center z-10"
-          style={{ pointerEvents: isConnecting ? "auto" : "none" }}
         >
           {isConnecting && (
             <div className="flex flex-col items-center gap-6">
@@ -912,41 +990,43 @@ const VideoCallScreen = () => {
               )}
             </div>
           )}
-        </motion.div>
+        </div>
 
-        {/* Media Error Banner */}
-        <motion.div
-          initial={false}
-          animate={{ opacity: mediaError ? 1 : 0, y: mediaError ? 0 : -20 }}
-          transition={{ duration: 0.2 }}
+        {/* Media Error Banner - replaced backdrop-blur with solid bg */}
+        <div
+          style={{
+            opacity: mediaError ? 1 : 0,
+            transform: mediaError ? "translateY(0)" : "translateY(-20px)",
+            transition: "opacity 0.2s ease-out, transform 0.2s ease-out",
+            pointerEvents: mediaError ? "auto" : "none",
+          }}
           className="absolute top-4 left-4 right-4 z-30"
-          style={{ pointerEvents: mediaError ? "auto" : "none" }}
         >
           {mediaError && (
-            <div className="flex items-center gap-3 px-4 py-3 bg-destructive/10 border border-destructive/30 rounded-xl backdrop-blur-sm">
+            <div className="flex items-center gap-3 px-4 py-3 bg-destructive/10 border border-destructive/30 rounded-xl">
               <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0" />
               <p className="text-sm text-destructive">{mediaError}</p>
             </div>
           )}
-        </motion.div>
+        </div>
 
-        {/* Top Header */}
-        <motion.div
-          initial={false}
-          animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : -20 }}
-          transition={{ duration: 0.2 }}
+        {/* Top Header - CSS transitions, replaced backdrop-blur with solid bg */}
+        <div
+          style={{
+            opacity: showControls ? 1 : 0,
+            transform: showControls ? "translateY(0)" : "translateY(-20px)",
+            transition: "opacity 0.2s ease-out, transform 0.2s ease-out",
+          }}
           className="absolute top-0 left-0 right-0 z-20 safe-area-top"
         >
           <div className="flex items-center justify-between p-4">
             <div className="flex items-center gap-3">
-              {getConnectionIcon()}
+              <ConnectionIcon connectionStatus={connectionStatus} />
               <div>
                 <h3 className="text-sm font-semibold text-white">
                   {activeCall.otherUserName}
                 </h3>
-                <p className="text-xs text-white/60">
-                  {formatDuration(callDuration)}
-                </p>
+                <CallTimer connectionStatus={connectionStatus} className="text-xs text-white/60" />
               </div>
             </div>
             <button
@@ -954,12 +1034,12 @@ const VideoCallScreen = () => {
                 e.stopPropagation();
                 setIsMinimized(true);
               }}
-              className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center text-white hover:bg-white/20 transition-colors active:scale-90"
+              className="w-10 h-10 rounded-full bg-white/15 flex items-center justify-center text-white hover:bg-white/25 transition-colors active:scale-90"
             >
               <ChevronDown className="w-5 h-5" />
             </button>
           </div>
-        </motion.div>
+        </div>
 
         {/* Local Video PiP */}
         <div
@@ -987,7 +1067,7 @@ const VideoCallScreen = () => {
               </div>
             </div>
           )}
-          {/* Flip Camera Button on Local Video */}
+          {/* Flip Camera Button on Local Video - replaced backdrop-blur */}
           {!isVideoOff && (
             <button
               onClick={(e) => {
@@ -996,7 +1076,7 @@ const VideoCallScreen = () => {
               }}
               disabled={isFlipping}
               className={cn(
-                "absolute bottom-2 right-2 w-8 h-8 rounded-full bg-black/50 backdrop-blur-sm",
+                "absolute bottom-2 right-2 w-8 h-8 rounded-full bg-black/60",
                 "flex items-center justify-center text-white/80 hover:text-white hover:bg-black/70 transition-all",
                 isFlipping && "opacity-50 cursor-not-allowed",
               )}
@@ -1006,11 +1086,13 @@ const VideoCallScreen = () => {
           )}
         </div>
 
-        {/* Bottom Controls */}
-        <motion.div
-          initial={false}
-          animate={{ opacity: showControls ? 1 : 0, y: showControls ? 0 : 40 }}
-          transition={{ duration: 0.2 }}
+        {/* Bottom Controls - CSS transitions, replaced backdrop-blur with solid bg */}
+        <div
+          style={{
+            opacity: showControls ? 1 : 0,
+            transform: showControls ? "translateY(0)" : "translateY(40px)",
+            transition: "opacity 0.2s ease-out, transform 0.2s ease-out",
+          }}
           className="absolute bottom-0 left-0 right-0 z-20 safe-area-bottom"
           onClick={(e) => e.stopPropagation()}
         >
@@ -1023,7 +1105,7 @@ const VideoCallScreen = () => {
                   "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
                   isMuted
                     ? "bg-destructive/20 text-destructive"
-                    : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                    : "bg-white/15 text-white hover:bg-white/25",
                 )}
               >
                 {isMuted ? (
@@ -1039,7 +1121,7 @@ const VideoCallScreen = () => {
                 disabled={isFlipping || isVideoOff}
                 className={cn(
                   "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
-                  "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                  "bg-white/15 text-white hover:bg-white/25",
                   (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed",
                 )}
               >
@@ -1061,7 +1143,7 @@ const VideoCallScreen = () => {
                   "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
                   isVideoOff
                     ? "bg-destructive/20 text-destructive"
-                    : "bg-white/10 backdrop-blur-md text-white hover:bg-white/20",
+                    : "bg-white/15 text-white hover:bg-white/25",
                 )}
               >
                 {isVideoOff ? (
@@ -1072,8 +1154,8 @@ const VideoCallScreen = () => {
               </button>
             </div>
           </div>
-        </motion.div>
-      </motion.div>
+        </div>
+      </div>
     </>
   );
 };

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import CallTimer from "@/components/CallTimer";
 import {
   IoCall,
   IoMicOff,
@@ -24,14 +25,17 @@ const DEFAULT_ICE_SERVERS = {
   ],
 };
 const AudioCallScreen = () => {
-  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted } =
+  const { activeCall, clearActiveCall, callAccepted, clearCallAccepted, isCallMinimized, setCallMinimized } =
     useAppStore();
   const { socket } = useSocket();
+
+  // Alias store state for cleaner usage
+  const isMinimized = isCallMinimized;
+  const setIsMinimized = setCallMinimized;
+
   // UI states
-  const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
-  const [isMinimized, setIsMinimized] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState("initializing");
   // Call State
   const [callStatus, setCallStatus] = useState(
@@ -329,17 +333,7 @@ const AudioCallScreen = () => {
       }
     }
   };
-  useEffect(() => {
-    let t;
-    if (connectionStatus === "connected" || connectionStatus === "completed") {
-      t = setInterval(() => setCallDuration((p) => p + 1), 1000);
-    }
-    return () => clearInterval(t);
-  }, [connectionStatus]);
-  const formatDuration = (s) =>
-    `${Math.floor(s / 60)
-      .toString()
-      .padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
+
   const userInitial = activeCall.otherUserName?.charAt(0).toUpperCase() || "U";
   const getConnectionIcon = () => {
     switch (connectionStatus) {
@@ -410,9 +404,7 @@ const AudioCallScreen = () => {
               </span>
               <div className="flex items-center gap-1.5">
                 {getConnectionIcon()}
-                <span className="text-primary text-xs font-medium">
-                  {formatDuration(callDuration)}
-                </span>
+                <CallTimer connectionStatus={connectionStatus} className="text-primary text-xs font-medium" />
               </div>
             </div>
             <button
@@ -517,14 +509,7 @@ const AudioCallScreen = () => {
               >
                 {activeCall.otherUserName}
               </motion.h2>
-              <motion.p
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.25 }}
-                className="text-primary text-lg font-medium"
-              >
-                {formatDuration(callDuration)}
-              </motion.p>
+                <CallTimer connectionStatus={connectionStatus} className="text-primary text-lg font-medium" />
             </div>
             {/* Control Bar */}
             <motion.div

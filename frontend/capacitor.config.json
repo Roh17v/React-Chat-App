@@ -1,5 +1,13 @@
 {
   "appId": "com.rohit.syncronus",
-  "appName": " SyncronusChatApp",
-  "webDir": "dist"
+  "appName": "SyncronusChatApp",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "backgroundColor": "#000000",
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
 }

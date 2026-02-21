@@ -1,6 +1,8 @@
-import AudioCallScreen from "@/components/AudioCallScreen";
-import VideoCallScreen from "@/components/VideoCallScreen";
+import { Suspense, lazy } from "react";
 import useAppStore from "@/store";
+
+const AudioCallScreen = lazy(() => import("@/components/AudioCallScreen"));
+const VideoCallScreen = lazy(() => import("@/components/VideoCallScreen"));
 
 const CallContainer = () => {
   const { activeCall } = useAppStore();
@@ -8,11 +10,19 @@ const CallContainer = () => {
   if (!activeCall) return null;
 
   if (activeCall.callType === "video") {
-    return <VideoCallScreen />;
+    return (
+      <Suspense fallback={null}>
+        <VideoCallScreen />
+      </Suspense>
+    );
   }
 
   if (activeCall.callType === "audio") {
-    return <AudioCallScreen />;
+    return (
+      <Suspense fallback={null}>
+        <AudioCallScreen />
+      </Suspense>
+    );
   }
 
   return null;
