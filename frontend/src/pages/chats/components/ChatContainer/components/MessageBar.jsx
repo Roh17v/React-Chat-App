@@ -31,13 +31,14 @@ const MessageBar = () => {
   const fileInputRef = useRef();
 
   const handleSendMessage = async () => {
-    if (message.trim() === "") return;
+    const sanitizedMessage = message.trim();
+    if (sanitizedMessage === "") return;
 
     if (selectedChatType === "contact") {
       const replyTo = buildReplyPayload(replyToMessage);
       const newMessage = {
         sender: user.id,
-        content: message,
+        content: sanitizedMessage,
         receiver: selectedChatData._id,
         messageType: "text",
         fileUrl: undefined,
@@ -47,7 +48,7 @@ const MessageBar = () => {
     } else if (selectedChatType === "channel") {
       socket.emit("send-channel-message", {
         sender: user.id,
-        content: message,
+        content: sanitizedMessage,
         messageType: "text",
         fileUrl: undefined,
         channelId: selectedChatData._id,
