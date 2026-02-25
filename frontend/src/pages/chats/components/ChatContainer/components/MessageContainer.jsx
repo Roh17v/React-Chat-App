@@ -14,11 +14,39 @@ import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
-import { ChevronDown, Trash2, Ban } from "lucide-react";
+import { ChevronDown, Trash2, Ban, Copy } from "lucide-react";
 import { RiReplyLine } from "react-icons/ri";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
 import { analyzeEmoji } from "@/utils/emojiUtils";
+import { Capacitor } from "@capacitor/core";
+import { toast } from "sonner";
+
+const URL_REGEX = /\b((?:https?:\/\/|www\.)[^\s<]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<]*)?)/gi;
+
+const trimTrailingPunctuation = (value) => {
+  let url = value;
+  let trailing = "";
+  while (url && /[.,!?;:]/.test(url[url.length - 1])) {
+    trailing = url[url.length - 1] + trailing;
+    url = url.slice(0, -1);
+  }
+  return { url, trailing };
+};
+
+const toSafeHref = (rawUrl) => {
+  const withProtocol =
+    rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
+      ? rawUrl
+      : `https://${rawUrl}`;
+  try {
+    const parsed = new URL(withProtocol);
+    if (!["http:", "https:"].includes(parsed.protocol)) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+};
 
 const MessageContainer = () => {
   const scrollRef = useRef(null);
@@ -384,6 +412,60 @@ const MessageContainer = () => {
     closeActionMenu();
   };
 
+  const getCopyableMessageText = useCallback((message) => {
+    if (!message || message.messageType !== "text") return "";
+    return typeof message.content === "string" ? message.content : "";
+  }, []);
+
+  const copyTextToClipboard = useCallback(async (text) => {
+    if (!text) return false;
+
+    try {
+      const nativeClipboard = window?.Capacitor?.Plugins?.Clipboard;
+      if (Capacitor.isNativePlatform() && nativeClipboard?.write) {
+        await nativeClipboard.write({ string: text });
+        return true;
+      }
+
+      if (navigator?.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.top = "-9999px";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      return copied;
+    } catch (error) {
+      console.error("Failed to copy message:", error);
+      return false;
+    }
+  }, []);
+
+  const handleCopyFromMenu = useCallback(async () => {
+    const copyText = getCopyableMessageText(messageActionMenu?.message);
+    if (!copyText.trim()) {
+      closeActionMenu();
+      return;
+    }
+
+    const copied = await copyTextToClipboard(copyText);
+    if (copied) {
+      toast.success("Message copied");
+    } else {
+      toast.error("Unable to copy message");
+    }
+    closeActionMenu();
+  }, [copyTextToClipboard, getCopyableMessageText, messageActionMenu?.message]);
+
   const openActionMenu = (message, isSent, anchorEl) => {
     const isDesktop = window.innerWidth >= 640; // sm breakpoint
     if (isDesktop && anchorEl) {
@@ -451,6 +533,90 @@ const MessageContainer = () => {
       </div>
     </div>
   );
+
+  const openExternalLink = useCallback(async (href) => {
+    if (!href) return;
+
+    // Prefer Capacitor Browser plugin when available on native platforms.
+    if (Capacitor.isNativePlatform()) {
+      const browserPlugin = window?.Capacitor?.Plugins?.Browser;
+      if (browserPlugin?.open) {
+        try {
+          await browserPlugin.open({ url: href });
+          return;
+        } catch (error) {
+          console.warn("Browser plugin open failed, using fallback:", error);
+        }
+      }
+
+      window.open(href, "_blank", "noopener,noreferrer");
+      return;
+    }
+  }, []);
+
+  const handleLinkClick = useCallback(
+    async (event, href) => {
+      if (!Capacitor.isNativePlatform()) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      await openExternalLink(href);
+    },
+    [openExternalLink]
+  );
+
+  const renderTextWithLinks = (text, isSent) => {
+    if (!text) return null;
+
+    const nodes = [];
+    let lastIndex = 0;
+    URL_REGEX.lastIndex = 0;
+    let match;
+    let key = 0;
+
+    while ((match = URL_REGEX.exec(text)) !== null) {
+      const matchedText = match[0];
+      const start = match.index;
+      const end = start + matchedText.length;
+      const { url, trailing } = trimTrailingPunctuation(matchedText);
+      const href = toSafeHref(url);
+
+      if (start > lastIndex) {
+        nodes.push(text.slice(lastIndex, start));
+      }
+
+      if (href) {
+        nodes.push(
+          <React.Fragment key={`link-${key++}`}>
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => handleLinkClick(event, href)}
+              className={cn(
+                "underline underline-offset-2 break-all transition-colors",
+                "text-[#53BDEB] hover:text-[#7FD3F3]"
+              )}
+            >
+              {url}
+            </a>
+            {trailing}
+          </React.Fragment>
+        );
+      } else {
+        nodes.push(matchedText);
+      }
+
+      lastIndex = end;
+    }
+
+    if (lastIndex < text.length) {
+      nodes.push(text.slice(lastIndex));
+    }
+
+    return nodes;
+  };
 
   const renderDMMessages = (message, index) => {
     const isSent = message.sender === user.id;
@@ -592,7 +758,7 @@ const MessageContainer = () => {
                 "leading-relaxed break-words whitespace-pre-wrap",
                 emoji?.isEmojiOnly ? emoji.sizeClass : "text-sm"
               )}>
-                {message.content}
+                {renderTextWithLinks(message.content, isSent)}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
                 <span className={cn(
@@ -742,7 +908,7 @@ const MessageContainer = () => {
                 "leading-relaxed break-words whitespace-pre-wrap",
                 emoji?.isEmojiOnly ? emoji.sizeClass : "text-sm"
               )}>
-                {message.content}
+                {renderTextWithLinks(message.content, isSent)}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1 -mb-1">
                 <span className={cn(
@@ -984,6 +1150,10 @@ const MessageContainer = () => {
     };
   }, []);
 
+  const canCopySelectedMessage = Boolean(
+    getCopyableMessageText(messageActionMenu?.message).trim()
+  );
+
   return (
     <div
       ref={containerRef}
@@ -1093,6 +1263,15 @@ const MessageContainer = () => {
                 <RiReplyLine className="w-4 h-4 text-foreground-muted" />
                 Reply
               </button>
+              {canCopySelectedMessage && (
+                <button
+                  onClick={handleCopyFromMenu}
+                  className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-foreground hover:bg-accent transition-colors"
+                >
+                  <Copy className="w-4 h-4 text-foreground-muted" />
+                  Copy
+                </button>
+              )}
               <button
                 onClick={() => handleDeleteForMe(messageActionMenu.message._id)}
                 className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-foreground hover:bg-accent transition-colors"
@@ -1129,6 +1308,15 @@ const MessageContainer = () => {
                     <RiReplyLine className="w-5 h-5 text-foreground-muted" />
                     Reply
                   </button>
+                  {canCopySelectedMessage && (
+                    <button
+                      onClick={handleCopyFromMenu}
+                      className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                    >
+                      <Copy className="w-5 h-5 text-foreground-muted" />
+                      Copy
+                    </button>
+                  )}
                   <button
                     onClick={() => handleDeleteForMe(messageActionMenu.message._id)}
                     className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-foreground hover:bg-accent transition-colors"
