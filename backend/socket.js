@@ -432,17 +432,42 @@ const setupSocket = (server) => {
 
     // 2. Accept Call
     socket.on("call:accept", async ({ callId, callerId }) => {
-      const query = buildCallQuery(callId);
-      const call = query
-        ? await Call.findOneAndUpdate(
-            query,
-            { connectedAt: new Date() },
-            { new: true },
-          )
-        : null;
-      const targetCallerId = callerId || call?.callerId?.toString();
-      if (targetCallerId) {
-        emitToUser(targetCallerId, "call-accepted", { callId });
+      try {
+        const query = buildCallQuery(callId);
+        const call = query ? await Call.findOne(query) : null;
+
+        // Keep a single shared connected timestamp for all participants.
+        if (call && !call.connectedAt) {
+          call.connectedAt = new Date();
+          await call.save();
+        }
+
+        const connectedAtMs = call?.connectedAt
+          ? new Date(call.connectedAt).getTime()
+          : Date.now();
+        const resolvedCallId = call?._id?.toString() || callId;
+        const targetCallerId = callerId || call?.callerId?.toString();
+        const receiverId = call?.receiverId?.toString() || userId;
+
+        if (targetCallerId) {
+          emitToUser(targetCallerId, "call-accepted", {
+            callId: resolvedCallId,
+            connectedAt: connectedAtMs,
+          });
+          emitToUser(targetCallerId, "call-connected", {
+            callId: resolvedCallId,
+            connectedAt: connectedAtMs,
+          });
+        }
+
+        if (receiverId) {
+          emitToUser(receiverId, "call-connected", {
+            callId: resolvedCallId,
+            connectedAt: connectedAtMs,
+          });
+        }
+      } catch (error) {
+        console.error("Call accept error:", error);
       }
     });
 
