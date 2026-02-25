@@ -445,6 +445,7 @@ const setupSocket = (server) => {
         const connectedAtMs = call?.connectedAt
           ? new Date(call.connectedAt).getTime()
           : Date.now();
+        const serverNowMs = Date.now();
         const resolvedCallId = call?._id?.toString() || callId;
         const targetCallerId = callerId || call?.callerId?.toString();
         const receiverId = call?.receiverId?.toString() || userId;
@@ -453,10 +454,12 @@ const setupSocket = (server) => {
           emitToUser(targetCallerId, "call-accepted", {
             callId: resolvedCallId,
             connectedAt: connectedAtMs,
+            serverNow: serverNowMs,
           });
           emitToUser(targetCallerId, "call-connected", {
             callId: resolvedCallId,
             connectedAt: connectedAtMs,
+            serverNow: serverNowMs,
           });
         }
 
@@ -464,6 +467,7 @@ const setupSocket = (server) => {
           emitToUser(receiverId, "call-connected", {
             callId: resolvedCallId,
             connectedAt: connectedAtMs,
+            serverNow: serverNowMs,
           });
         }
       } catch (error) {
