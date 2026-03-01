@@ -495,11 +495,14 @@ const setupSocket = (server) => {
     socket.on("call:end", async ({ to, callId }) => {
       // Notify the other user immediately on both event names:
       //   "call:end"    → IncomingCallOverlay (web) + NativeCallHandler (native signaling)
-      //   "call-ended"  → SocketContext, which calls clearIncomingCall + clearActiveCall
-      // This guarantees cleanup regardless of which screen the recipient is on.
+      // NOTE: We deliberately do NOT emit "call-ended" here. Emitting call-ended causes
+      // SocketContext to call clearActiveCall() on the recipient, which unmounts VideoCallScreen
+      // mid-call and stops the local camera tracks. The call:end event is sufficient:
+      //   - IncomingCallOverlay listens to call:end directly
+      //   - NativeCallHandler listens to call:end directly
+      //   - SocketContext's call:end handler now always clears incomingCall
       if (to) {
         emitToUser(to, "call:end", { from: userId });
-        emitToUser(to, "call-ended", { from: userId });
       }
 
       // Clean up Database
