@@ -493,9 +493,13 @@ const setupSocket = (server) => {
 
     // End Call (Hangup)
     socket.on("call:end", async ({ to, callId }) => {
-      // Notify the other user immediately to stop their streams
+      // Notify the other user immediately on both event names:
+      //   "call:end"    → IncomingCallOverlay (web) + NativeCallHandler (native signaling)
+      //   "call-ended"  → SocketContext, which calls clearIncomingCall + clearActiveCall
+      // This guarantees cleanup regardless of which screen the recipient is on.
       if (to) {
         emitToUser(to, "call:end", { from: userId });
+        emitToUser(to, "call-ended", { from: userId });
       }
 
       // Clean up Database
@@ -510,7 +514,6 @@ const setupSocket = (server) => {
             ? Math.floor((call.endedAt - call.connectedAt) / 1000)
             : 0;
 
-          // Log as a chat message
           await Message.create({
             sender: call.callerId,
             receiver: call.receiverId,
@@ -524,15 +527,6 @@ const setupSocket = (server) => {
           });
         }
       }
-    });
-
-    // Offer (Handling "Polite" vs "Impolite")
-    // Note: We use 'description' now instead of just 'offer' to be generic
-    socket.on("call:offer", ({ to, description }) => {
-      emitToUser(to, "call:offer", {
-        description,
-        from: userId,
-      });
     });
 
     // Answer
