@@ -529,6 +529,15 @@ const setupSocket = (server) => {
       }
     });
 
+    // Offer (Handling "Polite" vs "Impolite")
+    // Note: We use 'description' now instead of just 'offer' to be generic
+    socket.on("call:offer", ({ to, description }) => {
+      emitToUser(to, "call:offer", {
+        description,
+        from: userId,
+      });
+    });
+
     // Answer
     socket.on("call:answer", ({ to, description }) => {
       emitToUser(to, "call:answer", {
