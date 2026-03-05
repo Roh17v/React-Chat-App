@@ -401,6 +401,16 @@ const VideoCallScreen = () => {
       updateVisibleRemoteVideo(remoteStreamRef.current);
     };
 
+    const flushCandidates = () => {
+      if (candidateBuffer.current.length > 0) {
+        socket.emit("call:ice-candidates", {
+          to: activeCall.otherUserId || activeCall.callerId,
+          candidates: [...candidateBuffer.current],
+        });
+        candidateBuffer.current = [];
+      }
+    };
+
     // Batched ICE candidates instead of sending one at a time
     pc.current.onicecandidate = ({ candidate }) => {
       if (candidate) {
@@ -430,7 +440,7 @@ const VideoCallScreen = () => {
           }
         }, 2000);
       } else if (state === "failed") {
-        pc.current?.restartIce();
+        endCall();
       }
     };
 
@@ -849,7 +859,11 @@ const VideoCallScreen = () => {
           <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
             <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/60">
               <ConnectionIcon connectionStatus={connectionStatus} />
-              <CallTimer connectionStatus={connectionStatus} className="text-[10px] font-medium text-white" />
+              <CallTimer
+                connectionStatus={connectionStatus}
+                startTimestamp={activeCall?.callStartedAt}
+                className="text-[10px] font-medium text-white"
+              />
             </div>
             <button
               onClick={(e) => {
@@ -1026,7 +1040,11 @@ const VideoCallScreen = () => {
                 <h3 className="text-sm font-semibold text-white">
                   {activeCall.otherUserName}
                 </h3>
-                <CallTimer connectionStatus={connectionStatus} className="text-xs text-white/60" />
+                <CallTimer
+                  connectionStatus={connectionStatus}
+                  startTimestamp={activeCall?.callStartedAt}
+                  className="text-xs text-white/60"
+                />
               </div>
             </div>
             <button

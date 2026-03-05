@@ -11,9 +11,9 @@ import CallContainer from "./pages/call";
 createRoot(document.getElementById("root")).render(
   <SocketProvider>
     <BrowserRouter>
+      <CallContainer />
       <App />
       <IncomingCallOverlay />
-      <CallContainer />
       <Toaster closeButton />
     </BrowserRouter>
   </SocketProvider>,

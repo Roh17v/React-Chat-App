@@ -188,7 +188,7 @@ const AudioCallScreen = () => {
           }
         }, 2000);
       } else if (state === "failed") {
-        pc.current.restartIce();
+        endCall();
       }
     };
     pc.current.onnegotiationneeded = async () => {
@@ -262,7 +262,7 @@ const AudioCallScreen = () => {
       if (pc.current?.remoteDescription) {
         try {
           await pc.current.addIceCandidate(candidate);
-        } catch (e) {}
+        } catch (e) { }
       } else {
         pendingCandidates.current.push(candidate);
       }
@@ -404,7 +404,11 @@ const AudioCallScreen = () => {
               </span>
               <div className="flex items-center gap-1.5">
                 {getConnectionIcon()}
-                <CallTimer connectionStatus={connectionStatus} className="text-primary text-xs font-medium" />
+                <CallTimer
+                  connectionStatus={connectionStatus}
+                  startTimestamp={activeCall?.callStartedAt}
+                  className="text-primary text-xs font-medium"
+                />
               </div>
             </div>
             <button
@@ -509,7 +513,11 @@ const AudioCallScreen = () => {
               >
                 {activeCall.otherUserName}
               </motion.h2>
-                <CallTimer connectionStatus={connectionStatus} className="text-primary text-lg font-medium" />
+              <CallTimer
+                connectionStatus={connectionStatus}
+                startTimestamp={activeCall?.callStartedAt}
+                className="text-primary text-lg font-medium"
+              />
             </div>
             {/* Control Bar */}
             <motion.div
@@ -522,11 +530,10 @@ const AudioCallScreen = () => {
                 {/* Mute */}
                 <button
                   onClick={toggleMute}
-                  className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 ${
-                    isMuted
+                  className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 ${isMuted
                       ? "bg-destructive/20 text-destructive"
                       : "bg-accent hover:bg-accent/80 text-foreground"
-                  }`}
+                    }`}
                 >
                   {isMuted ? (
                     <IoMicOff className="w-6 h-6" />
@@ -544,11 +551,10 @@ const AudioCallScreen = () => {
                 {/* Speaker */}
                 <button
                   onClick={() => setIsSpeakerOn(!isSpeakerOn)}
-                  className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 ${
-                    !isSpeakerOn
+                  className={`w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 ${!isSpeakerOn
                       ? "bg-foreground text-background"
                       : "bg-accent hover:bg-accent/80 text-foreground"
-                  }`}
+                    }`}
                 >
                   {isSpeakerOn ? (
                     <IoVolumeHigh className="w-6 h-6" />

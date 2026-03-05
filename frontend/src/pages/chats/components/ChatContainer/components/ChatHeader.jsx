@@ -4,11 +4,29 @@ import React from "react";
 import { RiCloseFill } from "react-icons/ri";
 import { useSocket } from "@/context/SocketContext";
 import { IoCall, IoVideocam, IoCloseSharp } from "react-icons/io5";
+import { Capacitor } from "@capacitor/core";
+import NativeCallPlugin from "@/plugins/NativeCallPlugin";
+import CallTimer from "@/components/CallTimer";
 
 const ChatHeader = () => {
-  const { closeChat, selectedChatData, selectedChatType, setActiveCall, showAvatarPreview, setShowAvatarPreview } =
-    useAppStore();
+  const {
+    closeChat,
+    selectedChatData,
+    selectedChatType,
+    setActiveCall,
+    showAvatarPreview,
+    setShowAvatarPreview,
+    activeCall,
+    isCallMinimized,
+    setCallMinimized,
+  } = useAppStore();
   const { socket, onlineUsers } = useSocket();
+  const isNative = Capacitor.isNativePlatform();
+  const showNativeCallBanner =
+    isNative &&
+    Boolean(activeCall) &&
+    activeCall?.callType === "video" &&
+    Boolean(isCallMinimized);
 
   const initiateCall = (callType) => {
     if (!selectedChatData?._id) return;
@@ -25,6 +43,17 @@ const ChatHeader = () => {
       otherUserName: `${selectedChatData.firstName} ${selectedChatData.lastName}`,
       otherUserImage: selectedChatData.image,
     });
+    setCallMinimized(false);
+  };
+
+  const reopenNativeCall = async () => {
+    if (!showNativeCallBanner) return;
+    try {
+      await NativeCallPlugin.reopenCallActivity();
+      setCallMinimized(false);
+    } catch (error) {
+      console.error("Failed to reopen native call activity:", error);
+    }
   };
 
   const getAvatarImage = () => {
@@ -100,6 +129,22 @@ const ChatHeader = () => {
 
   return (
     <>
+      {showNativeCallBanner && (
+        <button
+          onClick={reopenNativeCall}
+          className="w-full h-9 px-4 bg-[#128C7E] hover:bg-[#0E7A6E] text-white flex items-center justify-between transition-colors"
+        >
+          <span className="text-sm font-medium truncate pr-2">
+            {activeCall?.otherUserName || "Ongoing video call"}
+          </span>
+          <CallTimer
+            connectionStatus={activeCall?.callStartedAt ? "connected" : "checking"}
+            startTimestamp={activeCall?.callStartedAt}
+            className="text-xs font-semibold tabular-nums"
+          />
+        </button>
+      )}
+
       {/* Header */}
       <div className="h-16 sm:h-[72px] border-b border-border bg-background-secondary/95 backdrop-blur-sm flex items-center justify-between px-3 sm:px-4 md:px-6 safe-area-top">
         <div className="flex items-center gap-3">

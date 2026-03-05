@@ -114,8 +114,40 @@ export const SocketProvider = ({ children }) => {
         setIncomingCall(data);
       });
 
-      socket.current.on("call-accepted", () => {
+      const applyCallConnectedAt = ({ connectedAt, serverNow } = {}) => {
+        const parsedConnectedAt = Number(connectedAt);
+        if (!Number.isFinite(parsedConnectedAt) || parsedConnectedAt <= 0) {
+          return;
+        }
+
+        const parsedServerNow = Number(serverNow);
+        const hasServerNow =
+          Number.isFinite(parsedServerNow) && parsedServerNow > 0;
+        const estimatedLocalMinusServerOffset = hasServerNow
+          ? Date.now() - parsedServerNow
+          : 0;
+        const localSynchronizedStart =
+          parsedConnectedAt + estimatedLocalMinusServerOffset;
+        const normalizedStart = Math.floor(localSynchronizedStart / 1000) * 1000;
+
+        const state = useAppStore.getState();
+        const currentActiveCall = state.activeCall;
+        if (!currentActiveCall) return;
+        if (currentActiveCall.callStartedAt === normalizedStart) return;
+
+        state.setActiveCall({
+          ...currentActiveCall,
+          callStartedAt: normalizedStart,
+        });
+      };
+
+      socket.current.on("call-accepted", (payload = {}) => {
+        applyCallConnectedAt(payload);
         setCallAccepted(true);
+      });
+
+      socket.current.on("call-connected", (payload = {}) => {
+        applyCallConnectedAt(payload);
       });
 
       socket.current.on("call-rejected", () => {
@@ -124,11 +156,21 @@ export const SocketProvider = ({ children }) => {
         clearCallAccepted();
       });
 
-      socket.current.on("call-ended", () => {
-        stopMedia();
+      // When the caller cancels/ends the call (during ringing or active call),
+      // the server emits "call:end" to the other party.
+      socket.current.on("call:end", () => {
+        const state = useAppStore.getState();
+        const { activeCall, callAccepted } = state;
+
+        // 1. Always clear the incoming ringing overlay.
         clearIncomingCall();
-        clearActiveCall();
-        clearCallAccepted();
+
+        // 2. If we are the CALLEE and we haven't accepted the call yet (it was just ringing natively/web),
+        // we MUST clear our activeCall so the native CallActivity or web VideoCallScreen closes.
+        // We do NOT clearActiveCall for the caller here, since their own endCall logic handles it.
+        if (activeCall && !activeCall.isCaller && !callAccepted) {
+          clearActiveCall();
+        }
       });
 
       socket.current.on("typing", (payload) => {
@@ -184,8 +226,10 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("onlineUsers");
           socket.current.off("incoming-call");
           socket.current.off("call-accepted");
+          socket.current.off("call-connected");
           socket.current.off("call-rejected");
           socket.current.off("call-ended");
+          socket.current.off("call:end");
           socket.current.off("typing");
           socket.current.off("stop-typing");
           socket.current.off("user-last-seen");
@@ -209,6 +253,7 @@ export const SocketProvider = ({ children }) => {
     stopMedia,
     updateContactLastSeen,
   ]);
+
   useEffect(() => {
     if (!socket.current) return;
 

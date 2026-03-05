@@ -10,6 +10,9 @@ import ContactList from "@/components/ContactList.jsx";
 import ProfileInfo from "./components/ProfileInfo";
 import NewDm from "./components/NewDm/NewDm";
 import CreateChannel from "./components/CreateChannel";
+import { Capacitor } from "@capacitor/core";
+import NativeCallPlugin from "@/plugins/NativeCallPlugin";
+import CallTimer from "@/components/CallTimer";
 
 const ContactContainer = () => {
   const {
@@ -17,7 +20,28 @@ const ContactContainer = () => {
     setDirectMessagesContacts,
     channels,
     setChannels,
+    activeCall,
+    isCallMinimized,
+    setCallMinimized,
+    selectedChatType,
   } = useAppStore();
+  const isNative = Capacitor.isNativePlatform();
+  const showNativeCallBanner =
+    isNative &&
+    selectedChatType === undefined &&
+    Boolean(activeCall) &&
+    activeCall?.callType === "video" &&
+    Boolean(isCallMinimized);
+
+  const reopenNativeCall = async () => {
+    if (!showNativeCallBanner) return;
+    try {
+      await NativeCallPlugin.reopenCallActivity();
+      setCallMinimized(false);
+    } catch (error) {
+      console.error("Failed to reopen native call activity:", error);
+    }
+  };
 
   useEffect(() => {
     const fetchDMContacts = async () => {
@@ -56,6 +80,22 @@ const ContactContainer = () => {
           Messages
         </h1>
       </div>
+
+      {showNativeCallBanner && (
+        <button
+          onClick={reopenNativeCall}
+          className="w-full h-8 px-4 bg-[#128C7E] hover:bg-[#0E7A6E] text-white flex items-center justify-between transition-colors"
+        >
+          <span className="text-xs font-medium truncate pr-2">
+            {activeCall?.otherUserName || "Ongoing video call"}
+          </span>
+          <CallTimer
+            connectionStatus={activeCall?.callStartedAt ? "connected" : "checking"}
+            startTimestamp={activeCall?.callStartedAt}
+            className="text-[11px] font-semibold tabular-nums"
+          />
+        </button>
+      )}
 
       {/* Scrollable Content */}
       <div className="flex-1 overflow-y-auto scrollbar-thin">

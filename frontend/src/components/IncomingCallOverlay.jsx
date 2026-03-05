@@ -22,7 +22,10 @@ const IncomingCallOverlay = () => {
   const callerName = incomingCall.callerName || "Unknown User";
   const callerInitial = callerName.charAt(0).toUpperCase();
   const handleDecline = () => {
-    socket.emit("call:reject", { callId: incomingCall.callId });
+    socket.emit("call:reject", {
+      callId: incomingCall.callId,
+      callerId: incomingCall.callerId, // included so server can reliably notify the caller
+    });
     clearIncomingCall();
   };
   const handleAccept = () => {
@@ -43,9 +46,8 @@ const IncomingCallOverlay = () => {
       {/* Animated background glow */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div
-          className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full transition-all duration-1000 ${
-            isRinging ? "bg-primary/20 scale-100" : "bg-primary/10 scale-110"
-          } blur-3xl`}
+          className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full transition-all duration-1000 ${isRinging ? "bg-primary/20 scale-100" : "bg-primary/10 scale-110"
+            } blur-3xl`}
         />
       </div>
       {/* Content Card */}
