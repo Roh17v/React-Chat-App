@@ -20,7 +20,7 @@ const MessageBar = () => {
     selectedChatType,
     selectedChatData,
     user,
-    addMessage,
+    addOptimisticMessage,
     setFileUploadingProgress,
     setIsUploading,
     replyToMessage,
@@ -34,17 +34,41 @@ const MessageBar = () => {
     const sanitizedMessage = message.trim();
     if (sanitizedMessage === "") return;
 
+    // Generate a unique temp ID for this optimistic message.
+    const tempId = `temp_${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+
     if (selectedChatType === "contact") {
       const replyTo = buildReplyPayload(replyToMessage);
-      const newMessage = {
+
+      // Instantly add placeholder to the UI with status 'sending'.
+      addOptimisticMessage({
+        _id: tempId,
+        sender: user.id,
+        receiver: selectedChatData._id,
+        content: sanitizedMessage,
+        messageType: "text",
+        fileUrl: null,
+        replyTo: replyTo || null,
+        status: "sending",
+        createdAt: now,
+        isOptimistic: true,
+      });
+
+      // Clear the input immediately
+      setMessage("");
+      clearReplyToMessage();
+
+      // Send to server in background with the temp ID attached.
+      socket.emit("sendMessage", {
         sender: user.id,
         content: sanitizedMessage,
         receiver: selectedChatData._id,
         messageType: "text",
         fileUrl: undefined,
         replyTo: replyTo || undefined,
-      };
-      socket.emit("sendMessage", newMessage);
+        clientTempId: tempId,
+      });
     } else if (selectedChatType === "channel") {
       socket.emit("send-channel-message", {
         sender: user.id,
@@ -53,7 +77,10 @@ const MessageBar = () => {
         fileUrl: undefined,
         channelId: selectedChatData._id,
       });
+      setMessage("");
+      clearReplyToMessage();
     }
+
     if (isTypingRef.current) {
       socket.emit("stop-typing", {
         chatType: selectedChatType,
@@ -63,8 +90,6 @@ const MessageBar = () => {
       });
       isTypingRef.current = false;
     }
-    setMessage("");
-    clearReplyToMessage();
   };
 
   const handleAddEmoji = (emoji) => {

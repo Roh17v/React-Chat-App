@@ -80,7 +80,6 @@ export const createChatSlice = (set, get) => ({
       messageActionMenu: null,
     }),
   addMessage: (message) => {
-    console.log("Inside add message");
     const { selectedChatMessages, selectedChatType } = get();
     set({
       selectedChatMessages: [
@@ -90,14 +89,52 @@ export const createChatSlice = (set, get) => ({
           receiver:
             selectedChatType === "channel"
               ? message.receiver
-              : message.receiver._id,
+              : message.receiver?._id ?? message.receiver,
           sender:
             selectedChatType === "channel"
               ? message.sender
-              : message.sender._id,
+              : message.sender?._id ?? message.sender,
         },
       ],
     });
+  },
+
+  // Instantly inject a client-generated placeholder before the server responds.
+  addOptimisticMessage: (message) => {
+    const { selectedChatMessages } = get();
+    set({ selectedChatMessages: [...selectedChatMessages, message] });
+  },
+
+  // Swap the optimistic placeholder with the real server-confirmed message.
+  confirmMessage: (tempId, realMessage) => {
+    const { selectedChatMessages, selectedChatType } = get();
+    set({
+      selectedChatMessages: selectedChatMessages.map((msg) =>
+        msg._id === tempId
+          ? {
+              ...realMessage,
+              receiver:
+                selectedChatType === "channel"
+                  ? realMessage.receiver
+                  : realMessage.receiver?._id ?? realMessage.receiver,
+              sender:
+                selectedChatType === "channel"
+                  ? realMessage.sender
+                  : realMessage.sender?._id ?? realMessage.sender,
+              isOptimistic: false,
+            }
+          : msg,
+      ),
+    });
+  },
+
+  // Mark an optimistic placeholder as failed if the server couldn't save it.
+  failMessage: (tempId) => {
+    set((state) => ({
+      selectedChatMessages: state.selectedChatMessages.map((msg) =>
+        msg._id === tempId ? { ...msg, status: "failed" } : msg,
+      ),
+    }));
   },
   updatedMessageStatus: (receiverId, status) => {
     console.log(receiverId, status);

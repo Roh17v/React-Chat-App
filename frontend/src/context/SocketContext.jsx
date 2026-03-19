@@ -61,6 +61,8 @@ export const SocketProvider = ({ children }) => {
     addMessage,
     addChannel,
     addContact,
+    confirmMessage,
+    failMessage,
     updatedMessageStatus,
     directMessagesContacts,
     setDirectMessagesContacts,
@@ -278,7 +280,12 @@ export const SocketProvider = ({ children }) => {
             senderId: selectedChatId,
           });
         }
-        addMessage(message);
+
+        if (message.clientTempId) {
+          confirmMessage(message.clientTempId, message);
+        } else {
+          addMessage(message);
+        }
       }
 
       if (Array.isArray(directMessagesContacts) && contactId) {
@@ -320,6 +327,12 @@ export const SocketProvider = ({ children }) => {
       }
     };
 
+    const handleMessageSendFailed = ({ clientTempId }) => {
+      if (clientTempId) {
+        failMessage(clientTempId);
+      }
+    };
+
     const handleChannelReceiveMessage = (message) => {
       if (selectedChatData && selectedChatType !== undefined) {
         addMessage(message);
@@ -328,12 +341,13 @@ export const SocketProvider = ({ children }) => {
     };
 
     socket.current.on("receive-channel-message", handleChannelReceiveMessage);
-
     socket.current.on("receiveMessage", handleReceiveMessage);
+    socket.current.on("messageSendFailed", handleMessageSendFailed);
 
     return () => {
       if (socket.current) {
         socket.current.off("receiveMessage", handleReceiveMessage);
+        socket.current.off("messageSendFailed", handleMessageSendFailed);
         socket.current.off(
           "receive-channel-message",
           handleChannelReceiveMessage,

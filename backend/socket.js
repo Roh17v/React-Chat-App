@@ -54,78 +54,122 @@ const setupSocket = (server) => {
   };
 
   const sendMessage = async (message, socket) => {
+    const { clientTempId, ...messageFields } = message;
     try {
-      const createdMessage = await Message.create({
-        ...message,
-        status: "sent",
-      });
+      const receiverSockets = userSocketMap.get(messageFields.receiver) || new Set();
+      const senderSockets = userSocketMap.get(messageFields.sender) || new Set();
 
-      const messageData = await Message.findById(createdMessage._id)
-        .populate("sender", "id email firstName lastName image color lastSeen")
-        .populate("receiver", "id email firstName lastName image color lastSeen");
+      // Determine delivery status instantly
+      const isReceiverOnline = receiverSockets.size > 0;
+      const deliveryStatus = isReceiverOnline ? "delivered" : "sent";
 
-      const receiverSockets = userSocketMap.get(message.receiver) || new Set();
-      const senderSockets = userSocketMap.get(message.sender) || new Set();
+      // Build an in-memory message object with a pre-generated ID
+      const messageId = new mongoose.Types.ObjectId();
+      const now = new Date();
 
-      const receiver = await User.findById(message.receiver);
-      if (!receiver.contacts.includes(message.sender)) {
-        await User.findByIdAndUpdate(message.receiver, {
-          $addToSet: { contacts: message.sender },
-        });
+      // Emit to receiver immediately
+      const instantPayload = {
+        _id: messageId,
+        sender: messageFields.sender,
+        receiver: messageFields.receiver,
+        content: messageFields.content,
+        messageType: messageFields.messageType,
+        fileUrl: messageFields.fileUrl || null,
+        replyTo: messageFields.replyTo || null,
+        status: deliveryStatus,
+        createdAt: now,
+        updatedAt: now,
+      };
 
-        receiverSockets.forEach((socketId) =>
-          io.to(socketId).emit("new-dm-contact", messageData.sender),
-        );
-      }
+      // Emit to receiver immediately
+      receiverSockets.forEach((socketId) =>
+        io.to(socketId).emit("receiveMessage", instantPayload),
+      );
 
-      const sender = await User.findById(message.sender);
-      if (!sender.contacts.includes(message.receiver)) {
-        await User.findByIdAndUpdate(message.sender, {
-          $addToSet: { contacts: message.receiver },
-        });
+      // Emit confirmation to sender with the clientTempId so the frontend
+      // can swap the optimistic placeholder for the real confirmed message.
+      senderSockets.forEach((socketId) =>
+        io.to(socketId).emit("receiveMessage", {
+          ...instantPayload,
+          clientTempId: clientTempId || null,
+        }),
+      );
 
-        senderSockets.forEach((socketId) =>
-          io.to(socketId).emit("new-dm-contact", messageData.receiver),
-        );
-      }
+      // Persist to DB asynchronously (non-blocking)
+      (async () => {
+        // Save to DB 
+        let createdMessage;
+        try {
+          createdMessage = await Message.create({
+            _id: messageId,
+            ...messageFields,
+            status: deliveryStatus,
+            createdAt: now,
+            updatedAt: now,
+          });
+        } catch (createError) {
+          console.error("Error saving message to DB:", createError);
+          // Only emit failed if the message was never saved.
+          senderSockets.forEach((socketId) =>
+            io.to(socketId).emit("messageSendFailed", {
+              clientTempId: clientTempId || null,
+              error: "Message could not be saved. Please retry.",
+            }),
+          );
+          return;
+        }
 
-      if (receiverSockets.size > 0) {
-        messageData.status = "delivered";
-        await messageData.save();
+        // Post-save operations
+        try {
+          const messageData = await Message.findById(createdMessage._id)
+            .populate("sender", "id email firstName lastName image color lastSeen")
+            .populate("receiver", "id email firstName lastName image color lastSeen");
 
-        senderSockets.forEach((socketId) =>
-          io.to(socketId).emit("receiveMessage", messageData),
-        );
+          // Update contacts lists for new DM pairs.
+          const receiver = await User.findById(messageFields.receiver);
+          if (receiver && !receiver.contacts.includes(messageFields.sender)) {
+            await User.findByIdAndUpdate(messageFields.receiver, {
+              $addToSet: { contacts: messageFields.sender },
+            });
+            receiverSockets.forEach((socketId) =>
+              io.to(socketId).emit("new-dm-contact", messageData.sender),
+            );
+          }
 
-        receiverSockets.forEach((socketId) =>
-          io.to(socketId).emit("receiveMessage", messageData),
-        );
-      } else {
-        senderSockets.forEach((socketId) =>
-          io.to(socketId).emit("receiveMessage", messageData),
-        );
-        const receiverUser = await User.findById(message.receiver).select(
-          "pushTokens",
-        );
-        const pushTokens = receiverUser?.pushTokens || [];
-        void sendPushToTokens({
-          tokens: pushTokens,
-          title: `${messageData.sender.firstName || "New"} message`,
-          body: messageData.content || "Sent you a message.",
-          imageUrl: messageData.sender.image || undefined,
-          data: {
-            type: "message",
-            chatType: "contact",
-            chatId: messageData.sender._id.toString(),
-            senderId: messageData.sender._id.toString(),
-            senderName: `${messageData.sender.firstName || ""} ${
-              messageData.sender.lastName || ""
-            }`.trim(),
-            senderImage: messageData.sender.image || "",
-            url: `/chats?type=message&chatType=contact&chatId=${messageData.sender._id.toString()}`,
-          },
-        });
-      }
+          const sender = await User.findById(messageFields.sender);
+          if (sender && !sender.contacts.includes(messageFields.receiver)) {
+            await User.findByIdAndUpdate(messageFields.sender, {
+              $addToSet: { contacts: messageFields.receiver },
+            });
+            senderSockets.forEach((socketId) =>
+              io.to(socketId).emit("new-dm-contact", messageData.receiver),
+            );
+          }
+
+          // Push notification for offline receivers.
+          if (!isReceiverOnline) {
+            const receiverUser = await User.findById(messageFields.receiver).select("pushTokens");
+            const pushTokens = receiverUser?.pushTokens || [];
+            void sendPushToTokens({
+              tokens: pushTokens,
+              title: `${messageData.sender.firstName || "New"} message`,
+              body: messageData.content || "Sent you a message.",
+              imageUrl: messageData.sender.image || undefined,
+              data: {
+                type: "message",
+                chatType: "contact",
+                chatId: messageData.sender._id.toString(),
+                senderId: messageData.sender._id.toString(),
+                senderName: `${messageData.sender.firstName || ""} ${messageData.sender.lastName || ""}`.trim(),
+                senderImage: messageData.sender.image || "",
+                url: `/chats?type=message&chatType=contact&chatId=${messageData.sender._id.toString()}`,
+              },
+            });
+          }
+        } catch (postSaveError) {
+          console.error("Post-save operations failed (message was saved):", postSaveError);
+        }
+      })();
     } catch (error) {
       console.error("Error sending message:", error);
       socket.emit("errorMessage", "Failed to send message");
