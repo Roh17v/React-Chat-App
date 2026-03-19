@@ -306,6 +306,10 @@ const setupSocket = (server) => {
     }
   };
 
+  // Track who is currently typing so we can emit stop-typing on disconnect.
+  // Map<userId, { chatType, receiverId, channelId }>
+  const activeTypingMap = new Map();
+
   const emitTypingEvent = async ({
     event,
     chatType,
@@ -402,6 +406,15 @@ const setupSocket = (server) => {
     socket.on("sendMessage", (message) => sendMessage(message, socket));
 
     socket.on("disconnect", async () => {
+      // If this user was actively typing when they disconnected, clear the
+      // indicator on the recipient's side immediately.
+      const typingState = activeTypingMap.get(userId);
+      if (typingState) {
+        activeTypingMap.delete(userId);
+        // Fire-and-forget — don't block the disconnect handler.
+        emitTypingEvent({ event: "stop-typing", senderId: userId, ...typingState });
+      }
+
       const becameOffline = removeUserSocket(userId, socket.id);
       if (becameOffline && userId) {
         try {
@@ -610,6 +623,8 @@ const setupSocket = (server) => {
     });
 
     socket.on("typing", ({ chatType, receiverId, channelId }) => {
+      // Track this user as actively typing.
+      activeTypingMap.set(userId, { chatType, receiverId, channelId });
       emitTypingEvent({
         event: "typing",
         chatType,
@@ -620,6 +635,8 @@ const setupSocket = (server) => {
     });
 
     socket.on("stop-typing", ({ chatType, receiverId, channelId }) => {
+      // Clear tracking when stop-typing is received.
+      activeTypingMap.delete(userId);
       emitTypingEvent({
         event: "stop-typing",
         chatType,

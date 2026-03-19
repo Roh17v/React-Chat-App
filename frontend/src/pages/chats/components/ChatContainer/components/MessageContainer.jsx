@@ -1014,7 +1014,7 @@ const MessageContainer = () => {
 
       return (
         <div
-          key={message._id}
+          key={message._stableKey || message._id}
           id={`msg-${message._id}`}
           data-message-id={message._id}
           className="flex flex-col gap-2"

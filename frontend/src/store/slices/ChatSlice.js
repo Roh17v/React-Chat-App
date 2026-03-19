@@ -102,29 +102,29 @@ export const createChatSlice = (set, get) => ({
   // Instantly inject a client-generated placeholder before the server responds.
   addOptimisticMessage: (message) => {
     const { selectedChatMessages } = get();
-    set({ selectedChatMessages: [...selectedChatMessages, message] });
+    set({ selectedChatMessages: [...selectedChatMessages, { ...message, _stableKey: message._id }] });
   },
 
   // Swap the optimistic placeholder with the real server-confirmed message.
   confirmMessage: (tempId, realMessage) => {
     const { selectedChatMessages, selectedChatType } = get();
     set({
-      selectedChatMessages: selectedChatMessages.map((msg) =>
-        msg._id === tempId
-          ? {
-              ...realMessage,
-              receiver:
-                selectedChatType === "channel"
-                  ? realMessage.receiver
-                  : realMessage.receiver?._id ?? realMessage.receiver,
-              sender:
-                selectedChatType === "channel"
-                  ? realMessage.sender
-                  : realMessage.sender?._id ?? realMessage.sender,
-              isOptimistic: false,
-            }
-          : msg,
-      ),
+      selectedChatMessages: selectedChatMessages.map((msg) => {
+        if (msg._id !== tempId) return msg;
+        return {
+          ...realMessage,
+          receiver:
+            selectedChatType === "channel"
+              ? realMessage.receiver
+              : realMessage.receiver?._id ?? realMessage.receiver,
+          sender:
+            selectedChatType === "channel"
+              ? realMessage.sender
+              : realMessage.sender?._id ?? realMessage.sender,
+          isOptimistic: false,
+          _stableKey: msg._stableKey || tempId,
+        };
+      }),
     });
   },
 

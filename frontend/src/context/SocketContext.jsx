@@ -78,6 +78,9 @@ export const SocketProvider = ({ children }) => {
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
+  // Auto-expire timers: "chatId_userId" → timeoutId.
+  const TYPING_EXPIRE_MS = 5000;
+  const typingTimers = useRef({});
 
   useEffect(() => {
     if (user && !socket.current) {
@@ -176,38 +179,43 @@ export const SocketProvider = ({ children }) => {
       });
 
       socket.current.on("typing", (payload) => {
-        if (payload?.chatType === "contact") {
-          setTypingIndicator({
-            chatId: payload.senderId,
-            user: payload.sender,
-            isTyping: true,
-          });
-        }
+        const handleTypingFor = (chatId, user) => {
+          if (!chatId || !user) return;
+          const key = `${chatId}_${user._id}`;
+          setTypingIndicator({ chatId, user, isTyping: true });
+          // Reset the auto-expire timer on every typing pulse.
+          if (typingTimers.current[key]) clearTimeout(typingTimers.current[key]);
+          typingTimers.current[key] = setTimeout(() => {
+            setTypingIndicator({ chatId, user, isTyping: false });
+            delete typingTimers.current[key];
+          }, TYPING_EXPIRE_MS);
+        };
 
-        if (payload?.chatType === "channel") {
-          setTypingIndicator({
-            chatId: payload.channelId,
-            user: payload.sender,
-            isTyping: true,
-          });
+        if (payload?.chatType === "contact" && payload?.sender) {
+          handleTypingFor(payload.senderId, payload.sender);
+        }
+        if (payload?.chatType === "channel" && payload?.sender) {
+          handleTypingFor(payload.channelId, payload.sender);
         }
       });
 
       socket.current.on("stop-typing", (payload) => {
-        if (payload?.chatType === "contact") {
-          setTypingIndicator({
-            chatId: payload.senderId,
-            user: payload.sender,
-            isTyping: false,
-          });
-        }
+        const handleStopTypingFor = (chatId, user) => {
+          if (!chatId || !user) return;
+          const key = `${chatId}_${user._id}`;
+          // Cancel the auto-expire — stop-typing arrived cleanly.
+          if (typingTimers.current[key]) {
+            clearTimeout(typingTimers.current[key]);
+            delete typingTimers.current[key];
+          }
+          setTypingIndicator({ chatId, user, isTyping: false });
+        };
 
-        if (payload?.chatType === "channel") {
-          setTypingIndicator({
-            chatId: payload.channelId,
-            user: payload.sender,
-            isTyping: false,
-          });
+        if (payload?.chatType === "contact" && payload?.sender) {
+          handleStopTypingFor(payload.senderId, payload.sender);
+        }
+        if (payload?.chatType === "channel" && payload?.sender) {
+          handleStopTypingFor(payload.channelId, payload.sender);
         }
       });
 
@@ -223,6 +231,10 @@ export const SocketProvider = ({ children }) => {
 
       return () => {
         if (socket.current) {
+          // Clear all pending auto-expire timers to avoid memory leaks.
+          Object.values(typingTimers.current).forEach(clearTimeout);
+          typingTimers.current = {};
+
           socket.current.off("new-dm-contact");
           socket.current.off("new-channel-contact");
           socket.current.off("onlineUsers");
