@@ -591,12 +591,13 @@ const CallContainer = () => {
 
   if (!activeCall) return null;
 
-  // On native Capacitor: use native plugin
-  if (Capacitor.isNativePlatform()) {
+  // Native Capacitor: only video calls use native plugin.
+  // Audio calls use the shared web component for parity across platforms.
+  if (Capacitor.isNativePlatform() && activeCall.callType === "video") {
     return <NativeCallHandler />;
   }
 
-  // On web: use existing WebView components
+  // Web + native-audio: shared React call components
   if (activeCall.callType === "video") {
     return (
       <Suspense fallback={null}>

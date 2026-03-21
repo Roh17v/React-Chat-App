@@ -98,6 +98,24 @@ const NativeCallPlugin = {
   },
 
   /**
+   * Prepare Android call audio routing.
+   * defaultRoute: "earpiece" | "speaker"
+   */
+  async setupAudioRouting({ defaultRoute = "earpiece" } = {}) {
+    return NativeWebRTC.setupAudioRouting({ defaultRoute });
+  },
+
+  /** Toggle Android audio route between earpiece and loudspeaker. */
+  async setSpeakerRoute({ enabled }) {
+    return NativeWebRTC.setSpeakerRoute({ enabled });
+  },
+
+  /** Restore original Android audio route and mode. */
+  async teardownAudioRouting() {
+    return NativeWebRTC.teardownAudioRouting();
+  },
+
+  /**
    * Sync shared call start time (Unix epoch ms) so native timer matches web timer.
    */
   async syncCallStartTime({ callStartedAt }) {

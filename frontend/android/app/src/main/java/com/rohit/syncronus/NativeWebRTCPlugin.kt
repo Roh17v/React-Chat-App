@@ -1,6 +1,12 @@
 ﻿package com.rohit.syncronus
 
 import android.Manifest
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.os.Build
 import android.util.Log
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
@@ -92,6 +98,14 @@ class NativeWebRTCPlugin : Plugin() {
     private var activeOtherUserImage: String = ""
     @Volatile
     private var isCleaningUp = false
+    // Native audio routing state for WebView-based audio calls (Capacitor audio screen).
+    private var audioRoutingManager: AudioManager? = null
+    private var audioRoutingPrepared = false
+    private var originalAudioRoutingMode: Int = AudioManager.MODE_NORMAL
+    private var originalAudioRoutingSpeakerphoneOn: Boolean = false
+    private var originalAudioRoutingBluetoothScoOn: Boolean = false
+    private var originalAudioRoutingCommunicationDeviceType: Int? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
     // Bug C fix: single shared Runnable for remote-track attachment retries.
     // Keeping a class-level reference allows removeCallbacks() to cancel ALL
     // pending retries from previous attach attempts before scheduling new ones,
@@ -751,7 +765,241 @@ class NativeWebRTCPlugin : Plugin() {
         })
     }
 
+    @PluginMethod
+    fun setupAudioRouting(call: PluginCall) {
+        val defaultRoute = call.getString("defaultRoute", "earpiece") ?: "earpiece"
+        val enableSpeaker = defaultRoute.equals("speaker", ignoreCase = true)
+        val hostActivity = activity
+        if (hostActivity == null) {
+            call.reject("Host activity unavailable")
+            return
+        }
+
+        hostActivity.runOnUiThread {
+            try {
+                ensureAudioRoutingInitialized(hostActivity.applicationContext)
+                routeCallAudio(enableSpeaker)
+                call.resolve(JSObject().put("speakerOn", isSpeakerRouteActive()))
+            } catch (e: Exception) {
+                call.reject("Failed to setup audio routing: ${e.message}")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun setSpeakerRoute(call: PluginCall) {
+        val enableSpeaker = call.getBoolean("enabled", false) ?: false
+        val hostActivity = activity
+        if (hostActivity == null) {
+            call.reject("Host activity unavailable")
+            return
+        }
+
+        hostActivity.runOnUiThread {
+            try {
+                ensureAudioRoutingInitialized(hostActivity.applicationContext)
+                routeCallAudio(enableSpeaker)
+                call.resolve(JSObject().put("speakerOn", isSpeakerRouteActive()))
+            } catch (e: Exception) {
+                call.reject("Failed to set speaker route: ${e.message}")
+            }
+        }
+    }
+
+    @PluginMethod
+    fun teardownAudioRouting(call: PluginCall) {
+        val hostActivity = activity
+        if (hostActivity == null) {
+            releaseAudioRouting()
+            call.resolve(JSObject().put("success", true))
+            return
+        }
+
+        hostActivity.runOnUiThread {
+            try {
+                releaseAudioRouting()
+                call.resolve(JSObject().put("success", true))
+            } catch (e: Exception) {
+                call.reject("Failed to restore audio routing: ${e.message}")
+            }
+        }
+    }
+
     // ==================== INTERNAL HELPERS ====================
+
+    private fun ensureAudioRoutingInitialized(context: Context) {
+        val manager = audioRoutingManager
+            ?: context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        if (!audioRoutingPrepared) {
+            originalAudioRoutingMode = manager.mode
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                originalAudioRoutingCommunicationDeviceType = manager.communicationDevice?.type
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    originalAudioRoutingSpeakerphoneOn = manager.isSpeakerphoneOn
+                    originalAudioRoutingBluetoothScoOn = manager.isBluetoothScoOn
+                }
+            }
+            requestAudioFocus(manager)
+            manager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioRoutingPrepared = true
+        }
+
+        audioRoutingManager = manager
+    }
+
+    private fun requestAudioFocus(manager: AudioManager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (audioFocusRequest == null) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(attrs)
+                    .setAcceptsDelayedFocusGain(false)
+                    .setOnAudioFocusChangeListener {}
+                    .build()
+            }
+            audioFocusRequest?.let { manager.requestAudioFocus(it) }
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        manager.requestAudioFocus(
+            null,
+            AudioManager.STREAM_VOICE_CALL,
+            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT,
+        )
+    }
+
+    private fun abandonAudioFocus(manager: AudioManager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { manager.abandonAudioFocusRequest(it) }
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        manager.abandonAudioFocus(null)
+    }
+
+    private fun routeCallAudio(enableSpeaker: Boolean) {
+        val manager = audioRoutingManager ?: return
+        if (routeCallAudioToBluetoothIfAvailable(manager)) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val preferredType = if (enableSpeaker) {
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            } else {
+                AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }
+
+            val preferredDevice = manager.availableCommunicationDevices
+                .firstOrNull { it.type == preferredType }
+            if (preferredDevice != null) {
+                manager.setCommunicationDevice(preferredDevice)
+                return
+            }
+
+            if (!enableSpeaker) {
+                manager.clearCommunicationDevice()
+            }
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        run {
+            manager.stopBluetoothSco()
+            manager.isBluetoothScoOn = false
+            manager.isSpeakerphoneOn = enableSpeaker
+        }
+    }
+
+    private fun isSpeakerRouteActive(): Boolean {
+        val manager = audioRoutingManager ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return manager.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        }
+        @Suppress("DEPRECATION")
+        return manager.isSpeakerphoneOn
+    }
+
+    private fun routeCallAudioToBluetoothIfAvailable(manager: AudioManager): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val bluetoothDevice = manager.availableCommunicationDevices.firstOrNull {
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_HEARING_AID
+            }
+            if (bluetoothDevice != null) {
+                return manager.setCommunicationDevice(bluetoothDevice)
+            }
+            return false
+        }
+
+        if (!hasBluetoothOutputLegacy(manager)) return false
+
+        @Suppress("DEPRECATION")
+        run {
+            manager.startBluetoothSco()
+            manager.isBluetoothScoOn = true
+            manager.isSpeakerphoneOn = false
+        }
+        return true
+    }
+
+    private fun hasBluetoothOutputLegacy(manager: AudioManager): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        return manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { device ->
+            device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                device.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    (device.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        device.type == AudioDeviceInfo.TYPE_HEARING_AID))
+        }
+    }
+
+    private fun releaseAudioRouting() {
+        val manager = audioRoutingManager ?: return
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val originalType = originalAudioRoutingCommunicationDeviceType
+                if (originalType == null) {
+                    manager.clearCommunicationDevice()
+                } else {
+                    val originalDevice = manager.availableCommunicationDevices
+                        .firstOrNull { it.type == originalType }
+                    if (originalDevice != null) {
+                        manager.setCommunicationDevice(originalDevice)
+                    } else {
+                        manager.clearCommunicationDevice()
+                    }
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    if (originalAudioRoutingBluetoothScoOn) {
+                        manager.startBluetoothSco()
+                        manager.isBluetoothScoOn = true
+                    } else {
+                        manager.stopBluetoothSco()
+                        manager.isBluetoothScoOn = false
+                    }
+                    manager.isSpeakerphoneOn = originalAudioRoutingSpeakerphoneOn
+                }
+            }
+
+            manager.mode = originalAudioRoutingMode
+            abandonAudioFocus(manager)
+        } finally {
+            audioRoutingPrepared = false
+            audioRoutingManager = null
+            originalAudioRoutingCommunicationDeviceType = null
+        }
+    }
 
     private fun initializeWebRTC() {
         if (peerConnectionFactory != null && eglBase != null) return
@@ -1659,6 +1907,7 @@ class NativeWebRTCPlugin : Plugin() {
             connectionTimeout?.cancel()
             connectionTimeout = null
             stopRemoteFreezeMonitor()
+            releaseAudioRouting()
 
             val capturerToStop = videoCapturer
             videoCapturer = null
