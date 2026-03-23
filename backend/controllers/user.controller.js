@@ -2,6 +2,7 @@ import { User } from "../models/user.model.js";
 import { createError } from "../utils/error.js";
 import path from "path";
 import fs from "fs";
+import mongoose from "mongoose";
 import Message from "../models/message.model.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
 
@@ -140,7 +141,7 @@ export const searchUsers = async (req, res, next) => {
       },
       {
         $match: {
-          _id: { $ne: currUserId }
+          _id: { $ne: new mongoose.Types.ObjectId(currUserId) }
         }
       },
       {
