@@ -37,4 +37,8 @@ channelSchema.pre("findOneAndUpdate", function (next) {
   next();
 });
 
+// Performance Indexes
+channelSchema.index({ members: 1, updatedAt: -1 });
+channelSchema.index({ admin: 1, updatedAt: -1 });
+
 export const Channel = mongoose.model("Channel", channelSchema);

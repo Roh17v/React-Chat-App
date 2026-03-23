@@ -122,18 +122,39 @@ export const searchUsers = async (req, res, next) => {
 
     if (q === undefined || q === null)
       return next(createError(400, "searchTerm is required."));
-    const users = await User.find({
-      $and: [
-        { _id: { $ne: currUserId } },
-        {
-          $or: [
-            { firstName: { $regex: q, $options: "i" } },
-            { lastName: { $regex: q, $options: "i" } },
-            { email: { $regex: q, $options: "i" } },
-          ],
-        },
-      ],
-    }).select("firstName lastName email image color lastSeen");
+
+    // Utilize MongoDB Atlas Search for fast type-ahead 
+    const users = await User.aggregate([
+      {
+        $search: {
+          index: "userAutocompleteIndex", 
+          compound: {
+            should: [
+              { autocomplete: { query: q, path: "firstName", fuzzy: { maxEdits: 1 } } },
+              { autocomplete: { query: q, path: "lastName", fuzzy: { maxEdits: 1 } } },
+              { autocomplete: { query: q, path: "email" } },
+            ],
+            minimumShouldMatch: 1
+          }
+        }
+      },
+      {
+        $match: {
+          _id: { $ne: currUserId }
+        }
+      },
+      {
+        $project: {
+          firstName: 1,
+          lastName: 1,
+          email: 1,
+          image: 1,
+          color: 1,
+          lastSeen: 1
+        }
+      },
+      { $limit: 20 } // Cap autocomplete return sizes
+    ]);
 
     res.status(200).json(users);
   } catch (error) {

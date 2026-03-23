@@ -98,4 +98,7 @@ export const validateUser = (user) => {
   return schema.validate(user);
 };
 
+// Text index for robust and scalable full-text searching
+userSchema.index({ firstName: "text", lastName: "text", email: "text" });
+
 export const User = mongoose.model("User", userSchema);
