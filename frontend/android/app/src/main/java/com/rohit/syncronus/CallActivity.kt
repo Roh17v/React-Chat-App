@@ -88,6 +88,7 @@ class CallActivity : AppCompatActivity() {
     // True only after the remote track actually renders a frame.
     // This is stronger than "sink added" and prevents false-positive readiness.
     private var remoteFirstFrameRendered = false
+    private var lastPausedAtMs: Long = 0L
 
     // Video tracks
     private var localTrack: VideoTrack? = null
@@ -132,16 +133,18 @@ class CallActivity : AppCompatActivity() {
 
     private fun updateVideoSinkTargets() {
         if (!areRenderersReady()) return
+        val isFrontCamera = NativeWebRTCPlugin.instance?.isFrontFacingCamera() ?: true
         if (isLocalLarge) {
             localProxySink.setTarget(remoteVideoView)
             remoteProxySink.setTarget(localVideoView)
-            remoteVideoView.setMirror(true)
+            // When local is large, it is rendered on remoteVideoView.
+            remoteVideoView.setMirror(isFrontCamera)
             localVideoView.setMirror(false)
         } else {
             localProxySink.setTarget(localVideoView)
             remoteProxySink.setTarget(remoteVideoView)
             remoteVideoView.setMirror(false)
-            localVideoView.setMirror(true)
+            localVideoView.setMirror(isFrontCamera)
         }
     }
 
@@ -380,17 +383,28 @@ class CallActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        val pausedForMs =
+            if (lastPausedAtMs > 0L) {
+                (SystemClock.elapsedRealtime() - lastPausedAtMs).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+        lastPausedAtMs = 0L
         pipExitCheckRunnable?.let { window.decorView.removeCallbacks(it) }
         pipExitCheckRunnable = null
         if (isCurrentCallActivityInstance()) {
             lastKnownPipMode = false
             NativeWebRTCPlugin.instance?.notifyCallUiVisibility(true)
+            if (pausedForMs >= 1200L) {
+                NativeWebRTCPlugin.instance?.recoverVideoAfterUiResume(pausedForMs)
+            }
         }
         startFrameWatchdog()
     }
 
     override fun onPause() {
         super.onPause()
+        lastPausedAtMs = SystemClock.elapsedRealtime()
     }
 
     private fun initViews() {
@@ -850,6 +864,13 @@ class CallActivity : AppCompatActivity() {
     private fun swapVideoTracks() {
         runOnUiThread {
             swapVideoTracksSync()
+        }
+    }
+
+    fun refreshRendererMirroring() {
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            updateVideoSinkTargets()
         }
     }
 

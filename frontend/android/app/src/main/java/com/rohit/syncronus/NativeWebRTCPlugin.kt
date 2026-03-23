@@ -38,6 +38,7 @@ class NativeWebRTCPlugin : Plugin() {
         private const val FREEZE_DETECT_CONSECUTIVE_CHECKS = 3
         private const val REMOTE_RECOVERY_COOLDOWN_MS = 6000L
         private const val LOCAL_RECOVERY_COOLDOWN_MS = 8000L
+        private const val UI_RESUME_RECOVERY_COOLDOWN_MS = 2500L
         var instance: NativeWebRTCPlugin? = null
             private set
     }
@@ -96,6 +97,7 @@ class NativeWebRTCPlugin : Plugin() {
     private var activeIsCaller: Boolean = false
     private var activeOtherUserName: String = "Unknown"
     private var activeOtherUserImage: String = ""
+    private var lastUiResumeRecoveryAtMs: Long = 0L
     @Volatile
     private var isCleaningUp = false
     // Native audio routing state for WebView-based audio calls (Capacitor audio screen).
@@ -655,11 +657,14 @@ class NativeWebRTCPlugin : Plugin() {
         applyLocalVideoSendState()
     }
 
+    fun isFrontFacingCamera(): Boolean = facingMode == "user"
+
     fun flipCameraNative() {
         val capturer = videoCapturer ?: return
         capturer.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFront: Boolean) {
                 facingMode = if (isFront) "user" else "environment"
+                CallActivity.instance?.refreshRendererMirroring()
             }
             override fun onCameraSwitchError(error: String?) {}
         })
@@ -687,6 +692,38 @@ class NativeWebRTCPlugin : Plugin() {
         }
         if (hasOngoingCall()) {
             notifyListeners("onCallUiVisibilityChanged", JSObject().put("isVisible", isVisible))
+        }
+    }
+
+    fun recoverVideoAfterUiResume(pausedForMs: Long) {
+        if (pausedForMs < 1200L) return
+        if (isCleaningUp || activeCallType != "video" || isVideoOff) return
+        val pc = peerConnection ?: return
+        val state = pc.iceConnectionState()
+        if (state == PeerConnection.IceConnectionState.CLOSED ||
+            state == PeerConnection.IceConnectionState.FAILED
+        ) {
+            return
+        }
+
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastUiResumeRecoveryAtMs < UI_RESUME_RECOVERY_COOLDOWN_MS) return
+        lastUiResumeRecoveryAtMs = now
+
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (isCleaningUp || activeCallType != "video" || isVideoOff) return@post
+            try {
+                // Re-assert sender wiring and restart capture so OS-paused camera sessions recover
+                // immediately when the user returns from background apps.
+                applyLocalVideoSendState()
+                restartLocalVideoCapture()
+                localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
+                if (callActivityActive) {
+                    refreshRemoteTrackAttachment()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "recoverVideoAfterUiResume failed", e)
+            }
         }
     }
 
@@ -757,6 +794,7 @@ class NativeWebRTCPlugin : Plugin() {
         capturer.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFront: Boolean) {
                 facingMode = if (isFront) "user" else "environment"
+                CallActivity.instance?.refreshRendererMirroring()
                 call.resolve(JSObject().put("facingMode", facingMode))
             }
             override fun onCameraSwitchError(error: String?) {
@@ -887,7 +925,9 @@ class NativeWebRTCPlugin : Plugin() {
 
     private fun routeCallAudio(enableSpeaker: Boolean) {
         val manager = audioRoutingManager ?: return
-        if (routeCallAudioToBluetoothIfAvailable(manager)) return
+        // Respect explicit speaker toggle: when user requests speaker, force built-in speaker
+        // instead of auto-preferring Bluetooth devices.
+        if (!enableSpeaker && routeCallAudioToBluetoothIfAvailable(manager)) return
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val preferredType = if (enableSpeaker) {
@@ -900,11 +940,26 @@ class NativeWebRTCPlugin : Plugin() {
                 .firstOrNull { it.type == preferredType }
             if (preferredDevice != null) {
                 manager.setCommunicationDevice(preferredDevice)
+                if (enableSpeaker) {
+                    @Suppress("DEPRECATION")
+                    run {
+                        manager.stopBluetoothSco()
+                        manager.isBluetoothScoOn = false
+                        manager.isSpeakerphoneOn = true
+                    }
+                }
                 return
             }
 
             if (!enableSpeaker) {
                 manager.clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    manager.stopBluetoothSco()
+                    manager.isBluetoothScoOn = false
+                    manager.isSpeakerphoneOn = true
+                }
             }
             return
         }
@@ -1970,6 +2025,7 @@ class NativeWebRTCPlugin : Plugin() {
             activeOtherUserName = "Unknown"
             isInPipMode = false
             activeCaptureProfile = null
+            lastUiResumeRecoveryAtMs = 0L
 
             // Close native Activity on UI thread.
             if (callActivityActive) {
