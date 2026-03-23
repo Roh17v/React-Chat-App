@@ -74,6 +74,9 @@ const AudioCallScreen = () => {
   const iceRestartAttemptsRef = useRef(0);
   const cleanedUpRef = useRef(false);
   const reconnectIntervalRef = useRef(null);
+  const playbackRetryTimeoutRef = useRef(null);
+  const remoteTrackWatchdogTimeoutRef = useRef(null);
+  const remoteAudioTrackSeenRef = useRef(false);
   const offerKickstartTimeoutRef = useRef(null);
   const offerRetryIntervalRef = useRef(null);
   const offerRetryAttemptsRef = useRef(0);
@@ -138,22 +141,49 @@ const AudioCallScreen = () => {
     }
   }, []);
 
+  const clearPlaybackRetryTimeout = useCallback(() => {
+    if (playbackRetryTimeoutRef.current) {
+      clearTimeout(playbackRetryTimeoutRef.current);
+      playbackRetryTimeoutRef.current = null;
+    }
+  }, []);
+
+  const clearRemoteTrackWatchdogTimeout = useCallback(() => {
+    if (remoteTrackWatchdogTimeoutRef.current) {
+      clearTimeout(remoteTrackWatchdogTimeoutRef.current);
+      remoteTrackWatchdogTimeoutRef.current = null;
+    }
+  }, []);
+
   const applySpeakerState = useCallback(() => {
     const audioEl = remoteAudioRef.current;
     if (!audioEl) return;
+
+    const playRemote = () => {
+      const playPromise = audioEl.play();
+      if (typeof playPromise?.catch === "function") {
+        playPromise.catch(() => {
+          clearPlaybackRetryTimeout();
+          playbackRetryTimeoutRef.current = setTimeout(() => {
+            audioEl.play().catch(() => {});
+          }, 350);
+        });
+      }
+    };
+
     if (isNativePlatform) {
       audioEl.muted = false;
       audioEl.volume = 1;
-      audioEl.play().catch(() => {});
+      playRemote();
       return;
     }
 
     audioEl.muted = !isSpeakerOn;
     audioEl.volume = isSpeakerOn ? 1 : 0;
     if (isSpeakerOn) {
-      audioEl.play().catch(() => {});
+      playRemote();
     }
-  }, [isNativePlatform, isSpeakerOn]);
+  }, [clearPlaybackRetryTimeout, isNativePlatform, isSpeakerOn]);
 
   const tryRestartIce = useCallback(() => {
     const peer = pc.current;
@@ -196,6 +226,8 @@ const AudioCallScreen = () => {
     clearAcceptRetry();
     clearCandidateTimer();
     clearReconnectInterval();
+    clearPlaybackRetryTimeout();
+    clearRemoteTrackWatchdogTimeout();
     clearOfferKickstartTimeout();
     clearOfferRetryInterval();
 
@@ -203,6 +235,7 @@ const AudioCallScreen = () => {
     pendingCandidates.current = [];
     pendingOffer.current = null;
     shouldStartOnStreamReady.current = false;
+    remoteAudioTrackSeenRef.current = false;
     hasReceivedOffer.current = false;
     hasReceivedAnswerRef.current = false;
     localOfferSentRef.current = false;
@@ -252,9 +285,11 @@ const AudioCallScreen = () => {
     clearCallAccepted,
     clearCandidateTimer,
     clearConnectionTimeout,
+    clearPlaybackRetryTimeout,
     clearOfferKickstartTimeout,
     clearOfferRetryInterval,
     clearReconnectInterval,
+    clearRemoteTrackWatchdogTimeout,
     clearActiveCall,
     isNativePlatform,
     setCallMinimized,
@@ -277,6 +312,8 @@ const AudioCallScreen = () => {
           .find((currentSender) => currentSender.track?.kind === "audio");
         if (sender) {
           sender.replaceTrack(nextTrack);
+        } else {
+          pc.current.addTrack(nextTrack, newStream);
         }
         nextTrack.enabled = !isMuted;
       }
@@ -454,6 +491,9 @@ const AudioCallScreen = () => {
       stream.getTracks().forEach((track) => peer.addTrack(track, stream));
 
       peer.ontrack = ({ track, streams }) => {
+        if (track?.kind !== "audio") return;
+        remoteAudioTrackSeenRef.current = true;
+        clearRemoteTrackWatchdogTimeout();
         remoteStreamRef.current = streams[0] || new MediaStream([track]);
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = remoteStreamRef.current;
@@ -482,6 +522,16 @@ const AudioCallScreen = () => {
           hasReceivedAnswerRef.current = true;
           clearOfferRetryInterval();
           clearConnectionTimeout();
+          applySpeakerState();
+          clearRemoteTrackWatchdogTimeout();
+          if (!remoteAudioTrackSeenRef.current) {
+            remoteTrackWatchdogTimeoutRef.current = setTimeout(() => {
+              if (remoteAudioTrackSeenRef.current) return;
+              setCallStatus("connecting");
+              startReconnectInterval();
+              sendLocalOffer(true);
+            }, 6500);
+          }
           return;
         }
 
@@ -579,6 +629,7 @@ const AudioCallScreen = () => {
       applySpeakerState,
       clearCandidateTimer,
       clearConnectionTimeout,
+      clearRemoteTrackWatchdogTimeout,
       clearReconnectInterval,
       clearOfferKickstartTimeout,
       clearOfferRetryInterval,
@@ -592,6 +643,23 @@ const AudioCallScreen = () => {
   useEffect(() => {
     if (!isAudioCallActive) return;
     applySpeakerState();
+  }, [applySpeakerState, isAudioCallActive]);
+
+  useEffect(() => {
+    if (!isAudioCallActive) return;
+    const audioEl = remoteAudioRef.current;
+    if (!audioEl) return;
+
+    const retryPlayback = () => applySpeakerState();
+    audioEl.addEventListener("loadedmetadata", retryPlayback);
+    audioEl.addEventListener("canplay", retryPlayback);
+    document.addEventListener("visibilitychange", retryPlayback);
+
+    return () => {
+      audioEl.removeEventListener("loadedmetadata", retryPlayback);
+      audioEl.removeEventListener("canplay", retryPlayback);
+      document.removeEventListener("visibilitychange", retryPlayback);
+    };
   }, [applySpeakerState, isAudioCallActive]);
 
   useEffect(() => {
@@ -742,7 +810,7 @@ const AudioCallScreen = () => {
     if (!activeCall?.isCaller) return;
     if (!callAccepted) return;
 
-    setCallStatus("connected");
+    setCallStatus("connecting");
     if (localStreamRef.current) {
       initializePeerConnection(localStreamRef.current);
     } else {
@@ -851,17 +919,23 @@ const AudioCallScreen = () => {
   const toggleSpeaker = () => {
     const nextSpeakerState = !isSpeakerOn;
 
-    if (isNativePlatform && nativeAudioRoutingPreparedRef.current) {
+    if (isNativePlatform) {
       setIsSpeakerOn(nextSpeakerState);
-      NativeCallPlugin.setSpeakerRoute({ enabled: nextSpeakerState })
-        .then((res) => {
-          if (typeof res?.speakerOn === "boolean") {
-            setIsSpeakerOn(Boolean(res.speakerOn));
-          }
-        })
-        .catch(() => {
-          setIsSpeakerOn((prev) => !prev);
-        });
+
+      const applyRoute = async () => {
+        if (!nativeAudioRoutingPreparedRef.current) {
+          await NativeCallPlugin.setupAudioRouting({ defaultRoute: "earpiece" });
+          nativeAudioRoutingPreparedRef.current = true;
+        }
+        const res = await NativeCallPlugin.setSpeakerRoute({ enabled: nextSpeakerState });
+        if (typeof res?.speakerOn === "boolean") {
+          setIsSpeakerOn(Boolean(res.speakerOn));
+        }
+      };
+
+      applyRoute().catch(() => {
+        setIsSpeakerOn((prev) => !prev);
+      });
       return;
     }
 
