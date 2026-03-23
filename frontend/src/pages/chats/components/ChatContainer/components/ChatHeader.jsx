@@ -1,6 +1,5 @@
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
 import useAppStore from "@/store";
-import React from "react";
 import { RiCloseFill } from "react-icons/ri";
 import { useSocket } from "@/context/SocketContext";
 import { IoCall, IoVideocam, IoCloseSharp } from "react-icons/io5";
@@ -27,9 +26,13 @@ const ChatHeader = () => {
     Boolean(activeCall) &&
     activeCall?.callType === "video" &&
     Boolean(isCallMinimized);
+  const isAnyCallOngoing = Boolean(activeCall);
+  const enabledCallButtonClass = `touch-target rounded-full text-foreground-secondary transition-all duration-200 active:scale-95 focus:outline-none [-webkit-tap-highlight-color:transparent] ${
+    isNative ? "" : "hover:text-primary hover:bg-accent"
+  }`;
 
   const initiateCall = (callType) => {
-    if (!selectedChatData?._id) return;
+    if (!selectedChatData?._id || isAnyCallOngoing) return;
 
     socket.emit("call:initiate", {
       receiverId: selectedChatData._id,
@@ -196,15 +199,25 @@ const ChatHeader = () => {
             <>
               <button
                 onClick={() => initiateCall("audio")}
-                title="Audio Call"
-                className="touch-target rounded-full text-foreground-secondary hover:text-primary hover:bg-accent transition-all duration-200 active:scale-95"
+                title={isAnyCallOngoing ? "End current call to start a new call" : "Audio Call"}
+                disabled={isAnyCallOngoing}
+                className={`touch-target rounded-full transition-all duration-200 ${
+                  isAnyCallOngoing
+                    ? "text-foreground-muted cursor-not-allowed opacity-50 focus:outline-none [-webkit-tap-highlight-color:transparent]"
+                    : enabledCallButtonClass
+                }`}
               >
                 <IoCall className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>
               <button
                 onClick={() => initiateCall("video")}
-                title="Video Call"
-                className="touch-target rounded-full text-foreground-secondary hover:text-primary hover:bg-accent transition-all duration-200 active:scale-95"
+                title={isAnyCallOngoing ? "End current call to start a new call" : "Video Call"}
+                disabled={isAnyCallOngoing}
+                className={`touch-target rounded-full transition-all duration-200 ${
+                  isAnyCallOngoing
+                    ? "text-foreground-muted cursor-not-allowed opacity-50 focus:outline-none [-webkit-tap-highlight-color:transparent]"
+                    : enabledCallButtonClass
+                }`}
               >
                 <IoVideocam className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>
