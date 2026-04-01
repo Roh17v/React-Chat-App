@@ -30,6 +30,14 @@ const MessageBar = () => {
 
   const fileInputRef = useRef();
 
+  const keepInputFocused = () => {
+    if (!inputRef.current) return;
+    inputRef.current.focus({ preventScroll: true });
+    requestAnimationFrame(() => {
+      inputRef.current?.focus({ preventScroll: true });
+    });
+  };
+
   const handleSendMessage = async () => {
     const sanitizedMessage = message.trim();
     if (sanitizedMessage === "") return;
@@ -58,6 +66,7 @@ const MessageBar = () => {
       // Clear the input immediately
       setMessage("");
       clearReplyToMessage();
+      keepInputFocused();
 
       // Send to server in background with the temp ID attached.
       socket.emit("sendMessage", {
@@ -79,6 +88,7 @@ const MessageBar = () => {
       });
       setMessage("");
       clearReplyToMessage();
+      keepInputFocused();
     }
 
     if (isTypingRef.current) {
@@ -387,6 +397,8 @@ const MessageBar = () => {
         {/* Send button */}
         <button
           onClick={handleSendMessage}
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
           disabled={!message.trim()}
           className={cn(
             "touch-target rounded-full",
