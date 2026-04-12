@@ -372,7 +372,7 @@ export const SocketProvider = ({ children }) => {
           : 0;
         const localSynchronizedStart =
           parsedConnectedAt + estimatedLocalMinusServerOffset;
-        const normalizedStart = Math.floor(localSynchronizedStart / 1000) * 1000;
+        const normalizedStart = Math.round(localSynchronizedStart);
 
         const state = useAppStore.getState();
         const currentActiveCall = state.activeCall;

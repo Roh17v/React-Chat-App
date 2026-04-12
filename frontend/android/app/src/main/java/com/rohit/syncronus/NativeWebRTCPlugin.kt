@@ -1,4 +1,4 @@
-﻿package com.rohit.syncronus
+package com.rohit.syncronus
 
 import android.Manifest
 import android.content.Context
@@ -416,9 +416,13 @@ class NativeWebRTCPlugin : Plugin() {
                     PeerConnection.IceConnectionState.COMPLETED -> {
                         hasEverConnected = true
                         clearDisconnectFailsafeTimer()
-                        if (callStartTime == 0L) {
-                            callStartTime = android.os.SystemClock.elapsedRealtime()
-                        }
+                        // NOTE: callStartTime is intentionally NOT set here from local elapsedRealtime.
+                        // ICE CONNECTED fires 3-4 seconds before the server's "call-connected" socket
+                        // event arrives (which carries the authoritative connectedAt epoch from the DB).
+                        // Setting it here would make the Chronometer start counting from the wrong base.
+                        // syncCallStartTime() (called from the JS layer on "call-connected") is the
+                        // sole writer. The CallActivity fallback (SystemClock.elapsedRealtime()) covers
+                        // the rare edge case where call-connected never arrives.
                         applyBitrateCap()
                         startRemoteFreezeMonitor()
                         tryAttachRemoteTrackFromPeerConnection()
