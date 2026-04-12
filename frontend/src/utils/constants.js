@@ -34,5 +34,9 @@ export const TURN_CREDENTIALS_ROUTE = `/api/turn`;
 
 export const GET_TURN_CREDENTIALS = `${HOST}${TURN_CREDENTIALS_ROUTE}/credentials`;
 
+export const CALL_ROUTE = `/api/calls`;
+
+export const CALL_FINALIZE_ROUTE = `${HOST}${CALL_ROUTE}/finalize`;
+
 export const DELETE_FOR_ME_ROUTE = `${MESSAGES_ROUTE}`;
 export const DELETE_FOR_EVERYONE_ROUTE = `${MESSAGES_ROUTE}`;

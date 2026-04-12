@@ -27,9 +27,31 @@ const NativeCallPlugin = {
    * @param {string} options.callType - "video" or "audio"
    * @param {boolean} options.isCaller - true if this user initiated the call
    * @param {string} options.otherUserName - display name of the other user
+   * @param {string} [options.callId] - active call id for native finalize fallback
+   * @param {string} [options.peerId] - remote user id for native finalize fallback
+   * @param {string} [options.apiBaseUrl] - backend base url (e.g. https://api.example.com)
+   * @param {number} [options.callStartedAt] - unix epoch ms
    */
-  async startCall({ callType, isCaller, otherUserName, otherUserImage = "" }) {
-    return NativeWebRTC.startCall({ callType, isCaller, otherUserName, otherUserImage });
+  async startCall({
+    callType,
+    isCaller,
+    otherUserName,
+    otherUserImage = "",
+    callId,
+    peerId,
+    apiBaseUrl,
+    callStartedAt,
+  }) {
+    return NativeWebRTC.startCall({
+      callType,
+      isCaller,
+      otherUserName,
+      otherUserImage,
+      callId,
+      peerId,
+      apiBaseUrl,
+      callStartedAt,
+    });
   },
 
   /**
@@ -87,14 +109,27 @@ const NativeCallPlugin = {
     return NativeWebRTC.toggleVideo();
   },
 
+  /** Read current local camera state from native call engine. */
+  async getLocalVideoState() {
+    return NativeWebRTC.getLocalVideoState();
+  },
+
+  /** Update remote peer camera-off state for native UI placeholder. */
+  async setRemoteVideoOff({ videoOff }) {
+    return NativeWebRTC.setRemoteVideoOff({ videoOff });
+  },
+
   /** Flip camera. Returns { facingMode: string } */
   async flipCamera() {
     return NativeWebRTC.flipCamera();
   },
 
   /** End the call and cleanup all resources. */
-  async endCall() {
-    return NativeWebRTC.endCall();
+  async endCall({ notifyRemote = true, reason } = {}) {
+    return NativeWebRTC.endCall({
+      notifyRemote,
+      ...(reason ? { reason } : {}),
+    });
   },
 
   /**
@@ -140,8 +175,8 @@ const NativeCallPlugin = {
   /**
    * Add event listener for native plugin events.
    * Events: onLocalOffer, onLocalAnswer, onIceCandidates,
-   *         onConnectionStateChanged, onCallEnded, onLocalVideoFailure, onPipModeChanged,
-   *         onCallUiVisibilityChanged, onCallUiClosed
+   *         onConnectionStateChanged, onCallEnded, onLocalVideoFailure, onLocalVideoToggled, onPipModeChanged,
+   *         onCallUiVisibilityChanged, onCallUiClosed, onRemoteControlEnd
    */
   addListener(event, callback) {
     return NativeWebRTC.addListener(event, callback);

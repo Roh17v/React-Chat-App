@@ -13,10 +13,23 @@ const IncomingCallOverlay = () => {
   }, []);
   useEffect(() => {
     if (!socket) return;
-    const handleCallEnd = () => clearIncomingCall();
+    const handleCallEnd = (payload = {}) => {
+      const endedCallId = payload?.callId?.toString?.() || payload?.callId || "";
+      const endedFrom = payload?.from?.toString?.() || payload?.from || "";
+      const incomingCallId =
+        incomingCall?.callId?.toString?.() || incomingCall?.callId || "";
+      const incomingCallerId =
+        incomingCall?.callerId?.toString?.() || incomingCall?.callerId || "";
+
+      const matchesIncoming =
+        (endedCallId && incomingCallId && endedCallId === incomingCallId) ||
+        (!endedCallId && endedFrom && incomingCallerId && endedFrom === incomingCallerId);
+      if (!matchesIncoming) return;
+      clearIncomingCall();
+    };
     socket.on("call:end", handleCallEnd);
     return () => socket.off("call:end", handleCallEnd);
-  }, [socket, clearIncomingCall]);
+  }, [socket, clearIncomingCall, incomingCall?.callId, incomingCall?.callerId]);
   if (!incomingCall) return null;
   const isVideoCall = incomingCall.callType === "video";
   const callerName = incomingCall.callerName || "Unknown User";

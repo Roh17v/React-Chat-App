@@ -8,6 +8,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.util.Rational
@@ -51,6 +52,11 @@ class CallActivity : AppCompatActivity() {
     private lateinit var txtStatus: TextView
     private lateinit var txtAvatarInitial: TextView
     private lateinit var imgAvatar: ImageView
+    private lateinit var pipPreconnectOverlay: View
+    private lateinit var pipAvatarInitial: TextView
+    private lateinit var pipAvatarImage: ImageView
+    private lateinit var pipUserName: TextView
+    private lateinit var remoteCameraOffOverlay: View
     private lateinit var localCameraOffOverlay: View
     private lateinit var callTimer: Chronometer
     
@@ -69,6 +75,8 @@ class CallActivity : AppCompatActivity() {
     // State
     private var isMuted = false
     private var isVideoOff = false
+    private var isRemoteVideoOffSignaled = false
+    private var isRemoteVideoOffHeuristic = false
     private var controlsVisible = true
     private var isConnected = false
     private var isLocalLarge = false
@@ -81,6 +89,7 @@ class CallActivity : AppCompatActivity() {
     private var frameWatchdogRunnable: Runnable? = null
     private var lastRemoteFrameAtMs: Long = 0L
     private var lastRemoteRecoveryAtMs: Long = 0L
+    private var lastVideoToggleTapAtMs: Long = 0L
     private var receiverFreezeRecoveries = 0
     // Delayed runnable that shows the reconnecting overlay after a brief waiting period.
     // Cancelled immediately when ICE reconnects so brief network blips never cover the video.
@@ -208,6 +217,10 @@ class CallActivity : AppCompatActivity() {
 
     @RequiresApi(Build.VERSION_CODES.O)
     private fun enterPipSafely(): Boolean {
+        // Ensure local track is attached before the PiP snapshot path runs.
+        if (localTrack == null) {
+            NativeWebRTCPlugin.instance?.getLocalVideoTrack()?.let { setLocalVideoTrack(it) }
+        }
         // Hide local preview BEFORE entering PiP so the PiP snapshot
         // contains only the currently large video surface.
         val previousLocalAlpha = if (::localVideoContainer.isInitialized) localVideoContainer.alpha else 1f
@@ -223,6 +236,35 @@ class CallActivity : AppCompatActivity() {
             }
         }
         return entered
+    }
+
+    private fun applyPipPreconnectHeaderState() {
+        if (!lastKnownPipMode) return
+        val peerConnected = isConnected || (NativeWebRTCPlugin.instance?.isPeerConnected() == true)
+        val hasRemoteVisualState =
+            remoteFirstFrameRendered || isRemoteVideoOffSignaled || isRemoteVideoOffHeuristic
+        // Show profile overlay only in true pre-connect state.
+        val shouldShowPreconnectProfile = !peerConnected && !hasRemoteVisualState
+
+        if (::topBar.isInitialized) {
+            // Keep PiP uncluttered: dedicated profile overlay is used before first remote frame.
+            topBar.visibility = View.GONE
+        }
+        if (::callTimer.isInitialized) {
+            callTimer.visibility = View.GONE
+        }
+        if (::pipPreconnectOverlay.isInitialized) {
+            pipPreconnectOverlay.visibility = if (shouldShowPreconnectProfile) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun refreshPipPreconnectHeader() {
+        if (!lastKnownPipMode) return
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applyPipPreconnectHeaderState()
+        } else {
+            runOnUiThread { applyPipPreconnectHeaderState() }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -263,7 +305,10 @@ class CallActivity : AppCompatActivity() {
 
         txtUserName.text = otherUserName
         txtTopName.text = otherUserName
-        txtAvatarInitial.text = if (otherUserName.isNotEmpty()) otherUserName.substring(0, 1).uppercase() else "U"
+        val avatarInitial = if (otherUserName.isNotEmpty()) otherUserName.substring(0, 1).uppercase() else "U"
+        txtAvatarInitial.text = avatarInitial
+        pipAvatarInitial.text = avatarInitial
+        pipUserName.text = otherUserName
         txtStatus.text = if (isCaller) "Calling..." else "Connecting..."
 
         // Load other user's profile picture async (no third-party lib needed)
@@ -285,6 +330,9 @@ class CallActivity : AppCompatActivity() {
                             imgAvatar.setImageBitmap(circular)
                             imgAvatar.visibility = View.VISIBLE
                             txtAvatarInitial.visibility = View.GONE
+                            pipAvatarImage.setImageBitmap(circular)
+                            pipAvatarImage.visibility = View.VISIBLE
+                            pipAvatarInitial.visibility = View.GONE
                         }
                     }
                 } catch (e: Exception) {
@@ -372,6 +420,8 @@ class CallActivity : AppCompatActivity() {
             }
             
             // Re-apply camera off state visually
+            isRemoteVideoOffSignaled = NativeWebRTCPlugin.instance?.isRemoteVideoOffState() == true
+            isRemoteVideoOffHeuristic = false
             updateLocalCameraOffState()
         }
         } catch (e: Exception) {
@@ -420,6 +470,11 @@ class CallActivity : AppCompatActivity() {
         txtStatus = findViewById(R.id.txt_status)
         txtAvatarInitial = findViewById(R.id.txt_avatar_initial)
         imgAvatar = findViewById(R.id.img_avatar)
+        pipPreconnectOverlay = findViewById(R.id.pip_preconnect_overlay)
+        pipAvatarInitial = findViewById(R.id.pip_txt_avatar_initial)
+        pipAvatarImage = findViewById(R.id.pip_img_avatar)
+        pipUserName = findViewById(R.id.pip_txt_user_name)
+        remoteCameraOffOverlay = findViewById(R.id.remote_camera_off_overlay)
         localCameraOffOverlay = findViewById(R.id.local_camera_off_overlay)
         
         callTimer = findViewById(R.id.call_timer)
@@ -454,6 +509,7 @@ class CallActivity : AppCompatActivity() {
                 if (!isLocalLarge) {
                     remoteFirstFrameRendered = true
                     lastRemoteFrameAtMs = SystemClock.elapsedRealtime()
+                    refreshPipPreconnectHeader()
                 }
                 Log.d("CallActivity", "Remote video SurfaceView first frame rendered.")
             }
@@ -479,6 +535,7 @@ class CallActivity : AppCompatActivity() {
                 if (isLocalLarge) {
                     remoteFirstFrameRendered = true
                     lastRemoteFrameAtMs = SystemClock.elapsedRealtime()
+                    refreshPipPreconnectHeader()
                 }
             }
             override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
@@ -556,8 +613,11 @@ class CallActivity : AppCompatActivity() {
         }
 
         btnVideo.setOnClickListener {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastVideoToggleTapAtMs < 220L) return@setOnClickListener
+            lastVideoToggleTapAtMs = now
             NativeWebRTCPlugin.instance?.toggleVideoNative()
-            isVideoOff = !isVideoOff
+            isVideoOff = NativeWebRTCPlugin.instance?.isVideoOffState() == true
             btnVideo.setImageResource(if (isVideoOff) R.drawable.ic_video_off else R.drawable.ic_video)
             btnVideo.alpha = if (isVideoOff) 0.5f else 1.0f
             // Show/hide the camera-off overlay on whichever view currently shows the local feed.
@@ -875,7 +935,8 @@ class CallActivity : AppCompatActivity() {
     }
 
     /**
-     * Show/hide the camera-off overlay for the local feed.
+     * Show/hide camera-off overlays for whichever feed is currently rendered
+     * in the large and small surfaces.
      *
      * IMPORTANT: Never set SurfaceViewRenderer (SurfaceView) visibility to INVISIBLE or GONE!
      * Doing so destroys the underlying EGL surface, causing crashes when code later tries
@@ -885,20 +946,39 @@ class CallActivity : AppCompatActivity() {
      * isLocalLarge=true:  local → remoteVideoView (large),     remote → localVideoView (small)
      */
     private fun updateLocalCameraOffState() {
-        if (isVideoOff) {
-            if (isLocalLarge) {
-                // Local feed is on remoteVideoView (large bg) — clear it to black
-                // No overlay needed for the large view; clearImage() is sufficient
-                try { remoteVideoView.clearImage() } catch (_: Exception) {}
-                localCameraOffOverlay.visibility = View.GONE
-            } else {
-                // Local feed is on localVideoView (small card) — clear + show overlay on top
-                try { localVideoView.clearImage() } catch (_: Exception) {}
-                localCameraOffOverlay.visibility = View.VISIBLE
-            }
+        if (!::localCameraOffOverlay.isInitialized || !::remoteCameraOffOverlay.isInitialized) return
+
+        val isRemoteVideoOff = isRemoteVideoOffSignaled || isRemoteVideoOffHeuristic
+        val isSmallFeedVideoOff = if (isLocalLarge) isRemoteVideoOff else isVideoOff
+        if (isSmallFeedVideoOff) {
+            try { localVideoView.clearImage() } catch (_: Exception) {}
+            localCameraOffOverlay.visibility = View.VISIBLE
         } else {
-            // Camera is on — live frames will naturally replace any black; just hide the overlay
             localCameraOffOverlay.visibility = View.GONE
+        }
+
+        val isLargeFeedVideoOff = if (isLocalLarge) isVideoOff else isRemoteVideoOff
+        if (isLargeFeedVideoOff) {
+            try { remoteVideoView.clearImage() } catch (_: Exception) {}
+            remoteCameraOffOverlay.visibility = View.VISIBLE
+        } else {
+            remoteCameraOffOverlay.visibility = View.GONE
+        }
+    }
+
+    fun setRemoteVideoOffState(videoOff: Boolean) {
+        runOnUiThread {
+            isRemoteVideoOffSignaled = videoOff
+            updateLocalCameraOffState()
+            refreshPipPreconnectHeader()
+        }
+    }
+
+    fun setRemoteVideoOffHeuristicState(videoOff: Boolean) {
+        runOnUiThread {
+            isRemoteVideoOffHeuristic = videoOff
+            updateLocalCameraOffState()
+            refreshPipPreconnectHeader()
         }
     }
     /**
@@ -959,6 +1039,7 @@ class CallActivity : AppCompatActivity() {
                 if (isNewTrack) {
                     remoteFirstFrameRendered = false
                     lastRemoteFrameAtMs = 0L
+                    refreshPipPreconnectHeader()
                 }
 
                 track.addSink(remoteProxySink)
@@ -1069,6 +1150,7 @@ class CallActivity : AppCompatActivity() {
                     finish()
                 }
             }
+            refreshPipPreconnectHeader()
         }
     }
 
@@ -1082,11 +1164,13 @@ class CallActivity : AppCompatActivity() {
         if (isInPictureInPictureMode) {
             // Hide controls in PiP mode
             controlsContainer.visibility = View.GONE
-            topBar.visibility = View.GONE
             gradientTop.visibility = View.GONE
             gradientBottom.visibility = View.GONE
             connectingOverlay.visibility = View.GONE
-            
+
+            // Keep PiP strictly single-video: never render the local mini preview there.
+            // For pre-connect/minimize-before-first-frame, show only the remote user name.
+            refreshPipPreconnectHeader()
             // Move localVideoContainer off-screen using translation instead of changing visibility.
             // CRITICAL: Setting INVISIBLE/GONE on a parent that contains a SurfaceViewRenderer
             // propagates to the SurfaceView child and destroys its EGL surface, causing crashes
@@ -1100,12 +1184,16 @@ class CallActivity : AppCompatActivity() {
             topBar.visibility = View.VISIBLE
             gradientTop.visibility = View.VISIBLE
             gradientBottom.visibility = View.VISIBLE
+            pipPreconnectOverlay.visibility = View.GONE
 
             if (!isConnected) {
                 connectingOverlay.visibility = View.VISIBLE
             }
             
             localVideoContainer.translationX = 0f
+            if (isConnected) {
+                callTimer.visibility = View.VISIBLE
+            }
             // Restore alpha that enterPipSafely() set to 0f for the PiP snapshot.
             // That zero-alpha is never reset on the success path, so without this line
             // the card is back in position but fully transparent — tapping it triggers

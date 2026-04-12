@@ -1,15 +1,28 @@
-import { Suspense, lazy, useEffect, useRef } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef } from "react";
 import { Capacitor } from "@capacitor/core";
 import useAppStore from "@/store";
-import { useSocket } from "@/context/SocketContext";
+import {
+  useSocket,
+  queueCallEndForReconnect,
+  queueCallMediaStateForReconnect,
+} from "@/context/SocketContext";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import axios from "axios";
-import { GET_TURN_CREDENTIALS } from "@/utils/constants";
+import { GET_TURN_CREDENTIALS, HOST } from "@/utils/constants";
+import { finalizeCallReliable } from "@/utils/callFinalize";
 
 const AudioCallScreen = lazy(() => import("@/components/AudioCallScreen"));
 const VideoCallScreen = lazy(() => import("@/components/VideoCallScreen"));
 
+const normalizeId = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value._id) return value._id.toString();
+  return value.toString();
+};
+
 const NativeCallHandler = () => {
+  const MEDIA_STATE_RESYNC_MS = 4000;
   const {
     activeCall,
     clearActiveCall,
@@ -37,6 +50,16 @@ const NativeCallHandler = () => {
   const callUiVisibleRef = useRef(true);
   const uiStateProbeTokenRef = useRef(0);
   const uiStateProbeTimeoutRef = useRef(null);
+  const localVideoStateSyncIntervalRef = useRef(null);
+  const lastBroadcastLocalVideoOffRef = useRef(null);
+  const lastMediaStateEmitAtRef = useRef(0);
+  const connectionProbeTimeoutRef = useRef(null);
+  const connectionProbeInFlightRef = useRef(false);
+  const lastConnectionStateRef = useRef("new");
+  const lastInactiveProbeAtRef = useRef(0);
+  const callHeartbeatIntervalRef = useRef(null);
+  const outgoingMediaSeqRef = useRef(0);
+  const latestIncomingMediaSeqRef = useRef(-1);
   // Bug B fix: store named socket handler references so cleanup can unregister
   // exactly those handlers. socket.off("event") with no reference removes ALL
   // listeners for that event — including the global SocketContext handler — which
@@ -66,10 +89,19 @@ const NativeCallHandler = () => {
     clearPeerConnectionRetryTimeout();
     clearCallerOfferRetryTimeout();
     clearAcceptRetryInterval();
+    clearLocalVideoStateSyncInterval();
+    clearConnectionProbeTimeout();
     peerConnectionCreatingRef.current = false;
+    connectionProbeInFlightRef.current = false;
+    lastConnectionStateRef.current = "closed";
+    lastInactiveProbeAtRef.current = 0;
+    outgoingMediaSeqRef.current = 0;
+    latestIncomingMediaSeqRef.current = -1;
     remoteOfferSeenRef.current = false;
     localOfferSentRef.current = false;
     lastSyncedStartRef.current = 0;
+    lastBroadcastLocalVideoOffRef.current = null;
+    lastMediaStateEmitAtRef.current = 0;
   };
 
   const clearSyncRetryTimeout = () => {
@@ -106,6 +138,115 @@ const NativeCallHandler = () => {
       clearTimeout(uiStateProbeTimeoutRef.current);
       uiStateProbeTimeoutRef.current = null;
     }
+  };
+
+  const clearConnectionProbeTimeout = () => {
+    if (connectionProbeTimeoutRef.current) {
+      clearTimeout(connectionProbeTimeoutRef.current);
+      connectionProbeTimeoutRef.current = null;
+    }
+  };
+
+  const clearLocalVideoStateSyncInterval = () => {
+    if (localVideoStateSyncIntervalRef.current) {
+      clearInterval(localVideoStateSyncIntervalRef.current);
+      localVideoStateSyncIntervalRef.current = null;
+    }
+  };
+
+  const clearCallHeartbeatInterval = () => {
+    if (callHeartbeatIntervalRef.current) {
+      clearInterval(callHeartbeatIntervalRef.current);
+      callHeartbeatIntervalRef.current = null;
+    }
+  };
+
+  const emitCallEndReliable = useCallback(({ to, callId, reason } = {}) => {
+    if (!to) return;
+    const payload = {
+      to,
+      ...(callId ? { callId } : {}),
+      ...(reason ? { reason } : {}),
+    };
+    const callSnapshot = useAppStore.getState().activeCall;
+    void finalizeCallReliable({
+      socket,
+      ...payload,
+      callStartedAt: callSnapshot?.callStartedAt,
+    })
+      .then((result) => {
+        if (result?.ok) return;
+        if (payload.callId) {
+          queueCallEndForReconnect(payload);
+        }
+      })
+      .catch(() => {
+        if (payload.callId) {
+          queueCallEndForReconnect(payload);
+        }
+      });
+  }, [socket]);
+
+  const emitLocalVideoState = (videoOff, callSnapshot = null) => {
+    const currentCall = callSnapshot || useAppStore.getState().activeCall;
+    if (!currentCall) return;
+    const to = currentCall.otherUserId || currentCall.callerId;
+    if (!to || !currentCall.callId) return;
+    const mediaSeq = outgoingMediaSeqRef.current + 1;
+    outgoingMediaSeqRef.current = mediaSeq;
+    const payload = {
+      to,
+      callId: currentCall.callId,
+      videoOff: Boolean(videoOff),
+      mediaSeq,
+    };
+    if (!socket?.connected) {
+      queueCallMediaStateForReconnect(payload);
+      return;
+    }
+    socket.emit("call:media-state", payload);
+    window.setTimeout(() => {
+      if (socket.connected) {
+        socket.emit("call:media-state", payload);
+      } else {
+        queueCallMediaStateForReconnect(payload);
+      }
+    }, 180);
+    window.setTimeout(() => {
+      if (socket.connected) {
+        socket.emit("call:media-state", payload);
+      } else {
+        queueCallMediaStateForReconnect(payload);
+      }
+    }, 700);
+    lastMediaStateEmitAtRef.current = Date.now();
+  };
+
+  const startLocalVideoStateSync = (callSnapshot = null) => {
+    clearLocalVideoStateSyncInterval();
+    localVideoStateSyncIntervalRef.current = setInterval(async () => {
+      if (callFinalizedRef.current || !nativeReadyRef.current) return;
+      try {
+        const state = await NativeCallPlugin.getLocalVideoState();
+        const isVideoOff = Boolean(state?.isVideoOff);
+        const prev = lastBroadcastLocalVideoOffRef.current;
+        if (prev === null) {
+          lastBroadcastLocalVideoOffRef.current = isVideoOff;
+          emitLocalVideoState(isVideoOff, callSnapshot);
+          return;
+        }
+        if (prev !== isVideoOff) {
+          lastBroadcastLocalVideoOffRef.current = isVideoOff;
+          emitLocalVideoState(isVideoOff, callSnapshot);
+          return;
+        }
+        if (Date.now() - lastMediaStateEmitAtRef.current >= MEDIA_STATE_RESYNC_MS) {
+          emitLocalVideoState(isVideoOff, callSnapshot);
+        }
+      } catch {
+        // Best-effort sync only.
+      }
+    }, 1200);
   };
 
   const syncStateFromNative = async (token) => {
@@ -198,11 +339,89 @@ const NativeCallHandler = () => {
       callUiVisibleRef.current = true;
       remoteOfferSeenRef.current = false;
       localOfferSentRef.current = false;
+      lastBroadcastLocalVideoOffRef.current = null;
+      lastMediaStateEmitAtRef.current = 0;
+      lastConnectionStateRef.current = "new";
+      lastInactiveProbeAtRef.current = 0;
+      outgoingMediaSeqRef.current = 0;
+      latestIncomingMediaSeqRef.current = -1;
+    clearLocalVideoStateSyncInterval();
+    clearCallHeartbeatInterval();
+    clearConnectionProbeTimeout();
+      connectionProbeInFlightRef.current = false;
       clearAcceptRetryInterval();
 
       // Register socket signaling handlers immediately so early offer/ICE packets
       // are not dropped while native startup is in progress.
-      const onOffer = ({ description }) => {
+      const matchesCurrentCall = ({ from, callId } = {}) => {
+        const expectedFrom = activeCall.otherUserId || activeCall.callerId;
+        const incomingCallId = callId?.toString?.() || callId || "";
+        const currentCallId = activeCall.callId?.toString?.() || activeCall.callId || "";
+        const normalizedFrom = from?.toString?.() || from || "";
+        const normalizedExpectedFrom =
+          expectedFrom?.toString?.() || expectedFrom || "";
+
+        if (incomingCallId && currentCallId && incomingCallId !== currentCallId) {
+          return false;
+        }
+        if (
+          normalizedFrom &&
+          normalizedExpectedFrom &&
+          normalizedFrom !== normalizedExpectedFrom
+        ) {
+          return false;
+        }
+        return true;
+      };
+
+      const matchesCallEnd = ({ from, callId } = {}) => {
+        const currentCall = useAppStore.getState().activeCall;
+        if (!currentCall) return false;
+        const normalizedFrom = normalizeId(from);
+        const normalizedExpectedFrom = normalizeId(
+          currentCall.otherUserId || currentCall.callerId,
+        );
+        const incomingCallId = normalizeId(callId);
+        const currentCallId = normalizeId(currentCall.callId);
+
+        // If sender identity is present and matches the current peer, accept end.
+        // This avoids missing remote hangup when callId drifts due races/reuse.
+        if (normalizedFrom && normalizedExpectedFrom) {
+          return normalizedFrom === normalizedExpectedFrom;
+        }
+
+        // Fallback to callId match when sender is not available.
+        if (incomingCallId && currentCallId) {
+          return incomingCallId === currentCallId;
+        }
+
+        // If payload lacks identifiers, still accept as authoritative remote end
+        // because this event is emitted directly to the target participant.
+        return !normalizedFrom && !incomingCallId;
+      };
+
+      const matchesMediaState = ({ from, callId } = {}) => {
+        const expectedFrom = activeCall.otherUserId || activeCall.callerId;
+        const normalizedFrom = from?.toString?.() || from || "";
+        const normalizedExpectedFrom =
+          expectedFrom?.toString?.() || expectedFrom || "";
+        const incomingCallId = callId?.toString?.() || callId || "";
+        const currentCallId = activeCall.callId?.toString?.() || activeCall.callId || "";
+
+        // Prefer peer match for media-state updates to tolerate occasional callId drift.
+        if (normalizedFrom && normalizedExpectedFrom) {
+          return normalizedFrom === normalizedExpectedFrom;
+        }
+
+        if (incomingCallId && currentCallId) {
+          return incomingCallId === currentCallId;
+        }
+
+        return false;
+      };
+
+      const onOffer = ({ description, from, callId }) => {
+        if (!matchesCurrentCall({ from, callId })) return;
         if (!description?.sdp) return;
         remoteOfferSeenRef.current = true;
         clearAcceptRetryInterval();
@@ -212,12 +431,14 @@ const NativeCallHandler = () => {
         }).catch(() => { });
       };
 
-      const onAnswer = ({ description }) => {
+      const onAnswer = ({ description, from, callId }) => {
+        if (!matchesCurrentCall({ from, callId })) return;
         if (!description?.sdp) return;
         NativeCallPlugin.handleRemoteAnswer({ sdp: description.sdp }).catch(() => { });
       };
 
-      const onCandidate = ({ candidate }) => {
+      const onCandidate = ({ candidate, from, callId }) => {
+        if (!matchesCurrentCall({ from, callId })) return;
         if (!candidate?.candidate) return;
         NativeCallPlugin.addIceCandidate({
           candidate: candidate.candidate,
@@ -226,25 +447,47 @@ const NativeCallHandler = () => {
         }).catch(() => { });
       };
 
-      const onCandidates = ({ candidates }) => {
+      const onCandidates = ({ candidates, from, callId }) => {
+        if (!matchesCurrentCall({ from, callId })) return;
         if (!Array.isArray(candidates) || candidates.length === 0) return;
         NativeCallPlugin.addIceCandidates({ candidates }).catch(() => { });
       };
 
-      const onEnd = () => {
+      const onEnd = ({ from, callId } = {}) => {
+        if (!matchesCallEnd({ from, callId })) return;
         remoteEndInProgressRef.current = true;
-        NativeCallPlugin.endCall().catch(() => {
+        NativeCallPlugin.endCall({ notifyRemote: false }).catch(() => {
           remoteEndInProgressRef.current = false;
         });
         finalizeCallState();
       };
 
-      socketHandlersRef.current = { onOffer, onAnswer, onCandidate, onCandidates, onEnd };
+      const onMediaState = ({ from, callId, videoOff, mediaSeq } = {}) => {
+        if (!matchesMediaState({ from, callId })) return;
+        const parsedSeq = Number(mediaSeq);
+        if (Number.isFinite(parsedSeq)) {
+          if (parsedSeq <= latestIncomingMediaSeqRef.current) return;
+          latestIncomingMediaSeqRef.current = parsedSeq;
+        }
+        NativeCallPlugin.setRemoteVideoOff({
+          videoOff: Boolean(videoOff),
+        }).catch(() => { });
+      };
+
+      socketHandlersRef.current = {
+        onOffer,
+        onAnswer,
+        onCandidate,
+        onCandidates,
+        onEnd,
+        onMediaState,
+      };
       socket.on("call:offer", onOffer);
       socket.on("call:answer", onAnswer);
       socket.on("call:ice-candidate", onCandidate);
       socket.on("call:ice-candidates", onCandidates);
       socket.on("call:end", onEnd);
+      socket.on("call:media-state", onMediaState);
 
       try {
         nativeReadyRef.current = false;
@@ -261,14 +504,22 @@ const NativeCallHandler = () => {
           await NativeCallPlugin.addListener("onLocalOffer", (data) => {
             localOfferSentRef.current = true;
             const to = activeCall.otherUserId || activeCall.callerId;
-            socket.emit("call:offer", { to, description: data });
+            socket.emit("call:offer", {
+              to,
+              description: data,
+              callId: activeCall.callId,
+            });
           }),
         );
 
         listenersRef.current.push(
           await NativeCallPlugin.addListener("onLocalAnswer", (data) => {
             const to = activeCall.otherUserId || activeCall.callerId;
-            socket.emit("call:answer", { to, description: data });
+            socket.emit("call:answer", {
+              to,
+              description: data,
+              callId: activeCall.callId,
+            });
           }),
         );
 
@@ -278,7 +529,119 @@ const NativeCallHandler = () => {
             socket.emit("call:ice-candidates", {
               to,
               candidates: data.candidates,
+              callId: activeCall.callId,
             });
+          }),
+        );
+
+        listenersRef.current.push(
+          await NativeCallPlugin.addListener("onLocalVideoToggled", (data) => {
+            const isVideoOff = Boolean(data?.isVideoOff);
+            lastBroadcastLocalVideoOffRef.current = isVideoOff;
+            emitLocalVideoState(isVideoOff, activeCall);
+          }),
+        );
+
+        listenersRef.current.push(
+          await NativeCallPlugin.addListener("onRemoteControlEnd", () => {
+            remoteEndInProgressRef.current = true;
+          }),
+        );
+
+        listenersRef.current.push(
+          await NativeCallPlugin.addListener("onConnectionStateChanged", (data) => {
+            const state = (data?.state || "").toLowerCase();
+            lastConnectionStateRef.current = state || "unknown";
+            if (
+              state === "connected" ||
+              state === "completed" ||
+              state === "checking"
+            ) {
+              clearConnectionProbeTimeout();
+              connectionProbeInFlightRef.current = false;
+              return;
+            }
+            if (state !== "failed") return;
+
+            clearConnectionProbeTimeout();
+            const probeDelayMs = 260;
+            connectionProbeTimeoutRef.current = window.setTimeout(() => {
+              if (callFinalizedRef.current || !socket) return;
+              if (connectionProbeInFlightRef.current) return;
+              if (
+                lastConnectionStateRef.current !== "failed" &&
+                lastConnectionStateRef.current !== "disconnected"
+              ) {
+                return;
+              }
+              const currentCall = useAppStore.getState().activeCall;
+              const peerId = currentCall?.otherUserId || currentCall?.callerId;
+              const callId = currentCall?.callId;
+              if (!peerId || !callId) return;
+
+              connectionProbeInFlightRef.current = true;
+              const probeOnce = (onResult) => {
+                let settled = false;
+                const probeGuard = window.setTimeout(() => {
+                  if (settled) return;
+                  settled = true;
+                  onResult(true);
+                }, 1500);
+
+                socket.emit("call:is-active", { callId, peerId }, (result = {}) => {
+                  if (settled) return;
+                  settled = true;
+                  clearTimeout(probeGuard);
+                  onResult(Boolean(result.active));
+                });
+              };
+
+              probeOnce((isActiveNow) => {
+                if (isActiveNow) {
+                  connectionProbeInFlightRef.current = false;
+                  return;
+                }
+
+                const now = Date.now();
+                if (now - lastInactiveProbeAtRef.current < 900) {
+                  connectionProbeInFlightRef.current = false;
+                  return;
+                }
+                lastInactiveProbeAtRef.current = now;
+
+                window.setTimeout(() => {
+                  if (callFinalizedRef.current || !socket) {
+                    connectionProbeInFlightRef.current = false;
+                    return;
+                  }
+                  if (
+                    lastConnectionStateRef.current !== "failed" &&
+                    lastConnectionStateRef.current !== "disconnected"
+                  ) {
+                    connectionProbeInFlightRef.current = false;
+                    return;
+                  }
+
+                  probeOnce((isActiveConfirm) => {
+                    connectionProbeInFlightRef.current = false;
+                    if (callFinalizedRef.current) return;
+                    if (isActiveConfirm) return;
+                    if (
+                      lastConnectionStateRef.current !== "failed" &&
+                      lastConnectionStateRef.current !== "disconnected"
+                    ) {
+                      return;
+                    }
+
+                    remoteEndInProgressRef.current = true;
+                    NativeCallPlugin.endCall({ notifyRemote: false }).catch(() => {
+                      remoteEndInProgressRef.current = false;
+                    });
+                    finalizeCallState();
+                  });
+                }, 520);
+              });
+            }, probeDelayMs);
           }),
         );
 
@@ -288,7 +651,7 @@ const NativeCallHandler = () => {
             remoteEndInProgressRef.current = false;
             if (shouldNotifyRemote) {
               const to = activeCall.otherUserId || activeCall.callerId;
-              if (to) socket.emit("call:end", { to });
+              emitCallEndReliable({ to, callId: activeCall.callId });
             }
             finalizeCallState();
           }),
@@ -309,11 +672,13 @@ const NativeCallHandler = () => {
             }
 
             const to = currentCall.otherUserId || currentCall.callerId;
-            if (to) {
-              socket.emit("call:end", { to, reason: "local_video_failure" });
-            }
+            emitCallEndReliable({
+              to,
+              callId: currentCall.callId,
+              reason: "local_video_failure",
+            });
             remoteEndInProgressRef.current = true;
-            NativeCallPlugin.endCall().catch(() => {
+            NativeCallPlugin.endCall({ reason: "local_video_failure" }).catch(() => {
               remoteEndInProgressRef.current = false;
             });
             alert("Your camera could not start reliably. Please retry the call.");
@@ -329,7 +694,21 @@ const NativeCallHandler = () => {
             isCaller: activeCall.isCaller,
             otherUserName: activeCall.otherUserName || "Unknown",
             otherUserImage: activeCall.otherUserImage || "",
+            callId: activeCall.callId,
+            peerId: activeCall.otherUserId || activeCall.callerId || "",
+            apiBaseUrl: HOST,
+            callStartedAt: activeCall.callStartedAt || undefined,
           });
+          await NativeCallPlugin.setRemoteVideoOff({ videoOff: false });
+          try {
+            const localVideoState = await NativeCallPlugin.getLocalVideoState();
+            const isVideoOff = Boolean(localVideoState?.isVideoOff);
+            lastBroadcastLocalVideoOffRef.current = isVideoOff;
+            emitLocalVideoState(isVideoOff, activeCall);
+          } catch {
+            lastBroadcastLocalVideoOffRef.current = null;
+          }
+          startLocalVideoStateSync(activeCall);
           nativeReadyRef.current = true;
           pipModeRef.current = false;
           callUiVisibleRef.current = true;
@@ -339,8 +718,12 @@ const NativeCallHandler = () => {
           // If the user denied permissions, the plugin rejects. We must abort the call.
           alert(`Could not start call: ${startError.message || "Permissions denied"}`);
           const to = activeCall?.otherUserId || activeCall?.callerId;
-          if (to) socket.emit("call:end", { to, reason: "permission_denied" });
-          await NativeCallPlugin.endCall().catch(() => { });
+          emitCallEndReliable({
+            to,
+            callId: activeCall?.callId,
+            reason: "permission_denied",
+          });
+          await NativeCallPlugin.endCall({ reason: "permission_denied" }).catch(() => { });
           finalizeCallState();
           return; // Abort further WebRTC setup
         }
@@ -469,10 +852,20 @@ const NativeCallHandler = () => {
       clearPeerConnectionRetryTimeout();
       clearCallerOfferRetryTimeout();
       clearAcceptRetryInterval();
+      clearLocalVideoStateSyncInterval();
+      clearCallHeartbeatInterval();
+      clearConnectionProbeTimeout();
+      connectionProbeInFlightRef.current = false;
+      lastConnectionStateRef.current = "closed";
+      lastInactiveProbeAtRef.current = 0;
+      outgoingMediaSeqRef.current = 0;
+      latestIncomingMediaSeqRef.current = -1;
       peerConnectionCreatingRef.current = false;
       remoteOfferSeenRef.current = false;
       localOfferSentRef.current = false;
       lastSyncedStartRef.current = 0;
+      lastBroadcastLocalVideoOffRef.current = null;
+      lastMediaStateEmitAtRef.current = 0;
       // Bug B fix: unregister with exact handler references so we don't accidentally
       // strip the global SocketContext listeners for these events.
       const h = socketHandlersRef.current;
@@ -481,12 +874,13 @@ const NativeCallHandler = () => {
       socket.off("call:ice-candidate", h.onCandidate);
       socket.off("call:ice-candidates", h.onCandidates);
       socket.off("call:end", h.onEnd);
+      socket.off("call:media-state", h.onMediaState);
       socketHandlersRef.current = {};
       initialized.current = false;
 
       // Crucial: When the React component unmounts (e.g., due to call-rejected clearing activeCall),
       // we must explicitly inform the Native plugin to destroy the CallActivity.
-      NativeCallPlugin.endCall().catch(() => { });
+      NativeCallPlugin.endCall({ notifyRemote: false }).catch(() => { });
     };
   }, [
     socket,
@@ -499,7 +893,31 @@ const NativeCallHandler = () => {
     setCallMinimized,
     clearActiveCall,
     clearCallAccepted,
+    emitCallEndReliable,
   ]);
+
+  useEffect(() => {
+    clearCallHeartbeatInterval();
+    if (!socket || !activeCall?.callId) return;
+
+    const emitHeartbeat = () => {
+      if (!socket.connected) return;
+      const currentCall = useAppStore.getState().activeCall;
+      if (!currentCall?.callId) return;
+      const peerId = currentCall.otherUserId || currentCall.callerId;
+      socket.emit("call:heartbeat", {
+        callId: currentCall.callId,
+        ...(peerId ? { peerId } : {}),
+      });
+    };
+
+    emitHeartbeat();
+    callHeartbeatIntervalRef.current = setInterval(emitHeartbeat, 15000);
+
+    return () => {
+      clearCallHeartbeatInterval();
+    };
+  }, [socket, activeCall?.callId, activeCall?.otherUserId, activeCall?.callerId]);
 
   // Handle callAccepted for caller
   useEffect(() => {
@@ -563,20 +981,30 @@ const NativeCallHandler = () => {
         // Tear down both sides cleanly.
         console.error("[NativeCallHandler] PeerConnection creation failed — terminating call");
         const to = activeCall?.otherUserId || activeCall?.callerId;
-        if (to) {
-          const h = socketHandlersRef.current;
-          // Temporarily suppress our own onEnd handler so we don't double-finalize
-          if (h.onEnd) socket.off("call:end", h.onEnd);
-          socket.emit("call:end", { to, reason: "peer_connection_failed" });
-          if (h.onEnd) socket.on("call:end", h.onEnd);
-        }
-        await NativeCallPlugin.endCall().catch(() => { });
+        const h = socketHandlersRef.current;
+        // Temporarily suppress our own onEnd handler so we don't double-finalize.
+        if (h.onEnd) socket.off("call:end", h.onEnd);
+        emitCallEndReliable({
+          to,
+          callId: activeCall?.callId,
+          reason: "peer_connection_failed",
+        });
+        if (h.onEnd) socket.on("call:end", h.onEnd);
+        await NativeCallPlugin.endCall({ reason: "peer_connection_failed" }).catch(() => { });
         finalizeCallState();
       }
     };
 
     createPC();
-  }, [callAccepted, activeCall?.isCaller, clearCallAccepted]);
+  }, [
+    callAccepted,
+    activeCall?.isCaller,
+    activeCall?.callId,
+    activeCall?.otherUserId,
+    activeCall?.callerId,
+    clearCallAccepted,
+    emitCallEndReliable,
+  ]);
 
   useEffect(() => {
     if (!activeCall?.callStartedAt) return;
@@ -590,6 +1018,7 @@ const CallContainer = () => {
   const { activeCall } = useAppStore();
 
   if (!activeCall) return null;
+  if (!activeCall.callId) return null;
 
   // Native Capacitor: only video calls use native plugin.
   // Audio calls use the shared web component for parity across platforms.

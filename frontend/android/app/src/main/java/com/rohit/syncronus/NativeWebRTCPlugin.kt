@@ -8,6 +8,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.util.Log
+import android.webkit.CookieManager
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -15,6 +16,13 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
+import java.nio.ByteBuffer
+import java.net.HttpURLConnection
+import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import org.json.JSONObject
 import org.webrtc.*
 import java.util.Timer
@@ -39,6 +47,13 @@ class NativeWebRTCPlugin : Plugin() {
         private const val REMOTE_RECOVERY_COOLDOWN_MS = 6000L
         private const val LOCAL_RECOVERY_COOLDOWN_MS = 8000L
         private const val UI_RESUME_RECOVERY_COOLDOWN_MS = 2500L
+        private const val UI_RESUME_HEALTH_PROBE_DELAY_MS = 900L
+        private const val DISCONNECT_FAILSAFE_MS = 12000L
+        private const val FAILED_FAILSAFE_MS = 7000L
+        private const val VIDEO_TOGGLE_MIN_INTERVAL_MS = 280L
+        private const val CONTROL_DATA_CHANNEL_LABEL = "call-control"
+        private const val NATIVE_FINALIZE_CONNECT_TIMEOUT_MS = 2500
+        private const val NATIVE_FINALIZE_READ_TIMEOUT_MS = 3500
         var instance: NativeWebRTCPlugin? = null
             private set
     }
@@ -58,6 +73,9 @@ class NativeWebRTCPlugin : Plugin() {
     private var localVideoSource: org.webrtc.VideoSource? = null
     private var localVideoSender: RtpSender? = null
     private var remoteVideoTrack: VideoTrack? = null
+    private var controlDataChannel: DataChannel? = null
+    private var localControlChannelSeq: Long = 0L
+    private var latestRemoteControlSeq: Long = -1L
     private var videoCapturer: CameraVideoCapturer? = null
     private var eglBase: EglBase? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
@@ -69,10 +87,14 @@ class NativeWebRTCPlugin : Plugin() {
     private val candidateBuffer = mutableListOf<IceCandidate>()
     private var candidateTimer: Timer? = null
     private var connectionTimeout: Timer? = null
+    private var disconnectFailsafeTimer: Timer? = null
     private var freezeMonitorTimer: Timer? = null
     private var lastInboundFramesDecoded: Long = -1L
     private var lastInboundBytesReceived: Long = -1L
+    private var lastInboundAudioBytesReceived: Long = -1L
     private var consecutiveRemoteFreezeChecks = 0
+    private var consecutiveRemoteVideoOffChecks = 0
+    private var isRemoteVideoOffHeuristic = false
     private var lastRemoteRecoveryAtMs: Long = 0L
     private var remoteRecoveryEscalation = 0
     private var lastOutboundFramesSent: Long = -1L
@@ -85,6 +107,7 @@ class NativeWebRTCPlugin : Plugin() {
     // State
     private var isMuted = false
     private var isVideoOff = false
+    private var isRemoteVideoOff = false
     private var facingMode = "user" // "user" or "environment"
     private var isPolite = false
     private var makingOffer = false
@@ -97,7 +120,16 @@ class NativeWebRTCPlugin : Plugin() {
     private var activeIsCaller: Boolean = false
     private var activeOtherUserName: String = "Unknown"
     private var activeOtherUserImage: String = ""
+    private var activeCallId: String = ""
+    private var activePeerId: String = ""
+    private var activeApiBaseUrl: String = ""
+    private var activeCallStartedAtEpochMs: Long = 0L
+    private var nativeFinalizeAttempted: Boolean = false
+    private var pendingControlMessage: String? = null
     private var lastUiResumeRecoveryAtMs: Long = 0L
+    @Volatile private var uiResumeRecoverySeq: Long = 0L
+    private var hasEverConnected: Boolean = false
+    private var lastVideoToggleAtMs: Long = 0L
     @Volatile
     private var isCleaningUp = false
     // Native audio routing state for WebView-based audio calls (Capacitor audio screen).
@@ -161,12 +193,22 @@ class NativeWebRTCPlugin : Plugin() {
         val isCaller = call.getBoolean("isCaller", false) ?: false
         val otherUserName = call.getString("otherUserName", "Unknown") ?: "Unknown"
         val otherUserImage = call.getString("otherUserImage", "") ?: ""
+        val callId = call.getString("callId", "") ?: ""
+        val peerId = call.getString("peerId", "") ?: ""
+        val apiBaseUrl = call.getString("apiBaseUrl", "") ?: ""
+        val callStartedAt = call.getLong("callStartedAt") ?: 0L
 
         isPolite = !isCaller
         activeCallType = callType
         activeIsCaller = isCaller
         activeOtherUserName = otherUserName
         activeOtherUserImage = otherUserImage
+        activeCallId = callId
+        activePeerId = peerId
+        activeApiBaseUrl = apiBaseUrl.trim().trimEnd('/')
+        activeCallStartedAtEpochMs = if (callStartedAt > 0L) callStartedAt else 0L
+        nativeFinalizeAttempted = false
+        hasEverConnected = false
 
         if (getPermissionState("camera") != com.getcapacitor.PermissionState.GRANTED ||
             getPermissionState("microphone") != com.getcapacitor.PermissionState.GRANTED) {
@@ -232,7 +274,13 @@ class NativeWebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun endCall(call: PluginCall) {
-        cleanup()
+        val notifyRemote = call.getBoolean("notifyRemote", true) ?: true
+        val reason = call.getString("reason", if (notifyRemote) "hangup" else "remote_end")
+            ?: if (notifyRemote) "hangup" else "remote_end"
+        if (notifyRemote) {
+            sendCallEndViaDataChannel("hangup")
+        }
+        cleanup(reason)
         call.resolve(JSObject().put("success", true))
     }
 
@@ -366,6 +414,8 @@ class NativeWebRTCPlugin : Plugin() {
                 val jsState = when (state) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
+                        hasEverConnected = true
+                        clearDisconnectFailsafeTimer()
                         if (callStartTime == 0L) {
                             callStartTime = android.os.SystemClock.elapsedRealtime()
                         }
@@ -376,6 +426,12 @@ class NativeWebRTCPlugin : Plugin() {
                     }
                     PeerConnection.IceConnectionState.DISCONNECTED -> {
                         stopRemoteFreezeMonitor()
+                        if (hasEverConnected) {
+                            scheduleDisconnectFailsafe(
+                                DISCONNECT_FAILSAFE_MS,
+                                "ice_disconnected_timeout",
+                            )
+                        }
                         connectionTimeout = Timer().apply {
                             schedule(object : TimerTask() {
                                 override fun run() {
@@ -390,11 +446,18 @@ class NativeWebRTCPlugin : Plugin() {
                     }
                     PeerConnection.IceConnectionState.FAILED -> {
                         stopRemoteFreezeMonitor()
+                        if (hasEverConnected) {
+                            scheduleDisconnectFailsafe(
+                                FAILED_FAILSAFE_MS,
+                                "ice_failed_timeout",
+                            )
+                        }
                         Log.d(TAG, "ICE Connection FAILED. Restarting ICE.")
                         safeRestartIce("ice_failed")
                         "failed"
                     }
                     PeerConnection.IceConnectionState.CLOSED -> {
+                        clearDisconnectFailsafeTimer()
                         stopRemoteFreezeMonitor()
                         "closed"
                     }
@@ -432,7 +495,9 @@ class NativeWebRTCPlugin : Plugin() {
             override fun onIceConnectionReceivingChange(receiving: Boolean) {}
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
             override fun onRemoveStream(stream: MediaStream) {}
-            override fun onDataChannel(channel: DataChannel) {}
+            override fun onDataChannel(channel: DataChannel) {
+                attachControlDataChannel(channel)
+            }
             override fun onRenegotiationNeeded() {
                 // Native can emit renegotiation on both peers while initial setup is still racing.
                 // To avoid startup glare/offer ping-pong, callee (polite peer) should not create
@@ -452,6 +517,8 @@ class NativeWebRTCPlugin : Plugin() {
             call.reject("Failed to create PeerConnection")
             return
         }
+
+        ensureControlDataChannelForCaller()
 
         // Add local tracks with a unique dynamically generated stream ID (prevents App-to-App collision dropping)
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(localStreamId)) }
@@ -652,12 +719,194 @@ class NativeWebRTCPlugin : Plugin() {
         localAudioTrack?.setEnabled(!isMuted)
     }
 
-    fun toggleVideoNative() {
-        isVideoOff = !isVideoOff
-        applyLocalVideoSendState()
+    private fun shouldThrottleVideoToggle(): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastVideoToggleAtMs < VIDEO_TOGGLE_MIN_INTERVAL_MS) {
+            return true
+        }
+        lastVideoToggleAtMs = now
+        return false
     }
 
+    fun toggleVideoNative() {
+        if (shouldThrottleVideoToggle()) return
+        isVideoOff = !isVideoOff
+        applyLocalVideoSendState()
+        sendVideoStateViaDataChannel(isVideoOff)
+        notifyListeners("onLocalVideoToggled", JSObject().put("isVideoOff", isVideoOff))
+    }
+
+    fun isVideoOffState(): Boolean = isVideoOff
+
+    fun setRemoteVideoOffNative(videoOff: Boolean) {
+        isRemoteVideoOff = videoOff
+        CallActivity.instance?.setRemoteVideoOffState(videoOff)
+    }
+
+    fun isRemoteVideoOffState(): Boolean = isRemoteVideoOff
+
     fun isFrontFacingCamera(): Boolean = facingMode == "user"
+
+    private fun attachControlDataChannel(channel: DataChannel) {
+        if (channel.label() != CONTROL_DATA_CHANNEL_LABEL) return
+        if (controlDataChannel === channel) return
+
+        controlDataChannel?.let { existing ->
+            try {
+                existing.unregisterObserver()
+            } catch (_: Exception) {
+            }
+            try {
+                existing.close()
+            } catch (_: Exception) {
+            }
+            try {
+                existing.dispose()
+            } catch (_: Exception) {
+            }
+        }
+
+        controlDataChannel = channel
+        channel.registerObserver(object : DataChannel.Observer {
+            override fun onBufferedAmountChange(previousAmount: Long) {}
+
+            override fun onStateChange() {
+                val state = channel.state()
+                Log.d(TAG, "Control DataChannel state: $state")
+                if (state == DataChannel.State.OPEN) {
+                    flushPendingControlMessage()
+                    sendVideoStateViaDataChannel(isVideoOff)
+                }
+            }
+
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                if (buffer.binary) return
+                try {
+                    val data = buffer.data
+                    val bytes = ByteArray(data.remaining())
+                    data.get(bytes)
+                    val payload = String(bytes, Charsets.UTF_8)
+                    val obj = JSONObject(payload)
+                    when (obj.optString("type")) {
+                        "video_state" -> {
+                            val remoteSeq = if (obj.has("seq")) obj.optLong("seq", -1L) else -1L
+                            if (remoteSeq >= 0L && remoteSeq <= latestRemoteControlSeq) {
+                                return
+                            }
+                            if (remoteSeq >= 0L) {
+                                latestRemoteControlSeq = remoteSeq
+                            }
+                            setRemoteVideoOffNative(obj.optBoolean("videoOff", false))
+                        }
+                        "call_end" -> {
+                            notifyListeners(
+                                "onRemoteControlEnd",
+                                JSObject().put("reason", obj.optString("reason", "remote_end")),
+                            )
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                if (!isCleaningUp) {
+                                    cleanup("remote_end")
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed parsing control DataChannel message", e)
+                }
+            }
+        })
+
+        if (channel.state() == DataChannel.State.OPEN) {
+            flushPendingControlMessage()
+            sendVideoStateViaDataChannel(isVideoOff)
+        }
+    }
+
+    private fun ensureControlDataChannelForCaller() {
+        if (activeCallType != "video" || !activeIsCaller) return
+        if (controlDataChannel != null) return
+        val pc = peerConnection ?: return
+        try {
+            val init = DataChannel.Init().apply {
+                ordered = true
+            }
+            val channel = pc.createDataChannel(CONTROL_DATA_CHANNEL_LABEL, init)
+            attachControlDataChannel(channel)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed creating control DataChannel", e)
+        }
+    }
+
+    private fun flushPendingControlMessage() {
+        val channel = controlDataChannel ?: return
+        if (channel.state() != DataChannel.State.OPEN) return
+        val pending = pendingControlMessage ?: return
+        try {
+            channel.send(
+                DataChannel.Buffer(
+                    ByteBuffer.wrap(pending.toByteArray(Charsets.UTF_8)),
+                    false,
+                ),
+            )
+            pendingControlMessage = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed flushing pending control DataChannel message", e)
+        }
+    }
+
+    private fun sendVideoStateViaDataChannel(videoOff: Boolean) {
+        if (activeCallType != "video") return
+        val payload = JSONObject().apply {
+            put("type", "video_state")
+            put("videoOff", videoOff)
+            put("seq", ++localControlChannelSeq)
+        }.toString()
+
+        val channel = controlDataChannel
+        if (channel == null || channel.state() != DataChannel.State.OPEN) {
+            pendingControlMessage = payload
+            return
+        }
+
+        try {
+            channel.send(
+                DataChannel.Buffer(
+                    ByteBuffer.wrap(payload.toByteArray(Charsets.UTF_8)),
+                    false,
+                ),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed sending control DataChannel message", e)
+            pendingControlMessage = payload
+        }
+    }
+
+    private fun sendCallEndViaDataChannel(reason: String = "hangup") {
+        if (activeCallType != "video") return
+        val payload = JSONObject().apply {
+            put("type", "call_end")
+            put("reason", reason)
+            put("seq", ++localControlChannelSeq)
+        }.toString()
+
+        val channel = controlDataChannel
+        if (channel == null || channel.state() != DataChannel.State.OPEN) {
+            pendingControlMessage = payload
+            return
+        }
+
+        try {
+            channel.send(
+                DataChannel.Buffer(
+                    ByteBuffer.wrap(payload.toByteArray(Charsets.UTF_8)),
+                    false,
+                ),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed sending call_end over control DataChannel", e)
+            pendingControlMessage = payload
+        }
+    }
 
     fun flipCameraNative() {
         val capturer = videoCapturer ?: return
@@ -672,7 +921,8 @@ class NativeWebRTCPlugin : Plugin() {
 
 
     fun endCallNative() {
-        cleanup()
+        sendCallEndViaDataChannel("hangup")
+        cleanup("hangup")
     }
 
     fun notifyPipModeChange(isPip: Boolean) {
@@ -709,21 +959,108 @@ class NativeWebRTCPlugin : Plugin() {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastUiResumeRecoveryAtMs < UI_RESUME_RECOVERY_COOLDOWN_MS) return
         lastUiResumeRecoveryAtMs = now
+        val recoverySeq = ++uiResumeRecoverySeq
 
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (isCleaningUp || activeCallType != "video" || isVideoOff) return@post
             try {
-                // Re-assert sender wiring and restart capture so OS-paused camera sessions recover
-                // immediately when the user returns from background apps.
+                // Fast path: re-assert sender wiring and renderer binding first.
+                // This avoids unnecessary camera restart on normal PiP/fullscreen transitions.
                 applyLocalVideoSendState()
-                restartLocalVideoCapture()
                 localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
                 if (callActivityActive) {
                     refreshRemoteTrackAttachment()
                 }
+
+                // Slow path: only restart camera if outbound video is truly stalled.
+                val probePc = peerConnection
+                val probeState = probePc?.iceConnectionState()
+                val shouldProbe =
+                    probeState == PeerConnection.IceConnectionState.CONNECTED ||
+                        probeState == PeerConnection.IceConnectionState.COMPLETED
+                if (!shouldProbe) {
+                    return@post
+                }
+                collectOutboundVideoStats { firstFrames, firstBytes ->
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        if (recoverySeq != uiResumeRecoverySeq) return@postDelayed
+                        if (isCleaningUp || activeCallType != "video" || isVideoOff) return@postDelayed
+                        val latestPc = peerConnection
+                        val latestState = latestPc?.iceConnectionState()
+                        val stillConnected =
+                            latestState == PeerConnection.IceConnectionState.CONNECTED ||
+                                latestState == PeerConnection.IceConnectionState.COMPLETED
+                        if (!stillConnected) return@postDelayed
+
+                        collectOutboundVideoStats { latestFrames, latestBytes ->
+                            val hasComparableSamples =
+                                (firstFrames != null && latestFrames != null) ||
+                                    (firstBytes != null && latestBytes != null)
+                            if (!hasComparableSamples) {
+                                // Stats are missing/unreliable on this device path; avoid false restarts.
+                                return@collectOutboundVideoStats
+                            }
+                            val hasProgress =
+                                (firstFrames != null && latestFrames != null && latestFrames > firstFrames) ||
+                                (firstBytes != null && latestBytes != null && latestBytes > firstBytes)
+                            if (hasProgress) {
+                                return@collectOutboundVideoStats
+                            }
+
+                            try {
+                                Log.w(
+                                    TAG,
+                                    "Outbound video appears stalled after resume; restarting local capture."
+                                )
+                                restartLocalVideoCapture()
+                                localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
+                                if (callActivityActive) {
+                                    refreshRemoteTrackAttachment()
+                                }
+                            } catch (restartError: Exception) {
+                                Log.w(TAG, "Resume stall recovery restart failed", restartError)
+                            }
+                        }
+                    }, UI_RESUME_HEALTH_PROBE_DELAY_MS)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "recoverVideoAfterUiResume failed", e)
             }
+        }
+    }
+
+    private fun collectOutboundVideoStats(onResult: (Long?, Long?) -> Unit) {
+        val pc = peerConnection
+        if (pc == null || isCleaningUp) {
+            onResult(null, null)
+            return
+        }
+        try {
+            pc.getStats { report ->
+                var framesSent: Long? = null
+                var bytesSent: Long? = null
+
+                report.statsMap.values.forEach { stats ->
+                    if (stats.type != "outbound-rtp") return@forEach
+                    val kind = (stats.members["kind"] as? String)?.lowercase()
+                    val mediaType = (stats.members["mediaType"] as? String)?.lowercase()
+                    val isVideo =
+                        kind == "video" ||
+                            mediaType == "video" ||
+                            stats.id.contains("video", ignoreCase = true)
+                    if (!isVideo) return@forEach
+
+                    framesSent =
+                        parseStatLong(stats.members["framesSent"])
+                            ?: parseStatLong(stats.members["framesEncoded"])
+                    bytesSent = parseStatLong(stats.members["bytesSent"])
+                }
+
+                onResult(framesSent, bytesSent)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "collectOutboundVideoStats failed", e)
+            onResult(null, null)
         }
     }
 
@@ -764,6 +1101,7 @@ class NativeWebRTCPlugin : Plugin() {
 
         val elapsedSinceStart = maxOf(0L, System.currentTimeMillis() - callStartedAt)
         callStartTime = android.os.SystemClock.elapsedRealtime() - elapsedSinceStart
+        activeCallStartedAtEpochMs = callStartedAt
         CallActivity.instance?.syncTimerBase(callStartTime)
 
         call.resolve(JSObject().put("callStartTime", callStartTime))
@@ -778,9 +1116,31 @@ class NativeWebRTCPlugin : Plugin() {
 
     @PluginMethod
     fun toggleVideo(call: PluginCall) {
+        if (shouldThrottleVideoToggle()) {
+            call.resolve(
+                JSObject()
+                    .put("isVideoOff", isVideoOff)
+                    .put("throttled", true),
+            )
+            return
+        }
         isVideoOff = !isVideoOff
         applyLocalVideoSendState()
+        sendVideoStateViaDataChannel(isVideoOff)
+        notifyListeners("onLocalVideoToggled", JSObject().put("isVideoOff", isVideoOff))
         call.resolve(JSObject().put("isVideoOff", isVideoOff))
+    }
+
+    @PluginMethod
+    fun getLocalVideoState(call: PluginCall) {
+        call.resolve(JSObject().put("isVideoOff", isVideoOff))
+    }
+
+    @PluginMethod
+    fun setRemoteVideoOff(call: PluginCall) {
+        val videoOff = call.getBoolean("videoOff", false) ?: false
+        setRemoteVideoOffNative(videoOff)
+        call.resolve(JSObject().put("isRemoteVideoOff", isRemoteVideoOff))
     }
 
     @PluginMethod
@@ -1625,6 +1985,38 @@ class NativeWebRTCPlugin : Plugin() {
         }
     }
 
+    private fun clearDisconnectFailsafeTimer() {
+        disconnectFailsafeTimer?.cancel()
+        disconnectFailsafeTimer = null
+    }
+
+    private fun scheduleDisconnectFailsafe(delayMs: Long, reason: String) {
+        if (isCleaningUp) return
+        clearDisconnectFailsafeTimer()
+        disconnectFailsafeTimer = Timer().apply {
+            schedule(object : TimerTask() {
+                override fun run() {
+                    val state = peerConnection?.iceConnectionState()
+                    val stillBroken =
+                        state == PeerConnection.IceConnectionState.DISCONNECTED ||
+                            state == PeerConnection.IceConnectionState.FAILED
+                    if (!stillBroken || isCleaningUp) return
+
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (isCleaningUp) return@post
+                        val latestState = peerConnection?.iceConnectionState()
+                        val remainsBroken =
+                            latestState == PeerConnection.IceConnectionState.DISCONNECTED ||
+                                latestState == PeerConnection.IceConnectionState.FAILED
+                        if (!remainsBroken) return@post
+                        Log.w(TAG, "Ending call after prolonged ICE $latestState ($reason)")
+                        cleanup("connection_failed")
+                    }
+                }
+            }, delayMs)
+        }
+    }
+
     private fun applyLocalVideoSendState() {
         val sender = localVideoSender
         val track = localVideoTrack
@@ -1700,7 +2092,11 @@ class NativeWebRTCPlugin : Plugin() {
         freezeMonitorTimer = null
         lastInboundFramesDecoded = -1L
         lastInboundBytesReceived = -1L
+        lastInboundAudioBytesReceived = -1L
         consecutiveRemoteFreezeChecks = 0
+        consecutiveRemoteVideoOffChecks = 0
+        isRemoteVideoOffHeuristic = false
+        CallActivity.instance?.setRemoteVideoOffHeuristicState(false)
         lastRemoteRecoveryAtMs = 0L
         remoteRecoveryEscalation = 0
         lastOutboundFramesSent = -1L
@@ -1724,6 +2120,7 @@ class NativeWebRTCPlugin : Plugin() {
             pc.getStats { report ->
                 var framesDecoded: Long? = null
                 var bytesReceived: Long? = null
+                var audioBytesReceived: Long? = null
                 var framesSent: Long? = null
                 var bytesSent: Long? = null
 
@@ -1741,6 +2138,16 @@ class NativeWebRTCPlugin : Plugin() {
                         bytesReceived = parseStatLong(stats.members["bytesReceived"])
                         return@forEach
                     }
+                    if (stats.type == "inbound-rtp") {
+                        val kind = (stats.members["kind"] as? String)?.lowercase()
+                        val mediaType = (stats.members["mediaType"] as? String)?.lowercase()
+                        val isAudio = kind == "audio" ||
+                            mediaType == "audio" ||
+                            stats.id.contains("audio", ignoreCase = true)
+                        if (!isAudio) return@forEach
+                        audioBytesReceived = parseStatLong(stats.members["bytesReceived"])
+                        return@forEach
+                    }
                     if (stats.type != "outbound-rtp") return@forEach
                     val kind = (stats.members["kind"] as? String)?.lowercase()
                     val mediaType = (stats.members["mediaType"] as? String)?.lowercase()
@@ -1754,7 +2161,7 @@ class NativeWebRTCPlugin : Plugin() {
                     bytesSent = parseStatLong(stats.members["bytesSent"])
                 }
 
-                evaluateRemoteVideoHealth(framesDecoded, bytesReceived)
+                evaluateRemoteVideoHealth(framesDecoded, bytesReceived, audioBytesReceived)
                 evaluateLocalVideoHealth(framesSent, bytesSent)
             }
         } catch (e: Exception) {
@@ -1766,18 +2173,30 @@ class NativeWebRTCPlugin : Plugin() {
     private fun evaluateRemoteVideoHealth(
         framesDecoded: Long?,
         bytesReceived: Long?,
+        audioBytesReceived: Long?,
     ) {
         // Some devices omit decode counters in inbound stats. Never trigger recovery
         // unless BOTH counters are available, otherwise false positives can freeze media.
         if (framesDecoded == null || bytesReceived == null) {
             consecutiveRemoteFreezeChecks = 0
+            consecutiveRemoteVideoOffChecks = 0
+            if (isRemoteVideoOffHeuristic) {
+                isRemoteVideoOffHeuristic = false
+                CallActivity.instance?.setRemoteVideoOffHeuristicState(false)
+            }
             remoteRecoveryEscalation = 0
+            if (audioBytesReceived != null) {
+                lastInboundAudioBytesReceived = audioBytesReceived
+            }
             return
         }
 
         if (lastInboundFramesDecoded < 0L && lastInboundBytesReceived < 0L) {
             lastInboundFramesDecoded = framesDecoded
             lastInboundBytesReceived = bytesReceived
+            if (audioBytesReceived != null) {
+                lastInboundAudioBytesReceived = audioBytesReceived
+            }
             return
         }
 
@@ -1789,6 +2208,37 @@ class NativeWebRTCPlugin : Plugin() {
             bytesReceived != null &&
                 lastInboundBytesReceived >= 0L &&
                 bytesReceived > lastInboundBytesReceived
+        val hasAudioProgress =
+            audioBytesReceived != null &&
+                lastInboundAudioBytesReceived >= 0L &&
+                audioBytesReceived > lastInboundAudioBytesReceived
+
+        val inferredVideoOff = if (hasDecodedProgress || hasInboundBytesProgress) {
+            consecutiveRemoteVideoOffChecks = 0
+            false
+        } else if (hasAudioProgress) {
+            consecutiveRemoteVideoOffChecks += 1
+            consecutiveRemoteVideoOffChecks >= 2
+        } else {
+            consecutiveRemoteVideoOffChecks = 0
+            false
+        }
+
+        if (inferredVideoOff != isRemoteVideoOffHeuristic) {
+            isRemoteVideoOffHeuristic = inferredVideoOff
+            CallActivity.instance?.setRemoteVideoOffHeuristicState(inferredVideoOff)
+        }
+
+        if (inferredVideoOff) {
+            consecutiveRemoteFreezeChecks = 0
+            remoteRecoveryEscalation = 0
+            lastInboundFramesDecoded = framesDecoded
+            lastInboundBytesReceived = bytesReceived
+            if (audioBytesReceived != null) {
+                lastInboundAudioBytesReceived = audioBytesReceived
+            }
+            return
+        }
 
         consecutiveRemoteFreezeChecks = when {
             hasDecodedProgress -> 0
@@ -1820,6 +2270,9 @@ class NativeWebRTCPlugin : Plugin() {
 
         lastInboundFramesDecoded = framesDecoded
         lastInboundBytesReceived = bytesReceived
+        if (audioBytesReceived != null) {
+            lastInboundAudioBytesReceived = audioBytesReceived
+        }
     }
 
     @Synchronized
@@ -1941,8 +2394,106 @@ class NativeWebRTCPlugin : Plugin() {
         return peerConnection != null || localAudioTrack != null || localVideoTrack != null
     }
 
+    private data class NativeFinalizeContext(
+        val callId: String,
+        val peerId: String?,
+        val apiBaseUrl: String,
+        val endedAtMs: Long,
+        val reason: String,
+        val durationSeconds: Long?,
+    )
+
+    private fun toIso8601Utc(epochMs: Long): String {
+        val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+        formatter.timeZone = TimeZone.getTimeZone("UTC")
+        return formatter.format(Date(epochMs))
+    }
+
+    private fun buildNativeFinalizeContext(reason: String): NativeFinalizeContext? {
+        if (nativeFinalizeAttempted) return null
+
+        val callId = activeCallId.trim()
+        val apiBaseUrl = activeApiBaseUrl.trim().trimEnd('/')
+        if (callId.isEmpty() || apiBaseUrl.isEmpty()) return null
+
+        val endedAtMs = System.currentTimeMillis()
+        val durationSeconds = when {
+            callStartTime > 0L -> {
+                val elapsedMs = android.os.SystemClock.elapsedRealtime() - callStartTime
+                maxOf(0L, elapsedMs / 1000L)
+            }
+            activeCallStartedAtEpochMs > 0L -> {
+                maxOf(0L, (endedAtMs - activeCallStartedAtEpochMs) / 1000L)
+            }
+            else -> null
+        }
+
+        nativeFinalizeAttempted = true
+        val peerId = activePeerId.trim().ifEmpty { null }
+
+        return NativeFinalizeContext(
+            callId = callId,
+            peerId = peerId,
+            apiBaseUrl = apiBaseUrl,
+            endedAtMs = endedAtMs,
+            reason = reason.ifBlank { "hangup" },
+            durationSeconds = durationSeconds,
+        )
+    }
+
+    private fun dispatchNativeFinalizeFallback(reason: String) {
+        val context = buildNativeFinalizeContext(reason) ?: return
+        val endpoint = "${context.apiBaseUrl}/api/calls/finalize"
+        val cookieHeader = try {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.getCookie(endpoint) ?: cookieManager.getCookie(context.apiBaseUrl)
+        } catch (_: Exception) {
+            null
+        }
+        val payload = JSONObject().apply {
+            put("callId", context.callId)
+            context.peerId?.let { put("to", it) }
+            put("reason", context.reason)
+            put("endedAt", toIso8601Utc(context.endedAtMs))
+            context.durationSeconds?.let { put("duration", it) }
+        }
+
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = NATIVE_FINALIZE_CONNECT_TIMEOUT_MS
+                    readTimeout = NATIVE_FINALIZE_READ_TIMEOUT_MS
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("X-Native-Fallback", "true")
+                    if (!cookieHeader.isNullOrBlank()) {
+                        setRequestProperty("Cookie", cookieHeader)
+                    }
+                }
+
+                val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+                connection.outputStream.use { output ->
+                    output.write(bytes)
+                    output.flush()
+                }
+
+                val responseCode = connection.responseCode
+                if (responseCode !in 200..299) {
+                    Log.w(TAG, "Native finalize fallback failed: HTTP $responseCode ($endpoint)")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Native finalize fallback failed", e)
+            } finally {
+                connection?.disconnect()
+            }
+        }.start()
+    }
+
     @Synchronized
-    private fun cleanup() {
+    private fun cleanup(endReason: String = "hangup") {
         if (isCleaningUp) return
         isCleaningUp = true
 
@@ -1955,12 +2506,14 @@ class NativeWebRTCPlugin : Plugin() {
         // don't fire against a CallActivity that is already being destroyed.
         currentAttachRunnable?.let { attachHandler.removeCallbacks(it) }
         currentAttachRunnable = null
+        dispatchNativeFinalizeFallback(endReason)
 
         try {
             candidateTimer?.cancel()
             candidateTimer = null
             connectionTimeout?.cancel()
             connectionTimeout = null
+            clearDisconnectFailsafeTimer()
             stopRemoteFreezeMonitor()
             releaseAudioRouting()
 
@@ -1990,6 +2543,21 @@ class NativeWebRTCPlugin : Plugin() {
             localVideoTrack = null
             localAudioTrack?.dispose()
             localAudioTrack = null
+            controlDataChannel?.let { channel ->
+                try {
+                    channel.unregisterObserver()
+                } catch (_: Exception) {
+                }
+                try {
+                    channel.close()
+                } catch (_: Exception) {
+                }
+                try {
+                    channel.dispose()
+                } catch (_: Exception) {
+                }
+            }
+            controlDataChannel = null
             // Root Cause 1 fix: dispose the source objects that the tracks were built from.
             // AudioTrack.dispose() and VideoTrack.dispose() do NOT cascade to their sources.
             // Each accumulated undisposed source eats native WebRTC media engine resources;
@@ -2016,6 +2584,7 @@ class NativeWebRTCPlugin : Plugin() {
 
             isMuted = false
             isVideoOff = false
+            isRemoteVideoOff = false
             makingOffer = false
             ignoreOffer = false
             callStartTime = 0L
@@ -2023,9 +2592,21 @@ class NativeWebRTCPlugin : Plugin() {
             activeCallType = "video"
             activeIsCaller = false
             activeOtherUserName = "Unknown"
+            activeOtherUserImage = ""
+            activeCallId = ""
+            activePeerId = ""
+            activeApiBaseUrl = ""
+            activeCallStartedAtEpochMs = 0L
+            nativeFinalizeAttempted = false
             isInPipMode = false
             activeCaptureProfile = null
+            localControlChannelSeq = 0L
+            latestRemoteControlSeq = -1L
+            pendingControlMessage = null
             lastUiResumeRecoveryAtMs = 0L
+            uiResumeRecoverySeq = 0L
+            hasEverConnected = false
+            lastVideoToggleAtMs = 0L
 
             // Close native Activity on UI thread.
             if (callActivityActive) {

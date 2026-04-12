@@ -13,6 +13,7 @@ import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
 import axios from "axios";
 import { GET_TURN_CREDENTIALS } from "@/utils/constants";
+import { finalizeCallReliable } from "@/utils/callFinalize";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Capacitor } from "@capacitor/core";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
@@ -214,6 +215,7 @@ const AudioCallScreen = () => {
     socket.emit("call:ice-candidates", {
       to,
       candidates: [...candidateBuffer.current],
+      callId: activeCall?.callId,
     });
     candidateBuffer.current = [];
   }, [socket, getTargetId]);
@@ -369,6 +371,7 @@ const AudioCallScreen = () => {
           socket.emit("call:answer", {
             to: from,
             description: peer.localDescription,
+            callId: activeCall?.callId,
           });
         }
 
@@ -408,6 +411,7 @@ const AudioCallScreen = () => {
           socket.emit("call:offer", {
             to,
             description: peer.localDescription,
+            callId: activeCall?.callId,
           });
           localOfferSentRef.current = true;
           lastOfferSentAtRef.current = Date.now();
@@ -432,6 +436,7 @@ const AudioCallScreen = () => {
         socket.emit("call:offer", {
           to,
           description: peer.localDescription,
+          callId: activeCall?.callId,
         });
         localOfferSentRef.current = true;
         lastOfferSentAtRef.current = Date.now();
@@ -743,11 +748,19 @@ const AudioCallScreen = () => {
     if (!isAudioCallActive) return;
     const handleBeforeUnload = () => {
       const targetId = getTargetId();
-      if (targetId) socket?.emit("call:end", { to: targetId });
+      if (targetId) {
+        void finalizeCallReliable({
+          socket,
+          to: targetId,
+          callId: activeCall?.callId,
+          reason: "hangup",
+          callStartedAt: activeCall?.callStartedAt,
+        });
+      }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [getTargetId, isAudioCallActive, socket]);
+  }, [getTargetId, isAudioCallActive, socket, activeCall?.callId, activeCall?.callStartedAt]);
 
   useEffect(() => {
     if (!isAudioCallActive) return;
@@ -778,7 +791,13 @@ const AudioCallScreen = () => {
         setConnectionStatus("failed");
         const targetId = getTargetId();
         if (targetId) {
-          socket?.emit("call:end", { to: targetId, reason: "audio_permission_denied" });
+          void finalizeCallReliable({
+            socket,
+            to: targetId,
+            callId: activeCall?.callId,
+            reason: "audio_permission_denied",
+            callStartedAt: activeCall?.callStartedAt,
+          });
         }
         cleanup();
       }
@@ -796,7 +815,9 @@ const AudioCallScreen = () => {
       }
     };
   }, [
+    activeCall?.callId,
     activeCall?.isCaller,
+    activeCall?.callStartedAt,
     cleanup,
     getTargetId,
     handleDeviceChange,
@@ -829,7 +850,25 @@ const AudioCallScreen = () => {
     if (!isAudioCallActive) return;
     if (!socket) return;
 
-    const onDesc = ({ description, from }) => handleDescription(description, from);
+    const onDesc = ({ description, from, callId }) => {
+      const expectedFrom = getTargetId();
+      const incomingCallId = callId?.toString?.() || callId || "";
+      const currentCallId = activeCall?.callId?.toString?.() || activeCall?.callId || "";
+      const normalizedFrom = from?.toString?.() || from || "";
+      const normalizedExpectedFrom =
+        expectedFrom?.toString?.() || expectedFrom || "";
+      if (incomingCallId && currentCallId && incomingCallId !== currentCallId) {
+        return;
+      }
+      if (
+        normalizedFrom &&
+        normalizedExpectedFrom &&
+        normalizedFrom !== normalizedExpectedFrom
+      ) {
+        return;
+      }
+      handleDescription(description, from);
+    };
 
     const addCandidate = async (candidate) => {
       if (!candidate) return;
@@ -844,18 +883,65 @@ const AudioCallScreen = () => {
       }
     };
 
-    const onCandidate = async ({ candidate }) => {
+    const onCandidate = async ({ candidate, from, callId }) => {
+      const expectedFrom = getTargetId();
+      const incomingCallId = callId?.toString?.() || callId || "";
+      const currentCallId = activeCall?.callId?.toString?.() || activeCall?.callId || "";
+      const normalizedFrom = from?.toString?.() || from || "";
+      const normalizedExpectedFrom =
+        expectedFrom?.toString?.() || expectedFrom || "";
+      if (incomingCallId && currentCallId && incomingCallId !== currentCallId) {
+        return;
+      }
+      if (
+        normalizedFrom &&
+        normalizedExpectedFrom &&
+        normalizedFrom !== normalizedExpectedFrom
+      ) {
+        return;
+      }
       await addCandidate(candidate);
     };
 
-    const onCandidates = async ({ candidates }) => {
+    const onCandidates = async ({ candidates, from, callId }) => {
+      const expectedFrom = getTargetId();
+      const incomingCallId = callId?.toString?.() || callId || "";
+      const currentCallId = activeCall?.callId?.toString?.() || activeCall?.callId || "";
+      const normalizedFrom = from?.toString?.() || from || "";
+      const normalizedExpectedFrom =
+        expectedFrom?.toString?.() || expectedFrom || "";
+      if (incomingCallId && currentCallId && incomingCallId !== currentCallId) {
+        return;
+      }
+      if (
+        normalizedFrom &&
+        normalizedExpectedFrom &&
+        normalizedFrom !== normalizedExpectedFrom
+      ) {
+        return;
+      }
       if (!Array.isArray(candidates)) return;
       for (const candidate of candidates) {
         await addCandidate(candidate);
       }
     };
 
-    const onEnd = () => cleanup();
+    const onEnd = ({ from, callId } = {}) => {
+      const expectedFrom = getTargetId();
+      const incomingCallId = callId?.toString?.() || callId || "";
+      const currentCallId = activeCall?.callId?.toString?.() || activeCall?.callId || "";
+      const normalizedFrom = from?.toString?.() || from || "";
+      const normalizedExpectedFrom =
+        expectedFrom?.toString?.() || expectedFrom || "";
+      const matchesPeer =
+        normalizedFrom &&
+        normalizedExpectedFrom &&
+        normalizedFrom === normalizedExpectedFrom;
+      const matchesCallId =
+        incomingCallId && currentCallId && incomingCallId === currentCallId;
+      if (!matchesCallId && !matchesPeer) return;
+      cleanup();
+    };
 
     socket.on("call:offer", onDesc);
     socket.on("call:answer", onDesc);
@@ -870,7 +956,14 @@ const AudioCallScreen = () => {
       socket.off("call:ice-candidates", onCandidates);
       socket.off("call:end", onEnd);
     };
-  }, [cleanup, handleDescription, isAudioCallActive, socket]);
+  }, [
+    cleanup,
+    handleDescription,
+    isAudioCallActive,
+    socket,
+    activeCall?.callId,
+    getTargetId,
+  ]);
 
   useEffect(() => {
     if (!isAudioCallActive) return;
@@ -908,7 +1001,15 @@ const AudioCallScreen = () => {
 
   const endCall = () => {
     const to = getTargetId();
-    if (to) socket?.emit("call:end", { to });
+    if (to) {
+      void finalizeCallReliable({
+        socket,
+        to,
+        callId: activeCall?.callId,
+        reason: "hangup",
+        callStartedAt: activeCall?.callStartedAt,
+      });
+    }
     cleanup();
   };
 

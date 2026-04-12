@@ -21,6 +21,7 @@ import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
 import axios from "axios";
 import { GET_TURN_CREDENTIALS } from "@/utils/constants";
+import { finalizeCallReliable } from "@/utils/callFinalize";
 import { cn } from "@/lib/utils";
 import CallTimer from "@/components/CallTimer";
 import { Capacitor } from "@capacitor/core";
@@ -39,6 +40,16 @@ const AUDIO_CONSTRAINTS = {
 };
 
 const MAX_VIDEO_BITRATE = 500_000;
+const CONNECTION_LOSS_PROBE_START_MS = 8000;
+const CONNECTION_LOSS_HARD_STOP_MS = 35000;
+const CONNECTION_LOSS_PROBE_INTERVAL_MS = 4000;
+
+const normalizeId = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value._id) return value._id.toString();
+  return value.toString();
+};
 
 
 const ConnectionIcon = memo(({ connectionStatus }) => {
@@ -68,6 +79,7 @@ const VideoCallScreen = () => {
   // UI STATE
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isRemoteVideoOff, setIsRemoteVideoOff] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [pipExpanded, setPipExpanded] = useState(false);
   const [facingMode, setFacingMode] = useState("user");
@@ -75,7 +87,7 @@ const VideoCallScreen = () => {
 
   // Connection State
   const [callStatus, setCallStatus] = useState(
-    activeCall?.isCaller ? "ringing" : "connected",
+    activeCall?.isCaller ? "ringing" : "connecting",
   );
   const [connectionStatus, setConnectionStatus] = useState("initializing");
   const [mediaError, setMediaError] = useState(null);
@@ -85,6 +97,9 @@ const VideoCallScreen = () => {
   const localStreamRef = useRef(null);
   const remoteStreamRef = useRef(new MediaStream());
   const connectionTimeout = useRef(null);
+  const connectionLossMonitorRef = useRef(null);
+  const connectionLossMonitorStartedAtRef = useRef(0);
+  const connectionLossProbeInFlightRef = useRef(false);
 
   // ROBUSTNESS BUFFERS
   const pendingOffer = useRef(null);
@@ -95,6 +110,19 @@ const VideoCallScreen = () => {
   const shouldStartOnStreamReady = useRef(false);
   const acceptRetryRef = useRef(null);
   const hasReceivedOffer = useRef(false);
+  const hasReceivedAnswer = useRef(false);
+  const localOfferSentRef = useRef(false);
+  const offerKickstartTimeoutRef = useRef(null);
+  const offerRetryIntervalRef = useRef(null);
+  const offerRetryAttemptsRef = useRef(0);
+  const cleanedUpRef = useRef(false);
+  const outgoingMediaSeqRef = useRef(0);
+  const latestIncomingMediaSeqRef = useRef(-1);
+  const controlChannelRef = useRef(null);
+  const localControlSeqRef = useRef(0);
+  const latestIncomingControlSeqRef = useRef(-1);
+  const pendingControlMessageRef = useRef(null);
+  const cleanupRef = useRef(() => {});
 
   // ICE candidate batching refs
   const candidateBuffer = useRef([]);
@@ -131,6 +159,44 @@ const VideoCallScreen = () => {
     : { width: 120, height: 160 };
 
   if (!activeCall || activeCall.callType !== "video") return null;
+
+  const getTargetId = useCallback(
+    () => activeCall?.otherUserId || activeCall?.callerId,
+    [activeCall?.otherUserId, activeCall?.callerId],
+  );
+
+  const clearOfferRetryInterval = useCallback(() => {
+    if (offerRetryIntervalRef.current) {
+      clearInterval(offerRetryIntervalRef.current);
+      offerRetryIntervalRef.current = null;
+    }
+    offerRetryAttemptsRef.current = 0;
+  }, []);
+
+  const clearOfferKickstartTimeout = useCallback(() => {
+    if (offerKickstartTimeoutRef.current) {
+      clearTimeout(offerKickstartTimeoutRef.current);
+      offerKickstartTimeoutRef.current = null;
+    }
+  }, []);
+
+  const matchesCurrentCall = useCallback(
+    ({ from, callId } = {}) => {
+      const incomingCallId = normalizeId(callId);
+      const currentCallId = normalizeId(activeCall?.callId);
+      const incomingFrom = normalizeId(from);
+      const expectedFrom = normalizeId(getTargetId());
+
+      if (incomingCallId && currentCallId && incomingCallId !== currentCallId) {
+        return false;
+      }
+      if (incomingFrom && expectedFrom && incomingFrom !== expectedFrom) {
+        return false;
+      }
+      return true;
+    },
+    [activeCall?.callId, getTargetId],
+  );
 
   // Keep all 4 video elements always connected — never detach srcObject.
   // This prevents the black flicker on Capacitor Android WebView during layout switches.
@@ -202,6 +268,27 @@ const VideoCallScreen = () => {
     };
   }, [isVideoOff]);
 
+  useEffect(() => {
+    cleanedUpRef.current = false;
+    clearConnectionLossMonitor();
+    setIsRemoteVideoOff(false);
+    latestIncomingMediaSeqRef.current = -1;
+    outgoingMediaSeqRef.current = 0;
+    latestIncomingControlSeqRef.current = -1;
+    localControlSeqRef.current = 0;
+    pendingControlMessageRef.current = null;
+    hasReceivedOffer.current = false;
+    hasReceivedAnswer.current = false;
+    localOfferSentRef.current = false;
+    clearOfferKickstartTimeout();
+    clearOfferRetryInterval();
+  }, [
+    activeCall?.callId,
+    clearConnectionLossMonitor,
+    clearOfferKickstartTimeout,
+    clearOfferRetryInterval,
+  ]);
+
   // Apply bitrate cap on the video sender
   const applyBitrateCap = useCallback(async () => {
     if (!pc.current) return;
@@ -220,19 +307,221 @@ const VideoCallScreen = () => {
     }
   }, []);
 
-  // Flush batched ICE candidates
-  const flushCandidates = useCallback(() => {
-    if (candidateBuffer.current.length === 0) return;
-    const targetId = activeCall?.otherUserId || activeCall?.callerId;
-    if (!targetId) return;
+  const emitLocalVideoState = useCallback(
+    (videoOff) => {
+      const targetId = getTargetId();
+      if (!targetId || !activeCall?.callId) return;
+      const mediaSeq = outgoingMediaSeqRef.current + 1;
+      outgoingMediaSeqRef.current = mediaSeq;
+      const payload = {
+        to: targetId,
+        callId: activeCall.callId,
+        videoOff: Boolean(videoOff),
+        mediaSeq,
+      };
+      socket.emit("call:media-state", payload);
+      window.setTimeout(() => socket.emit("call:media-state", payload), 180);
+      window.setTimeout(() => socket.emit("call:media-state", payload), 700);
+    },
+    [socket, getTargetId, activeCall?.callId],
+  );
 
-    // Send batched candidates
-    socket.emit("call:ice-candidates", {
-      to: targetId,
-      candidates: candidateBuffer.current,
+  const sendControlPayload = useCallback((payload) => {
+    const channel = controlChannelRef.current;
+    if (!channel || channel.readyState !== "open") {
+      pendingControlMessageRef.current = payload;
+      return;
+    }
+    try {
+      channel.send(payload);
+    } catch {
+      pendingControlMessageRef.current = payload;
+    }
+  }, []);
+
+  const sendVideoStateViaControlChannel = useCallback((videoOff) => {
+    const payload = JSON.stringify({
+      type: "video_state",
+      videoOff: Boolean(videoOff),
+      seq: localControlSeqRef.current + 1,
     });
-    candidateBuffer.current = [];
-  }, [socket, activeCall?.otherUserId, activeCall?.callerId]);
+    localControlSeqRef.current += 1;
+    sendControlPayload(payload);
+  }, [sendControlPayload]);
+
+  const sendCallEndViaControlChannel = useCallback((reason = "hangup") => {
+    const payload = JSON.stringify({
+      type: "call_end",
+      reason,
+      seq: localControlSeqRef.current + 1,
+    });
+    localControlSeqRef.current += 1;
+    sendControlPayload(payload);
+  }, [sendControlPayload]);
+
+  const clearConnectionLossMonitor = useCallback(() => {
+    if (connectionLossMonitorRef.current) {
+      clearInterval(connectionLossMonitorRef.current);
+      connectionLossMonitorRef.current = null;
+    }
+    connectionLossMonitorStartedAtRef.current = 0;
+    connectionLossProbeInFlightRef.current = false;
+  }, []);
+
+  const probeCallStillActive = useCallback(
+    () =>
+      new Promise((resolve) => {
+        if (!socket?.connected || !activeCall?.callId) {
+          resolve(true);
+          return;
+        }
+
+        const peerId = getTargetId();
+        let settled = false;
+        const timeoutId = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          resolve(true);
+        }, 1800);
+
+        try {
+          socket.emit(
+            "call:is-active",
+            {
+              callId: activeCall.callId,
+              ...(peerId ? { peerId } : {}),
+            },
+            (result = {}) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timeoutId);
+              resolve(Boolean(result.active));
+            },
+          );
+        } catch {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          resolve(true);
+        }
+      }),
+    [socket, activeCall?.callId, getTargetId],
+  );
+
+  const endCallForConnectionLoss = useCallback(() => {
+    const liveCall = useAppStore.getState().activeCall || activeCall;
+    if (!liveCall) return;
+
+    const to = liveCall.otherUserId || liveCall.callerId;
+    sendCallEndViaControlChannel("connection_lost");
+    if (to) {
+      void finalizeCallReliable({
+        socket,
+        to,
+        callId: liveCall.callId,
+        reason: "connection_lost",
+        callStartedAt: liveCall.callStartedAt,
+      });
+    }
+    cleanupRef.current?.();
+  }, [socket, activeCall, sendCallEndViaControlChannel]);
+
+  const startConnectionLossMonitor = useCallback(() => {
+    if (connectionLossMonitorRef.current) return;
+    connectionLossMonitorStartedAtRef.current = Date.now();
+
+    connectionLossMonitorRef.current = setInterval(() => {
+      const state = pc.current?.iceConnectionState;
+      if (state === "connected" || state === "completed" || state === "closed") {
+        clearConnectionLossMonitor();
+        return;
+      }
+
+      const elapsedMs = Date.now() - connectionLossMonitorStartedAtRef.current;
+      if (elapsedMs < CONNECTION_LOSS_PROBE_START_MS) return;
+      if (connectionLossProbeInFlightRef.current) return;
+
+      if (!socket?.connected) {
+        if (elapsedMs >= CONNECTION_LOSS_HARD_STOP_MS) {
+          clearConnectionLossMonitor();
+          endCallForConnectionLoss();
+        }
+        return;
+      }
+
+      connectionLossProbeInFlightRef.current = true;
+      void probeCallStillActive()
+        .then((isActive) => {
+          if (isActive) {
+            if (elapsedMs >= CONNECTION_LOSS_HARD_STOP_MS) {
+              clearConnectionLossMonitor();
+              endCallForConnectionLoss();
+            }
+            return;
+          }
+          clearConnectionLossMonitor();
+          endCallForConnectionLoss();
+        })
+        .finally(() => {
+          connectionLossProbeInFlightRef.current = false;
+        });
+    }, CONNECTION_LOSS_PROBE_INTERVAL_MS);
+  }, [
+    clearConnectionLossMonitor,
+    endCallForConnectionLoss,
+    probeCallStillActive,
+    socket?.connected,
+  ]);
+
+  const attachControlDataChannel = useCallback((channel) => {
+    if (!channel || channel.label !== "call-control") return;
+
+    if (controlChannelRef.current && controlChannelRef.current !== channel) {
+      try {
+        controlChannelRef.current.onopen = null;
+        controlChannelRef.current.onmessage = null;
+        controlChannelRef.current.onclose = null;
+      } catch {
+        // best effort
+      }
+    }
+
+    controlChannelRef.current = channel;
+
+    channel.onopen = () => {
+      if (pendingControlMessageRef.current) {
+        try {
+          channel.send(pendingControlMessageRef.current);
+          pendingControlMessageRef.current = null;
+        } catch {
+          // keep pending
+        }
+      }
+      sendVideoStateViaControlChannel(isVideoOff);
+    };
+
+    channel.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event?.data || "{}");
+        const type = payload?.type;
+        if (type === "video_state") {
+          const seq = Number(payload?.seq);
+          if (Number.isFinite(seq)) {
+            if (seq <= latestIncomingControlSeqRef.current) return;
+            latestIncomingControlSeqRef.current = seq;
+          }
+          setIsRemoteVideoOff(Boolean(payload?.videoOff));
+          return;
+        }
+
+        if (type === "call_end") {
+          cleanupRef.current?.();
+        }
+      } catch {
+        // Ignore malformed control messages.
+      }
+    };
+  }, [isVideoOff, sendVideoStateViaControlChannel]);
 
   const flipCamera = async () => {
     if (isFlipping || isVideoOff) return;
@@ -348,7 +637,7 @@ const VideoCallScreen = () => {
   useEffect(() => {
     if (!activeCall?.isCaller) return;
     if (!callAccepted) return;
-    setCallStatus("connected");
+    setCallStatus("connecting");
     if (localStreamRef.current) {
       initializePeerConnection(localStreamRef.current);
     } else {
@@ -362,14 +651,21 @@ const VideoCallScreen = () => {
     const handleBeforeUnload = (e) => {
       if (activeCall) {
         const targetId = activeCall.otherUserId || activeCall.callerId;
-        socket.emit("call:end", { to: targetId });
+        sendCallEndViaControlChannel("hangup");
+        void finalizeCallReliable({
+          socket,
+          to: targetId,
+          callId: activeCall.callId,
+          reason: "hangup",
+          callStartedAt: activeCall?.callStartedAt,
+        });
       }
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [activeCall, socket]);
+  }, [activeCall, socket, sendCallEndViaControlChannel]);
 
   // PEER CONNECTION LOGIC
   const initializePeerConnection = async (stream) => {
@@ -394,18 +690,35 @@ const VideoCallScreen = () => {
     }
 
     pc.current = new RTCPeerConnection(config);
+    pc.current.ondatachannel = (event) => {
+      attachControlDataChannel(event?.channel);
+    };
+    if (activeCall?.isCaller) {
+      try {
+        const channel = pc.current.createDataChannel("call-control", {
+          ordered: true,
+        });
+        attachControlDataChannel(channel);
+      } catch {
+        // DataChannel is best-effort. Socket fallback remains active.
+      }
+    }
     stream.getTracks().forEach((track) => pc.current?.addTrack(track, stream));
 
     pc.current.ontrack = ({ track }) => {
       remoteStreamRef.current.addTrack(track);
       updateVisibleRemoteVideo(remoteStreamRef.current);
+      if (track.kind === "video") {
+        setIsRemoteVideoOff(false);
+      }
     };
 
     const flushCandidates = () => {
       if (candidateBuffer.current.length > 0) {
         socket.emit("call:ice-candidates", {
-          to: activeCall.otherUserId || activeCall.callerId,
+          to: getTargetId(),
           candidates: [...candidateBuffer.current],
+          callId: activeCall?.callId,
         });
         candidateBuffer.current = [];
       }
@@ -430,28 +743,41 @@ const VideoCallScreen = () => {
       }
 
       if (state === "connected" || state === "completed") {
+        setCallStatus("connected");
+        clearConnectionLossMonitor();
+        clearOfferRetryInterval();
+        clearOfferKickstartTimeout();
+        hasReceivedAnswer.current = true;
         applyBitrateCap();
       }
 
       if (state === "disconnected") {
+        setCallStatus("connecting");
+        startConnectionLossMonitor();
         connectionTimeout.current = setTimeout(() => {
           if (pc.current?.iceConnectionState === "disconnected") {
             pc.current.restartIce();
           }
         }, 2000);
       } else if (state === "failed") {
+        setCallStatus("connecting");
+        startConnectionLossMonitor();
         endCall();
       }
     };
 
     pc.current.onnegotiationneeded = async () => {
       try {
+        const to = getTargetId();
+        if (!to) return;
         makingOffer.current = true;
         await pc.current?.setLocalDescription();
         socket.emit("call:offer", {
-          to: activeCall.otherUserId || activeCall.callerId,
+          to,
           description: pc.current?.localDescription,
+          callId: activeCall?.callId,
         });
+        localOfferSentRef.current = true;
       } catch (err) {
         // Negotiation error
       } finally {
@@ -471,58 +797,147 @@ const VideoCallScreen = () => {
       const candidate = pendingCandidates.current.shift();
       if (candidate) await pc.current.addIceCandidate(candidate);
     }
-  };
 
-  const handleDescription = async (description, from) => {
-    const peer = pc.current;
-    if (!peer) {
-      pendingOffer.current = { description, from };
-      return;
-    }
-
-    try {
-      const offerCollision =
-        description.type === "offer" &&
-        (makingOffer.current || peer.signalingState !== "stable");
-
-      ignoreOffer.current = !isPolite.current && offerCollision;
-      if (ignoreOffer.current) return;
-      if (description.type === "offer") {
-        hasReceivedOffer.current = true;
-        if (acceptRetryRef.current) {
-          clearInterval(acceptRetryRef.current);
-          acceptRetryRef.current = null;
+    if (activeCall?.isCaller) {
+      clearOfferKickstartTimeout();
+      clearOfferRetryInterval();
+      offerKickstartTimeoutRef.current = setTimeout(() => {
+        if (
+          hasReceivedAnswer.current ||
+          hasReceivedOffer.current ||
+          pc.current?.connectionState === "connected" ||
+          pc.current?.iceConnectionState === "connected" ||
+          pc.current?.iceConnectionState === "completed"
+        ) {
+          return;
         }
-      }
 
-      if (offerCollision) {
-        await Promise.all([
-          peer.setLocalDescription({ type: "rollback" }),
-          peer.setRemoteDescription(description),
-        ]);
-      } else {
-        await peer.setRemoteDescription(description);
-      }
+        if (pc.current?.signalingState === "stable") {
+          pc.current.onnegotiationneeded?.();
+        } else if (pc.current?.localDescription?.type === "offer") {
+          socket.emit("call:offer", {
+            to: getTargetId(),
+            description: pc.current.localDescription,
+            callId: activeCall?.callId,
+          });
+          localOfferSentRef.current = true;
+        }
 
-      if (description.type === "offer") {
-        await peer.setLocalDescription();
-        socket.emit("call:answer", {
-          to: from,
-          description: peer.localDescription,
-        });
-      }
-    } catch (err) {
-      // Signaling error
+        offerRetryIntervalRef.current = setInterval(() => {
+          if (
+            hasReceivedAnswer.current ||
+            hasReceivedOffer.current ||
+            pc.current?.connectionState === "connected" ||
+            pc.current?.iceConnectionState === "connected" ||
+            pc.current?.iceConnectionState === "completed"
+          ) {
+            clearOfferRetryInterval();
+            return;
+          }
+
+          offerRetryAttemptsRef.current += 1;
+          if (pc.current?.localDescription?.type === "offer") {
+            socket.emit("call:offer", {
+              to: getTargetId(),
+              description: pc.current.localDescription,
+              callId: activeCall?.callId,
+            });
+            localOfferSentRef.current = true;
+          }
+          if (offerRetryAttemptsRef.current >= 6) {
+            clearOfferRetryInterval();
+          }
+        }, 900);
+      }, 250);
     }
   };
+
+  const handleDescription = useCallback(
+    async (description, from) => {
+      const peer = pc.current;
+      if (!peer) {
+        pendingOffer.current = { description, from };
+        return;
+      }
+
+      try {
+        if (
+          description?.type === "answer" &&
+          peer.signalingState !== "have-local-offer"
+        ) {
+          return;
+        }
+
+        const offerCollision =
+          description.type === "offer" &&
+          (makingOffer.current || peer.signalingState !== "stable");
+
+        ignoreOffer.current = !isPolite.current && offerCollision;
+        if (ignoreOffer.current) return;
+        if (description.type === "offer") {
+          hasReceivedOffer.current = true;
+          localOfferSentRef.current = false;
+          clearOfferRetryInterval();
+          if (acceptRetryRef.current) {
+            clearInterval(acceptRetryRef.current);
+            acceptRetryRef.current = null;
+          }
+        } else if (description.type === "answer") {
+          hasReceivedAnswer.current = true;
+          clearOfferRetryInterval();
+          clearOfferKickstartTimeout();
+        }
+
+        if (offerCollision) {
+          await Promise.all([
+            peer.setLocalDescription({ type: "rollback" }),
+            peer.setRemoteDescription(description),
+          ]);
+        } else {
+          await peer.setRemoteDescription(description);
+        }
+
+        if (description.type === "offer") {
+          await peer.setLocalDescription();
+          socket.emit("call:answer", {
+            to: from,
+            description: peer.localDescription,
+            callId: activeCall?.callId,
+          });
+        }
+
+        while (pendingCandidates.current.length > 0) {
+          const candidate = pendingCandidates.current.shift();
+          if (!candidate) continue;
+          try {
+            await peer.addIceCandidate(candidate);
+          } catch (e) {
+            // ICE candidate error
+          }
+        }
+      } catch (err) {
+        // Signaling error
+      }
+    },
+    [
+      socket,
+      activeCall?.callId,
+      clearOfferRetryInterval,
+      clearOfferKickstartTimeout,
+    ],
+  );
 
   useEffect(() => {
     if (!socket) return;
 
-    const onDescription = ({ description, from }) =>
+    const onDescription = ({ description, from, callId }) => {
+      if (!matchesCurrentCall({ from, callId })) return;
+      if (!description?.type) return;
       handleDescription(description, from);
+    };
 
-    const onCandidate = async ({ candidate }) => {
+    const onCandidate = async ({ candidate, from, callId }) => {
+      if (!matchesCurrentCall({ from, callId })) return;
       if (pc.current?.remoteDescription) {
         try {
           await pc.current.addIceCandidate(candidate);
@@ -535,7 +950,8 @@ const VideoCallScreen = () => {
     };
 
     // Handle batched ICE candidates from the other peer
-    const onCandidates = async ({ candidates }) => {
+    const onCandidates = async ({ candidates, from, callId }) => {
+      if (!matchesCurrentCall({ from, callId })) return;
       if (!candidates || !Array.isArray(candidates)) return;
       for (const candidate of candidates) {
         if (pc.current?.remoteDescription) {
@@ -550,12 +966,26 @@ const VideoCallScreen = () => {
       }
     };
 
-    const onEnd = () => cleanup();
+    const onMediaState = ({ from, callId, videoOff, mediaSeq }) => {
+      if (!matchesCurrentCall({ from, callId })) return;
+      const parsedSeq = Number(mediaSeq);
+      if (Number.isFinite(parsedSeq)) {
+        if (parsedSeq <= latestIncomingMediaSeqRef.current) return;
+        latestIncomingMediaSeqRef.current = parsedSeq;
+      }
+      setIsRemoteVideoOff(Boolean(videoOff));
+    };
+
+    const onEnd = ({ from, callId } = {}) => {
+      if (!matchesCurrentCall({ from, callId })) return;
+      cleanup();
+    };
 
     socket.on("call:offer", onDescription);
     socket.on("call:answer", onDescription);
     socket.on("call:ice-candidate", onCandidate);
     socket.on("call:ice-candidates", onCandidates);
+    socket.on("call:media-state", onMediaState);
     socket.on("call:end", onEnd);
 
     return () => {
@@ -563,9 +993,10 @@ const VideoCallScreen = () => {
       socket.off("call:answer", onDescription);
       socket.off("call:ice-candidate", onCandidate);
       socket.off("call:ice-candidates", onCandidates);
+      socket.off("call:media-state", onMediaState);
       socket.off("call:end", onEnd);
     };
-  }, [socket]);
+  }, [socket, handleDescription, matchesCurrentCall]);
 
   useEffect(() => {
     if (!socket || activeCall?.isCaller) return;
@@ -578,14 +1009,14 @@ const VideoCallScreen = () => {
       if (hasReceivedOffer.current) return;
       attempts += 1;
       socket.emit("call:accept", { callId, callerId });
-      if (attempts >= 5 && acceptRetryRef.current) {
+      if (attempts >= 12 && acceptRetryRef.current) {
         clearInterval(acceptRetryRef.current);
         acceptRetryRef.current = null;
       }
     };
 
     sendAccept();
-    acceptRetryRef.current = setInterval(sendAccept, 2000);
+    acceptRetryRef.current = setInterval(sendAccept, 1200);
 
     return () => {
       if (acceptRetryRef.current) {
@@ -632,7 +1063,24 @@ const VideoCallScreen = () => {
     };
   }, [connectionStatus]);
 
+  useEffect(() => {
+    if (!activeCall?.callId) return;
+    if (connectionStatus !== "connected" && connectionStatus !== "completed") return;
+    emitLocalVideoState(isVideoOff);
+    sendVideoStateViaControlChannel(isVideoOff);
+  }, [
+    activeCall?.callId,
+    connectionStatus,
+    isVideoOff,
+    emitLocalVideoState,
+    sendVideoStateViaControlChannel,
+  ]);
+
   const cleanup = useCallback(() => {
+    if (cleanedUpRef.current) return;
+    cleanedUpRef.current = true;
+    clearConnectionLossMonitor();
+
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
     pc.current = null;
@@ -647,19 +1095,69 @@ const VideoCallScreen = () => {
       clearTimeout(candidateTimer.current);
       candidateTimer.current = null;
     }
+    clearOfferKickstartTimeout();
+    clearOfferRetryInterval();
+    latestIncomingMediaSeqRef.current = -1;
+    outgoingMediaSeqRef.current = 0;
+    latestIncomingControlSeqRef.current = -1;
+    localControlSeqRef.current = 0;
+    pendingControlMessageRef.current = null;
+    if (controlChannelRef.current) {
+      try {
+        controlChannelRef.current.onopen = null;
+        controlChannelRef.current.onmessage = null;
+        controlChannelRef.current.onclose = null;
+      } catch {
+        // best effort
+      }
+      try {
+        controlChannelRef.current.close();
+      } catch {
+        // best effort
+      }
+      controlChannelRef.current = null;
+    }
+    hasReceivedOffer.current = false;
+    hasReceivedAnswer.current = false;
+    localOfferSentRef.current = false;
+    pendingCandidates.current = [];
+    pendingOffer.current = null;
+    candidateBuffer.current = [];
 
     if (statsIntervalRef.current) {
       clearInterval(statsIntervalRef.current);
       statsIntervalRef.current = null;
     }
+    setIsRemoteVideoOff(false);
+    setIsVideoOff(false);
+    setIsMuted(false);
+    setCallStatus("ringing");
     clearActiveCall();
     clearCallAccepted();
+    setIsMinimized(false);
     setConnectionStatus("disconnected");
-  }, [clearActiveCall, clearCallAccepted]);
+  }, [
+    clearActiveCall,
+    clearCallAccepted,
+    clearConnectionLossMonitor,
+    clearOfferKickstartTimeout,
+    clearOfferRetryInterval,
+    setIsMinimized,
+  ]);
+  cleanupRef.current = cleanup;
 
   const endCall = () => {
-    const to = activeCall?.otherUserId || activeCall?.callerId;
-    if (to) socket.emit("call:end", { to });
+    const to = getTargetId();
+    sendCallEndViaControlChannel("hangup");
+    if (to) {
+      void finalizeCallReliable({
+        socket,
+        to,
+        callId: activeCall?.callId,
+        reason: "hangup",
+        callStartedAt: activeCall?.callStartedAt,
+      });
+    }
     cleanup();
   };
 
@@ -675,7 +1173,10 @@ const VideoCallScreen = () => {
     const t = localStreamRef.current?.getVideoTracks()[0];
     if (t) {
       t.enabled = !t.enabled;
-      setIsVideoOff(!t.enabled);
+      const nextVideoOff = !t.enabled;
+      setIsVideoOff(nextVideoOff);
+      emitLocalVideoState(nextVideoOff);
+      sendVideoStateViaControlChannel(nextVideoOff);
     }
   };
 
@@ -851,6 +1352,13 @@ const VideoCallScreen = () => {
             playsInline
             className="absolute inset-0 w-full h-full object-cover"
           />
+          {isRemoteVideoOff && (
+            <div className="absolute inset-0 bg-background-secondary/95 flex items-center justify-center">
+              <div className="w-8 h-8 rounded-full bg-muted/80 flex items-center justify-center">
+                <VideoOff className="w-4 h-4 text-muted-foreground" />
+              </div>
+            </div>
+          )}
 
           {/* Gradient Overlay */}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
@@ -946,6 +1454,15 @@ const VideoCallScreen = () => {
           {/* Video Off Fallback */}
           {(isConnecting || connectionStatus === "failed") && (
             <div className="absolute inset-0 bg-background-secondary" />
+          )}
+
+          {isRemoteVideoOff && (
+            <div className="absolute inset-0 bg-background-secondary flex flex-col items-center justify-center gap-3">
+              <div className="w-14 h-14 rounded-full bg-muted flex items-center justify-center">
+                <VideoOff className="w-7 h-7 text-muted-foreground" />
+              </div>
+              <p className="text-sm text-foreground-secondary">Camera off</p>
+            </div>
           )}
 
           {/* Gradient Overlays */}

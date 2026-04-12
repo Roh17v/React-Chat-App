@@ -11,6 +11,7 @@ import { setupSocket } from "./socket.js";
 import messageRouter from "./routes/message.routes.js";
 import channelRouter from "./routes/channel.routes.js";
 import turnRouter from "./routes/turn.routes.js";
+import callRouter from "./routes/call.routes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,6 +52,7 @@ app.use("/api/users", userRouter);
 app.use("/api/messages", messageRouter);
 app.use("/api/channels", channelRouter);
 app.use("/api/turn", turnRouter);
+app.use("/api/calls", callRouter);
 app.get("/api/data", (req, res) => res.json({ message: "Secret Data" }));
 
 //middleware to server static files

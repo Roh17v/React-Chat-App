@@ -6,6 +6,7 @@ import { IoCall, IoVideocam, IoCloseSharp } from "react-icons/io5";
 import { Capacitor } from "@capacitor/core";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import CallTimer from "@/components/CallTimer";
+import { toast } from "sonner";
 
 const ChatHeader = () => {
   const {
@@ -13,6 +14,7 @@ const ChatHeader = () => {
     selectedChatData,
     selectedChatType,
     setActiveCall,
+    clearActiveCall,
     showAvatarPreview,
     setShowAvatarPreview,
     activeCall,
@@ -33,20 +35,92 @@ const ChatHeader = () => {
 
   const initiateCall = (callType) => {
     if (!selectedChatData?._id || isAnyCallOngoing) return;
+    if (!socket) {
+      toast.error("Connecting to server. Please try again.");
+      return;
+    }
 
-    socket.emit("call:initiate", {
-      receiverId: selectedChatData._id,
-      callType,
-    });
+    const pendingPeerId = selectedChatData._id;
+    const pendingName =
+      `${selectedChatData.firstName || ""} ${selectedChatData.lastName || ""}`.trim() ||
+      selectedChatData.email ||
+      "Unknown User";
+
+    const showCallInitError = (reason) => {
+      if (reason === "user_busy") {
+        toast.error(`${pendingName} is currently on another call.`);
+        return;
+      }
+      if (reason === "self_call_not_allowed") {
+        toast.error("You cannot call yourself.");
+        return;
+      }
+      toast.error("Unable to start call right now. Please try again.");
+    };
 
     setActiveCall({
       callType,
       isCaller: true,
-      otherUserId: selectedChatData._id,
-      otherUserName: `${selectedChatData.firstName} ${selectedChatData.lastName}`,
+      otherUserId: pendingPeerId,
+      otherUserName: pendingName,
       otherUserImage: selectedChatData.image,
     });
     setCallMinimized(false);
+
+    let ackResolved = false;
+    const fallbackTimeout = window.setTimeout(() => {
+      if (ackResolved) return;
+      const state = useAppStore.getState();
+      const currentCall = state.activeCall;
+      const currentPeerId = currentCall?.otherUserId || currentCall?.callerId;
+      if (currentCall && !currentCall.callId && currentPeerId === pendingPeerId) {
+        state.clearActiveCall();
+        toast.error("Call request timed out. Please try again.");
+      }
+    }, 12000);
+
+    socket.emit(
+      "call:initiate",
+      {
+        receiverId: pendingPeerId,
+        callType,
+      },
+      (response = {}) => {
+        ackResolved = true;
+        clearTimeout(fallbackTimeout);
+
+        const state = useAppStore.getState();
+        const currentCall = state.activeCall;
+        const currentPeerId = currentCall?.otherUserId || currentCall?.callerId;
+        const isStillPendingSamePeer =
+          currentCall && !currentCall.callId && currentPeerId === pendingPeerId;
+        if (!isStillPendingSamePeer) {
+          return;
+        }
+
+        if (!response.ok) {
+          clearActiveCall();
+          showCallInitError(response.reason);
+          return;
+        }
+
+        const callerId = response.callerId;
+        const receiverId = response.receiverId;
+        const isCaller = Boolean(response.isCaller);
+        const resolvedPeerId = isCaller ? receiverId : callerId;
+
+        setActiveCall({
+          callId: response.callId,
+          callType: response.callType || callType,
+          isCaller,
+          callerId,
+          receiverId,
+          otherUserId: resolvedPeerId || pendingPeerId,
+          otherUserName: pendingName,
+          otherUserImage: selectedChatData.image,
+        });
+      },
+    );
   };
 
   const reopenNativeCall = async () => {
