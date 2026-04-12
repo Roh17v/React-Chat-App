@@ -823,6 +823,11 @@ class CallActivity : AppCompatActivity() {
         val tapSlopPx = resources.displayMetrics.density * 18f
 
         localVideoContainer.setOnTouchListener { view, event ->
+            // When controls are hidden, localVideoContainer.isClickable is false.
+            // Return false so the event falls through to remoteVideoView's onClick
+            // (which shows controls), and ghost-swaps on the invisible card are blocked.
+            if (!view.isClickable) return@setOnTouchListener false
+
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     dX = view.x - event.rawX
@@ -1210,16 +1215,17 @@ class CallActivity : AppCompatActivity() {
             if (!isConnected) {
                 connectingOverlay.visibility = View.VISIBLE
             }
-            
+
             localVideoContainer.translationX = 0f
             if (isConnected) {
                 callTimer.visibility = View.VISIBLE
             }
-            // Restore alpha that enterPipSafely() set to 0f for the PiP snapshot.
-            // That zero-alpha is never reset on the success path, so without this line
-            // the card is back in position but fully transparent — tapping it triggers
-            // swapVideoTracks() on what looks like empty screen space.
-            localVideoContainer.alpha = 1f
+            // Keep localVideoContainer transparent (already 0f from enterPipSafely) until after
+            // requestLayout() has re-measured ConstraintLayout at fullscreen dimensions.
+            // Setting alpha=1f immediately causes the card to flash at stale PiP-sized
+            // coordinates — the constraint's layoutLeft is still PiP-sized when this callback
+            // fires, so translationX=0f places the card at the wrong spot for one frame.
+            localVideoContainer.alpha = 0f
             // Restore touch interactivity on localVideoContainer in case controls were hidden
             // (alpha=0, isClickable=false) when the user entered PiP.
             localVideoContainer.isClickable = true
@@ -1234,6 +1240,14 @@ class CallActivity : AppCompatActivity() {
             // results from the PiP dimensions, leaving the UI broken or clipped.
             // requestLayout() triggers a full re-measure so everything fills the screen.
             window.decorView.requestLayout()
+
+            // Fade in the local video card after one layout pass so it appears at its
+            // correct fullscreen-measured position, never at stale PiP coordinates.
+            window.decorView.post {
+                if (!isFinishing && !isDestroyed) {
+                    localVideoContainer.animate().alpha(1f).setDuration(250).start()
+                }
+            }
         }
     }
 
