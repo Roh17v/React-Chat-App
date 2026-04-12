@@ -645,6 +645,7 @@ class CallActivity : AppCompatActivity() {
                 localVideoContainer.isClickable = true
                 localVideoContainer.isFocusable = true
                 localVideoContainer.animate().alpha(1f).setDuration(200).start()
+                btnFlipPip.isEnabled = true
             } else {
                 // Fade out controlsContainer and topBar, then set GONE so they stop
                 // intercepting touch events. These are safe to GONE (no SurfaceViewRenderer).
@@ -657,6 +658,7 @@ class CallActivity : AppCompatActivity() {
                 localVideoContainer.animate().alpha(0f).setDuration(200).withEndAction {
                     localVideoContainer.isClickable = false
                     localVideoContainer.isFocusable = false
+                    btnFlipPip.isEnabled = false
                 }.start()
             }
         }
@@ -1230,6 +1232,7 @@ class CallActivity : AppCompatActivity() {
             // (alpha=0, isClickable=false) when the user entered PiP.
             localVideoContainer.isClickable = true
             localVideoContainer.isFocusable = true
+            btnFlipPip.isEnabled = true
             // Always show controls and card when returning to fullscreen.
             controlsContainer.alpha = 1f
             topBar.alpha = 1f
