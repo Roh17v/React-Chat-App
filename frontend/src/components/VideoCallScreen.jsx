@@ -268,6 +268,15 @@ const VideoCallScreen = () => {
     };
   }, [isVideoOff]);
 
+  const clearConnectionLossMonitor = useCallback(() => {
+    if (connectionLossMonitorRef.current) {
+      clearInterval(connectionLossMonitorRef.current);
+      connectionLossMonitorRef.current = null;
+    }
+    connectionLossMonitorStartedAtRef.current = 0;
+    connectionLossProbeInFlightRef.current = false;
+  }, []);
+
   useEffect(() => {
     cleanedUpRef.current = false;
     clearConnectionLossMonitor();
@@ -359,14 +368,6 @@ const VideoCallScreen = () => {
     sendControlPayload(payload);
   }, [sendControlPayload]);
 
-  const clearConnectionLossMonitor = useCallback(() => {
-    if (connectionLossMonitorRef.current) {
-      clearInterval(connectionLossMonitorRef.current);
-      connectionLossMonitorRef.current = null;
-    }
-    connectionLossMonitorStartedAtRef.current = 0;
-    connectionLossProbeInFlightRef.current = false;
-  }, []);
 
   const probeCallStillActive = useCallback(
     () =>
