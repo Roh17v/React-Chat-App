@@ -632,12 +632,33 @@ class CallActivity : AppCompatActivity() {
 
         remoteVideoView.setOnClickListener {
             controlsVisible = !controlsVisible
-            val alpha = if (controlsVisible) 1f else 0f
-            controlsContainer.animate().alpha(alpha).setDuration(200).start()
-            topBar.animate().alpha(alpha).setDuration(200).start()
-            // NOTE: do NOT animate localVideoContainer.alpha here — it conflicts with the
-            // translationX-based PiP hiding and with camera-off clearImage() state.
-            localVideoContainer.animate().alpha(alpha).setDuration(200).start()
+            if (controlsVisible) {
+                // Make views visible BEFORE animating in so they become interactive immediately.
+                controlsContainer.visibility = View.VISIBLE
+                topBar.visibility = View.VISIBLE
+                controlsContainer.animate().alpha(1f).setDuration(200).start()
+                topBar.animate().alpha(1f).setDuration(200).start()
+                // NOTE: localVideoContainer MUST NOT be set to GONE/INVISIBLE — it contains a
+                // SurfaceViewRenderer, and changing its parent visibility destroys the EGL
+                // surface causing crashes on subsequent track attachment.
+                // Restore interactivity and alpha instead.
+                localVideoContainer.isClickable = true
+                localVideoContainer.isFocusable = true
+                localVideoContainer.animate().alpha(1f).setDuration(200).start()
+            } else {
+                // Fade out controlsContainer and topBar, then set GONE so they stop
+                // intercepting touch events. These are safe to GONE (no SurfaceViewRenderer).
+                controlsContainer.animate().alpha(0f).setDuration(200)
+                    .withEndAction { controlsContainer.visibility = View.GONE }.start()
+                topBar.animate().alpha(0f).setDuration(200)
+                    .withEndAction { topBar.visibility = View.GONE }.start()
+                // NOTE: localVideoContainer MUST NOT be set to GONE — EGL surface would be
+                // destroyed. Disable interactivity + fade to transparent instead.
+                localVideoContainer.animate().alpha(0f).setDuration(200).withEndAction {
+                    localVideoContainer.isClickable = false
+                    localVideoContainer.isFocusable = false
+                }.start()
+            }
         }
         
         localVideoContainer.setOnClickListener {
@@ -1199,6 +1220,10 @@ class CallActivity : AppCompatActivity() {
             // the card is back in position but fully transparent — tapping it triggers
             // swapVideoTracks() on what looks like empty screen space.
             localVideoContainer.alpha = 1f
+            // Restore touch interactivity on localVideoContainer in case controls were hidden
+            // (alpha=0, isClickable=false) when the user entered PiP.
+            localVideoContainer.isClickable = true
+            localVideoContainer.isFocusable = true
             // Always show controls and card when returning to fullscreen.
             controlsContainer.alpha = 1f
             topBar.alpha = 1f
