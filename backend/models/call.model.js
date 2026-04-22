@@ -52,6 +52,10 @@ const callSchema = new mongoose.Schema(
       enum: ["caller", "receiver", "system"],
       default: null,
     },
+    endReason: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: { createdAt: "createdAt", updatedAt: false },

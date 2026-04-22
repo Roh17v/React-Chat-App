@@ -361,8 +361,17 @@ const MessageContainer = () => {
   };
 
   // Message status indicator component - bright sky-blue for read visibility
-  const MessageStatus = ({ status, isSent }) => (
+  const MessageStatus = ({ status }) => (
     <span className="inline-flex items-center ml-1.5">
+      {status === "sending" && (
+        <svg className="w-3.5 h-3.5 text-white/50 animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+      )}
+      {status === "failed" && (
+        <span className="text-red-400 text-[10px] font-bold">!</span>
+      )}
       {status === "sent" && (
         <MdDone className="w-4 h-4 text-white/70" />
       )}
@@ -687,7 +696,7 @@ const MessageContainer = () => {
           )}
           onTouchStart={(e) => {
             handleTouchStart(e);
-            startLongPress(message, isSent);
+            if (!message.isOptimistic) startLongPress(message, isSent);
           }}
           onTouchMove={(e) => {
             handleTouchMove(e);
@@ -702,6 +711,7 @@ const MessageContainer = () => {
             cancelLongPress();
           }}
           onContextMenu={(e) => {
+            if (message.isOptimistic) return;
             e.preventDefault();
             openActionMenu(message, isSent, e.currentTarget);
           }}
@@ -714,7 +724,8 @@ const MessageContainer = () => {
             touchAction: "pan-y",
           }}
         >
-          {/* Hover actions dropdown arrow (WhatsApp style) */}
+          {/* Hover actions dropdown arrow — hidden while message is still being sent */}
+          {!message.isOptimistic && (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -732,6 +743,7 @@ const MessageContainer = () => {
           >
             <ChevronDown className="w-4 h-4 drop-shadow-sm" />
           </button>
+          )}
 
           {/* Reply preview */}
           {message.replyTo?.messageId && (
@@ -1002,7 +1014,7 @@ const MessageContainer = () => {
 
       return (
         <div
-          key={message._id}
+          key={message._stableKey || message._id}
           id={`msg-${message._id}`}
           data-message-id={message._id}
           className="flex flex-col gap-2"

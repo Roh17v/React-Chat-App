@@ -1,30 +1,136 @@
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
 import useAppStore from "@/store";
-import React from "react";
 import { RiCloseFill } from "react-icons/ri";
 import { useSocket } from "@/context/SocketContext";
 import { IoCall, IoVideocam, IoCloseSharp } from "react-icons/io5";
+import { Capacitor } from "@capacitor/core";
+import NativeCallPlugin from "@/plugins/NativeCallPlugin";
+import CallTimer from "@/components/CallTimer";
+import { toast } from "sonner";
 
 const ChatHeader = () => {
-  const { closeChat, selectedChatData, selectedChatType, setActiveCall, showAvatarPreview, setShowAvatarPreview } =
-    useAppStore();
+  const {
+    closeChat,
+    selectedChatData,
+    selectedChatType,
+    setActiveCall,
+    clearActiveCall,
+    showAvatarPreview,
+    setShowAvatarPreview,
+    activeCall,
+    isCallMinimized,
+    setCallMinimized,
+  } = useAppStore();
   const { socket, onlineUsers } = useSocket();
+  const isNative = Capacitor.isNativePlatform();
+  const showNativeCallBanner =
+    isNative &&
+    Boolean(activeCall) &&
+    activeCall?.callType === "video" &&
+    Boolean(isCallMinimized);
+  const isAnyCallOngoing = Boolean(activeCall);
+  const enabledCallButtonClass = `touch-target rounded-full text-foreground-secondary transition-all duration-200 active:scale-95 focus:outline-none [-webkit-tap-highlight-color:transparent] ${
+    isNative ? "" : "hover:text-primary hover:bg-accent"
+  }`;
 
   const initiateCall = (callType) => {
-    if (!selectedChatData?._id) return;
+    if (!selectedChatData?._id || isAnyCallOngoing) return;
+    if (!socket) {
+      toast.error("Connecting to server. Please try again.");
+      return;
+    }
 
-    socket.emit("call:initiate", {
-      receiverId: selectedChatData._id,
-      callType,
-    });
+    const pendingPeerId = selectedChatData._id;
+    const pendingName =
+      `${selectedChatData.firstName || ""} ${selectedChatData.lastName || ""}`.trim() ||
+      selectedChatData.email ||
+      "Unknown User";
+
+    const showCallInitError = (reason) => {
+      if (reason === "user_busy") {
+        toast.error(`${pendingName} is currently on another call.`);
+        return;
+      }
+      if (reason === "self_call_not_allowed") {
+        toast.error("You cannot call yourself.");
+        return;
+      }
+      toast.error("Unable to start call right now. Please try again.");
+    };
 
     setActiveCall({
       callType,
       isCaller: true,
-      otherUserId: selectedChatData._id,
-      otherUserName: `${selectedChatData.firstName} ${selectedChatData.lastName}`,
+      otherUserId: pendingPeerId,
+      otherUserName: pendingName,
       otherUserImage: selectedChatData.image,
     });
+    setCallMinimized(false);
+
+    let ackResolved = false;
+    const fallbackTimeout = window.setTimeout(() => {
+      if (ackResolved) return;
+      const state = useAppStore.getState();
+      const currentCall = state.activeCall;
+      const currentPeerId = currentCall?.otherUserId || currentCall?.callerId;
+      if (currentCall && !currentCall.callId && currentPeerId === pendingPeerId) {
+        state.clearActiveCall();
+        toast.error("Call request timed out. Please try again.");
+      }
+    }, 12000);
+
+    socket.emit(
+      "call:initiate",
+      {
+        receiverId: pendingPeerId,
+        callType,
+      },
+      (response = {}) => {
+        ackResolved = true;
+        clearTimeout(fallbackTimeout);
+
+        const state = useAppStore.getState();
+        const currentCall = state.activeCall;
+        const currentPeerId = currentCall?.otherUserId || currentCall?.callerId;
+        const isStillPendingSamePeer =
+          currentCall && !currentCall.callId && currentPeerId === pendingPeerId;
+        if (!isStillPendingSamePeer) {
+          return;
+        }
+
+        if (!response.ok) {
+          clearActiveCall();
+          showCallInitError(response.reason);
+          return;
+        }
+
+        const callerId = response.callerId;
+        const receiverId = response.receiverId;
+        const isCaller = Boolean(response.isCaller);
+        const resolvedPeerId = isCaller ? receiverId : callerId;
+
+        setActiveCall({
+          callId: response.callId,
+          callType: response.callType || callType,
+          isCaller,
+          callerId,
+          receiverId,
+          otherUserId: resolvedPeerId || pendingPeerId,
+          otherUserName: pendingName,
+          otherUserImage: selectedChatData.image,
+        });
+      },
+    );
+  };
+
+  const reopenNativeCall = async () => {
+    if (!showNativeCallBanner) return;
+    try {
+      await NativeCallPlugin.reopenCallActivity();
+      setCallMinimized(false);
+    } catch (error) {
+      console.error("Failed to reopen native call activity:", error);
+    }
   };
 
   const getAvatarImage = () => {
@@ -100,6 +206,22 @@ const ChatHeader = () => {
 
   return (
     <>
+      {showNativeCallBanner && (
+        <button
+          onClick={reopenNativeCall}
+          className="w-full h-9 px-4 bg-[#128C7E] hover:bg-[#0E7A6E] text-white flex items-center justify-between transition-colors"
+        >
+          <span className="text-sm font-medium truncate pr-2">
+            {activeCall?.otherUserName || "Ongoing video call"}
+          </span>
+          <CallTimer
+            connectionStatus={activeCall?.callStartedAt ? "connected" : "checking"}
+            startTimestamp={activeCall?.callStartedAt}
+            className="text-xs font-semibold tabular-nums"
+          />
+        </button>
+      )}
+
       {/* Header */}
       <div className="h-16 sm:h-[72px] border-b border-border bg-background-secondary/95 backdrop-blur-sm flex items-center justify-between px-3 sm:px-4 md:px-6 safe-area-top">
         <div className="flex items-center gap-3">
@@ -151,15 +273,25 @@ const ChatHeader = () => {
             <>
               <button
                 onClick={() => initiateCall("audio")}
-                title="Audio Call"
-                className="touch-target rounded-full text-foreground-secondary hover:text-primary hover:bg-accent transition-all duration-200 active:scale-95"
+                title={isAnyCallOngoing ? "End current call to start a new call" : "Audio Call"}
+                disabled={isAnyCallOngoing}
+                className={`touch-target rounded-full transition-all duration-200 ${
+                  isAnyCallOngoing
+                    ? "text-foreground-muted cursor-not-allowed opacity-50 focus:outline-none [-webkit-tap-highlight-color:transparent]"
+                    : enabledCallButtonClass
+                }`}
               >
                 <IoCall className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>
               <button
                 onClick={() => initiateCall("video")}
-                title="Video Call"
-                className="touch-target rounded-full text-foreground-secondary hover:text-primary hover:bg-accent transition-all duration-200 active:scale-95"
+                title={isAnyCallOngoing ? "End current call to start a new call" : "Video Call"}
+                disabled={isAnyCallOngoing}
+                className={`touch-target rounded-full transition-all duration-200 ${
+                  isAnyCallOngoing
+                    ? "text-foreground-muted cursor-not-allowed opacity-50 focus:outline-none [-webkit-tap-highlight-color:transparent]"
+                    : enabledCallButtonClass
+                }`}
               >
                 <IoVideocam className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>

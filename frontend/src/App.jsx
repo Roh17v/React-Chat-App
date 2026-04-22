@@ -87,8 +87,9 @@ function App() {
     const listener = CapacitorApp.addListener("backButton", ({ canGoBack }) => {
       const state = useAppStore.getState();
 
-      // Priority 1: If a call is active and fullscreen, minimize it first
-      if (state.activeCall && !state.isCallMinimized) {
+      // Priority 1: On web fullscreen call UIs, minimize first.
+      // Native call banner state is managed by native call UI events (PiP/visibility).
+      if (!Capacitor.isNativePlatform() && state.activeCall && !state.isCallMinimized) {
         state.setCallMinimized(true);
         return;
       }

@@ -20,7 +20,7 @@ const MessageBar = () => {
     selectedChatType,
     selectedChatData,
     user,
-    addMessage,
+    addOptimisticMessage,
     setFileUploadingProgress,
     setIsUploading,
     replyToMessage,
@@ -30,21 +30,54 @@ const MessageBar = () => {
 
   const fileInputRef = useRef();
 
+  const keepInputFocused = () => {
+    if (!inputRef.current) return;
+    inputRef.current.focus({ preventScroll: true });
+    requestAnimationFrame(() => {
+      inputRef.current?.focus({ preventScroll: true });
+    });
+  };
+
   const handleSendMessage = async () => {
     const sanitizedMessage = message.trim();
     if (sanitizedMessage === "") return;
 
+    // Generate a unique temp ID for this optimistic message.
+    const tempId = `temp_${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+
     if (selectedChatType === "contact") {
       const replyTo = buildReplyPayload(replyToMessage);
-      const newMessage = {
+
+      // Instantly add placeholder to the UI with status 'sending'.
+      addOptimisticMessage({
+        _id: tempId,
+        sender: user.id,
+        receiver: selectedChatData._id,
+        content: sanitizedMessage,
+        messageType: "text",
+        fileUrl: null,
+        replyTo: replyTo || null,
+        status: "sending",
+        createdAt: now,
+        isOptimistic: true,
+      });
+
+      // Clear the input immediately
+      setMessage("");
+      clearReplyToMessage();
+      keepInputFocused();
+
+      // Send to server in background with the temp ID attached.
+      socket.emit("sendMessage", {
         sender: user.id,
         content: sanitizedMessage,
         receiver: selectedChatData._id,
         messageType: "text",
         fileUrl: undefined,
         replyTo: replyTo || undefined,
-      };
-      socket.emit("sendMessage", newMessage);
+        clientTempId: tempId,
+      });
     } else if (selectedChatType === "channel") {
       socket.emit("send-channel-message", {
         sender: user.id,
@@ -53,7 +86,11 @@ const MessageBar = () => {
         fileUrl: undefined,
         channelId: selectedChatData._id,
       });
+      setMessage("");
+      clearReplyToMessage();
+      keepInputFocused();
     }
+
     if (isTypingRef.current) {
       socket.emit("stop-typing", {
         chatType: selectedChatType,
@@ -63,8 +100,6 @@ const MessageBar = () => {
       });
       isTypingRef.current = false;
     }
-    setMessage("");
-    clearReplyToMessage();
   };
 
   const handleAddEmoji = (emoji) => {
@@ -362,6 +397,8 @@ const MessageBar = () => {
         {/* Send button */}
         <button
           onClick={handleSendMessage}
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
           disabled={!message.trim()}
           className={cn(
             "touch-target rounded-full",
