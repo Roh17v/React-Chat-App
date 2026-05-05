@@ -1436,6 +1436,9 @@ class CallActivity : AppCompatActivity() {
             // translationX moves the card outside the PiP capture area while keeping
             // the EGL surface alive and rendering normally (just off-screen).
             localVideoContainer.translationX = 5000f
+            if (::txtScreenShareStatus.isInitialized) {
+                txtScreenShareStatus.visibility = View.GONE
+            }
         } else {
             // Restore controls when expanding PiP back to full-screen
             controlsContainer.visibility = View.VISIBLE
@@ -1449,9 +1452,15 @@ class CallActivity : AppCompatActivity() {
             }
 
             localVideoContainer.translationX = 0f
+            if (::txtScreenShareStatus.isInitialized) {
+                txtScreenShareStatus.visibility = View.VISIBLE
+            }
             if (isConnected) {
                 callTimer.visibility = View.VISIBLE
             }
+            
+            // Re-sync UI state (indicator, button visibility/enabled state) on PiP exit
+            updateScreenShareUiState()
             // Keep localVideoContainer transparent (already 0f from enterPipSafely) until after
             // requestLayout() has re-measured ConstraintLayout at fullscreen dimensions.
             // Setting alpha=1f immediately causes the card to flash at stale PiP-sized
@@ -1462,7 +1471,13 @@ class CallActivity : AppCompatActivity() {
             // (alpha=0, isClickable=false) when the user entered PiP.
             localVideoContainer.isClickable = true
             localVideoContainer.isFocusable = true
-            btnFlipPip.isEnabled = true
+            
+            // Respect screen share state when re-enabling buttons on PiP exit
+            val isSharing = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
+            btnFlipPip.isEnabled = !isSharing
+            if (isSharing) {
+                btnFlipPip.alpha = 0.5f
+            }
             // Always show controls and card when returning to fullscreen.
             controlsContainer.alpha = 1f
             topBar.alpha = 1f
