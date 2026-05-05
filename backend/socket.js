@@ -158,7 +158,37 @@ const markUserReconnectedInActiveSessions = (userId) => {
   });
 };
 
-const upsertCallMediaState = (callId, userId, videoOff, mediaSeq) => {
+const normalizeCallMediaState = ({
+  videoOff = false,
+  videoSource,
+  screenShareActive = false,
+} = {}) => {
+  const normalizedVideoOff = Boolean(videoOff);
+  const normalizedVideoSource =
+    typeof videoSource === "string" ? videoSource.toLowerCase() : "";
+
+  let resolvedVideoSource = "camera";
+  if (normalizedVideoOff || normalizedVideoSource === "off") {
+    resolvedVideoSource = "off";
+  } else if (
+    normalizedVideoSource === "screen" ||
+    Boolean(screenShareActive)
+  ) {
+    resolvedVideoSource = "screen";
+  }
+
+  return {
+    videoOff: resolvedVideoSource === "off",
+    videoSource: resolvedVideoSource,
+    screenShareActive: resolvedVideoSource === "screen",
+  };
+};
+
+const upsertCallMediaState = (
+  callId,
+  userId,
+  { videoOff, videoSource, screenShareActive, mediaSeq } = {},
+) => {
   const normalizedCallId = normalizeId(callId);
   const normalizedUserId = normalizeId(userId);
   if (!normalizedCallId || !normalizedUserId) return;
@@ -166,6 +196,11 @@ const upsertCallMediaState = (callId, userId, videoOff, mediaSeq) => {
   const current = callMediaStateByCallId.get(normalizedCallId) || {};
   const previous = current[normalizedUserId];
   const parsedSeq = Number(mediaSeq);
+  const normalizedMediaState = normalizeCallMediaState({
+    videoOff,
+    videoSource,
+    screenShareActive,
+  });
 
   if (
     Number.isFinite(parsedSeq) &&
@@ -177,7 +212,7 @@ const upsertCallMediaState = (callId, userId, videoOff, mediaSeq) => {
   }
 
   current[normalizedUserId] = {
-    videoOff: Boolean(videoOff),
+    ...normalizedMediaState,
     ...(Number.isFinite(parsedSeq) ? { mediaSeq: parsedSeq } : {}),
     updatedAtMs: Date.now(),
   };
@@ -1462,22 +1497,33 @@ const setupSocket = (server) => {
       });
     });
 
-    socket.on("call:media-state", ({ to, callId, videoOff, mediaSeq }) => {
-      const normalizedTo = normalizeId(to);
-      if (!normalizedTo) return;
-      const normalizedCallId = normalizeId(callId);
-      if (normalizedCallId) {
-        upsertCallMediaState(normalizedCallId, userId, videoOff, mediaSeq);
-      }
-      emitToUserReliable(normalizedTo, "call:media-state", {
-        from: userId,
-        callId: normalizedCallId || undefined,
-        videoOff: Boolean(videoOff),
-        ...(Number.isFinite(Number(mediaSeq))
-          ? { mediaSeq: Number(mediaSeq) }
-          : {}),
-      });
-    });
+    socket.on(
+      "call:media-state",
+      ({ to, callId, videoOff, videoSource, screenShareActive, mediaSeq }) => {
+        const normalizedTo = normalizeId(to);
+        if (!normalizedTo) return;
+        const normalizedCallId = normalizeId(callId);
+        const normalizedMediaState = normalizeCallMediaState({
+          videoOff,
+          videoSource,
+          screenShareActive,
+        });
+        if (normalizedCallId) {
+          upsertCallMediaState(normalizedCallId, userId, {
+            ...normalizedMediaState,
+            mediaSeq,
+          });
+        }
+        emitToUserReliable(normalizedTo, "call:media-state", {
+          from: userId,
+          callId: normalizedCallId || undefined,
+          ...normalizedMediaState,
+          ...(Number.isFinite(Number(mediaSeq))
+            ? { mediaSeq: Number(mediaSeq) }
+            : {}),
+        });
+      },
+    );
 
     socket.on("call:heartbeat", ({ callId, peerId } = {}, ack) => {
       try {
@@ -1807,6 +1853,8 @@ const setupSocket = (server) => {
             from: resolvedPeerId,
             callId: resolvedCallId,
             videoOff: Boolean(peerMediaState.videoOff),
+            videoSource: peerMediaState.videoSource || "camera",
+            screenShareActive: Boolean(peerMediaState.screenShareActive),
             ...(Number.isFinite(Number(peerMediaState.mediaSeq))
               ? { mediaSeq: Number(peerMediaState.mediaSeq) }
               : {}),
@@ -1819,10 +1867,18 @@ const setupSocket = (server) => {
           phase: session.phase === "connected" ? "connected" : "ringing",
           ...(resolvedPeerId ? { peerId: resolvedPeerId } : {}),
           ...(peerMediaState
-            ? { peerVideoOff: Boolean(peerMediaState.videoOff) }
+            ? {
+                peerVideoOff: Boolean(peerMediaState.videoOff),
+                peerVideoSource: peerMediaState.videoSource || "camera",
+                peerScreenShareActive: Boolean(peerMediaState.screenShareActive),
+              }
             : {}),
           ...(selfMediaState
-            ? { selfVideoOff: Boolean(selfMediaState.videoOff) }
+            ? {
+                selfVideoOff: Boolean(selfMediaState.videoOff),
+                selfVideoSource: selfMediaState.videoSource || "camera",
+                selfScreenShareActive: Boolean(selfMediaState.screenShareActive),
+              }
             : {}),
         });
       } catch (error) {

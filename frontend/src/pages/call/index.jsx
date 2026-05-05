@@ -10,6 +10,7 @@ import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import axios from "axios";
 import { GET_TURN_CREDENTIALS, HOST } from "@/utils/constants";
 import { finalizeCallReliable } from "@/utils/callFinalize";
+import { normalizeCallMediaState } from "@/utils/callMediaState";
 
 const AudioCallScreen = lazy(() => import("@/components/AudioCallScreen"));
 const VideoCallScreen = lazy(() => import("@/components/VideoCallScreen"));
@@ -51,7 +52,7 @@ const NativeCallHandler = () => {
   const uiStateProbeTokenRef = useRef(0);
   const uiStateProbeTimeoutRef = useRef(null);
   const localVideoStateSyncIntervalRef = useRef(null);
-  const lastBroadcastLocalVideoOffRef = useRef(null);
+  const lastBroadcastLocalMediaStateRef = useRef(null);
   const lastMediaStateEmitAtRef = useRef(0);
   const connectionProbeTimeoutRef = useRef(null);
   const connectionProbeInFlightRef = useRef(false);
@@ -60,6 +61,11 @@ const NativeCallHandler = () => {
   const callHeartbeatIntervalRef = useRef(null);
   const outgoingMediaSeqRef = useRef(0);
   const latestIncomingMediaSeqRef = useRef(-1);
+
+  const getMediaStateSignature = (mediaState = {}) => {
+    const normalizedState = normalizeCallMediaState(mediaState);
+    return `${normalizedState.videoOff}:${normalizedState.videoSource}`;
+  };
   // Bug B fix: store named socket handler references so cleanup can unregister
   // exactly those handlers. socket.off("event") with no reference removes ALL
   // listeners for that event — including the global SocketContext handler — which
@@ -100,7 +106,7 @@ const NativeCallHandler = () => {
     remoteOfferSeenRef.current = false;
     localOfferSentRef.current = false;
     lastSyncedStartRef.current = 0;
-    lastBroadcastLocalVideoOffRef.current = null;
+    lastBroadcastLocalMediaStateRef.current = null;
     lastMediaStateEmitAtRef.current = 0;
   };
 
@@ -187,17 +193,20 @@ const NativeCallHandler = () => {
       });
   }, [socket]);
 
-  const emitLocalVideoState = (videoOff, callSnapshot = null) => {
+  const emitLocalVideoState = (mediaState = {}, callSnapshot = null) => {
     const currentCall = callSnapshot || useAppStore.getState().activeCall;
     if (!currentCall) return;
     const to = currentCall.otherUserId || currentCall.callerId;
     if (!to || !currentCall.callId) return;
+    const normalizedState = normalizeCallMediaState(
+      typeof mediaState === "boolean" ? { videoOff: mediaState } : mediaState,
+    );
     const mediaSeq = outgoingMediaSeqRef.current + 1;
     outgoingMediaSeqRef.current = mediaSeq;
     const payload = {
       to,
       callId: currentCall.callId,
-      videoOff: Boolean(videoOff),
+      ...normalizedState,
       mediaSeq,
     };
     if (!socket?.connected) {
@@ -228,20 +237,25 @@ const NativeCallHandler = () => {
       if (callFinalizedRef.current || !nativeReadyRef.current) return;
       try {
         const state = await NativeCallPlugin.getLocalVideoState();
-        const isVideoOff = Boolean(state?.isVideoOff);
-        const prev = lastBroadcastLocalVideoOffRef.current;
+        const normalizedState = normalizeCallMediaState({
+          videoOff: state?.isVideoOff,
+          videoSource: state?.videoSource,
+          screenShareActive: state?.screenShareActive,
+        });
+        const signature = getMediaStateSignature(normalizedState);
+        const prev = lastBroadcastLocalMediaStateRef.current;
         if (prev === null) {
-          lastBroadcastLocalVideoOffRef.current = isVideoOff;
-          emitLocalVideoState(isVideoOff, callSnapshot);
+          lastBroadcastLocalMediaStateRef.current = signature;
+          emitLocalVideoState(normalizedState, callSnapshot);
           return;
         }
-        if (prev !== isVideoOff) {
-          lastBroadcastLocalVideoOffRef.current = isVideoOff;
-          emitLocalVideoState(isVideoOff, callSnapshot);
+        if (prev !== signature) {
+          lastBroadcastLocalMediaStateRef.current = signature;
+          emitLocalVideoState(normalizedState, callSnapshot);
           return;
         }
         if (Date.now() - lastMediaStateEmitAtRef.current >= MEDIA_STATE_RESYNC_MS) {
-          emitLocalVideoState(isVideoOff, callSnapshot);
+          emitLocalVideoState(normalizedState, callSnapshot);
         }
       } catch {
         // Best-effort sync only.
@@ -339,7 +353,7 @@ const NativeCallHandler = () => {
       callUiVisibleRef.current = true;
       remoteOfferSeenRef.current = false;
       localOfferSentRef.current = false;
-      lastBroadcastLocalVideoOffRef.current = null;
+      lastBroadcastLocalMediaStateRef.current = null;
       lastMediaStateEmitAtRef.current = 0;
       lastConnectionStateRef.current = "new";
       lastInactiveProbeAtRef.current = 0;
@@ -462,15 +476,36 @@ const NativeCallHandler = () => {
         finalizeCallState();
       };
 
-      const onMediaState = ({ from, callId, videoOff, mediaSeq } = {}) => {
+      const onMediaState = ({
+        from,
+        callId,
+        videoOff,
+        videoSource,
+        screenShareActive,
+        mediaSeq,
+      } = {}) => {
         if (!matchesMediaState({ from, callId })) return;
         const parsedSeq = Number(mediaSeq);
         if (Number.isFinite(parsedSeq)) {
           if (parsedSeq <= latestIncomingMediaSeqRef.current) return;
           latestIncomingMediaSeqRef.current = parsedSeq;
         }
-        NativeCallPlugin.setRemoteVideoOff({
-          videoOff: Boolean(videoOff),
+        const normalizedState = normalizeCallMediaState({
+          videoOff,
+          videoSource,
+          screenShareActive,
+        });
+        console.info("[NativeCallHandler] socket call:media-state", {
+          from,
+          callId,
+          raw: { videoOff, videoSource, screenShareActive, mediaSeq: parsedSeq },
+          normalized: normalizedState,
+        });
+        NativeCallPlugin.setRemoteMediaState({
+          videoOff: normalizedState.videoOff,
+          videoSource: normalizedState.videoSource,
+          screenShareActive: normalizedState.screenShareActive,
+          mediaSeq: parsedSeq,
         }).catch(() => { });
       };
 
@@ -536,9 +571,14 @@ const NativeCallHandler = () => {
 
         listenersRef.current.push(
           await NativeCallPlugin.addListener("onLocalVideoToggled", (data) => {
-            const isVideoOff = Boolean(data?.isVideoOff);
-            lastBroadcastLocalVideoOffRef.current = isVideoOff;
-            emitLocalVideoState(isVideoOff, activeCall);
+            const normalizedState = normalizeCallMediaState({
+              videoOff: data?.isVideoOff,
+              videoSource: data?.videoSource,
+              screenShareActive: data?.screenShareActive,
+            });
+            lastBroadcastLocalMediaStateRef.current =
+              getMediaStateSignature(normalizedState);
+            emitLocalVideoState(normalizedState, activeCall);
           }),
         );
 
@@ -699,14 +739,23 @@ const NativeCallHandler = () => {
             apiBaseUrl: HOST,
             callStartedAt: activeCall.callStartedAt || undefined,
           });
-          await NativeCallPlugin.setRemoteVideoOff({ videoOff: false });
+          await NativeCallPlugin.setRemoteMediaState({
+            videoOff: false,
+            videoSource: "camera",
+            screenShareActive: false,
+          });
           try {
             const localVideoState = await NativeCallPlugin.getLocalVideoState();
-            const isVideoOff = Boolean(localVideoState?.isVideoOff);
-            lastBroadcastLocalVideoOffRef.current = isVideoOff;
-            emitLocalVideoState(isVideoOff, activeCall);
+            const normalizedState = normalizeCallMediaState({
+              videoOff: localVideoState?.isVideoOff,
+              videoSource: localVideoState?.videoSource,
+              screenShareActive: localVideoState?.screenShareActive,
+            });
+            lastBroadcastLocalMediaStateRef.current =
+              getMediaStateSignature(normalizedState);
+            emitLocalVideoState(normalizedState, activeCall);
           } catch {
-            lastBroadcastLocalVideoOffRef.current = null;
+            lastBroadcastLocalMediaStateRef.current = null;
           }
           startLocalVideoStateSync(activeCall);
           nativeReadyRef.current = true;
@@ -864,7 +913,7 @@ const NativeCallHandler = () => {
       remoteOfferSeenRef.current = false;
       localOfferSentRef.current = false;
       lastSyncedStartRef.current = 0;
-      lastBroadcastLocalVideoOffRef.current = null;
+      lastBroadcastLocalMediaStateRef.current = null;
       lastMediaStateEmitAtRef.current = 0;
       // Bug B fix: unregister with exact handler references so we don't accidentally
       // strip the global SocketContext listeners for these events.

@@ -33,6 +33,16 @@ import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 import org.webrtc.VideoTrack
+import android.content.Intent
+import android.media.projection.MediaProjectionManager
+import android.media.projection.MediaProjectionConfig
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.ActivityResultLauncher
+import android.widget.Toast
+import android.view.ScaleGestureDetector
+import android.view.GestureDetector
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.constraintlayout.widget.ConstraintSet
 
 class CallActivity : AppCompatActivity() {
 
@@ -46,7 +56,10 @@ class CallActivity : AppCompatActivity() {
     private lateinit var btnMute: ImageButton
     private lateinit var btnVideo: ImageButton
     private lateinit var btnFlipPip: ImageButton
+    private lateinit var btnScreenShare: ImageButton
     private lateinit var btnEnd: ImageButton
+    private lateinit var screenShareIndicator: View
+    private lateinit var txtScreenShareStatus: TextView
     private lateinit var txtUserName: TextView
     private lateinit var txtTopName: TextView
     private lateinit var txtStatus: TextView
@@ -59,6 +72,7 @@ class CallActivity : AppCompatActivity() {
     private lateinit var remoteCameraOffOverlay: View
     private lateinit var localCameraOffOverlay: View
     private lateinit var callTimer: Chronometer
+    private lateinit var remoteVideoContainer: View
     
     // Layout containers
     private lateinit var controlsContainer: View
@@ -80,6 +94,24 @@ class CallActivity : AppCompatActivity() {
     private var controlsVisible = true
     private var isConnected = false
     private var isLocalLarge = false
+    private var isRemoteScreenSharing = false
+    private var remoteScalingManualFit = false
+    private var remoteContentSuggestsFit = false
+    private var remoteFrameWidth = 0
+    private var remoteFrameHeight = 0
+    private var remoteFrameRotation = 0
+
+    // Zoom/Pan state
+    private var mScaleFactor = 1.0f
+    private var mPosX = 0f
+    private var mPosY = 0f
+    private var mLastTouchX = 0f
+    private var mLastTouchY = 0f
+    private var mActivePointerId = -1
+    private lateinit var mScaleDetector: ScaleGestureDetector
+    private lateinit var mGestureDetector: GestureDetector
+
+    private var screenSharePermissionRequestInFlight = false
     private var enteringPipTransition = false
     private var lastKnownPipMode = false
     private var pipExitCheckRunnable: Runnable? = null
@@ -143,10 +175,13 @@ class CallActivity : AppCompatActivity() {
     private fun updateVideoSinkTargets() {
         if (!areRenderersReady()) return
         val isFrontCamera = NativeWebRTCPlugin.instance?.isFrontFacingCamera() ?: true
+        val remoteScaling = if (shouldUseRemoteFitScaling()) RendererCommon.ScalingType.SCALE_ASPECT_FIT else RendererCommon.ScalingType.SCALE_ASPECT_FILL
+        remoteVideoView.setScalingType(remoteScaling)
+        localVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+
         if (isLocalLarge) {
             localProxySink.setTarget(remoteVideoView)
             remoteProxySink.setTarget(localVideoView)
-            // When local is large, it is rendered on remoteVideoView.
             remoteVideoView.setMirror(isFrontCamera)
             localVideoView.setMirror(false)
         } else {
@@ -161,6 +196,11 @@ class CallActivity : AppCompatActivity() {
         if (!isConnected) return false
         if (enteringPipTransition || lastKnownPipMode) return false
         if (isFinishing || isDestroyed) return false
+        
+        // Disable swapping during local screen share as it would enlarge the local 
+        // camera preview while the screen is the intended primary content.
+        if (NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true) return false
+        
         return true
     }
 
@@ -264,6 +304,118 @@ class CallActivity : AppCompatActivity() {
             applyPipPreconnectHeaderState()
         } else {
             runOnUiThread { applyPipPreconnectHeaderState() }
+        }
+    }
+
+    private val screenSharePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        screenSharePermissionRequestInFlight = false
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            NativeWebRTCPlugin.instance?.startScreenShareNative(result.resultCode, result.data!!)
+            updateScreenShareUiState()
+        } else {
+            Toast.makeText(this, "Screen share permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun applyZoomTransformations() {
+        if (!::remoteVideoContainer.isInitialized) return
+        val w = remoteVideoContainer.width.toFloat()
+        val h = remoteVideoContainer.height.toFloat()
+        if (w <= 0 || h <= 0) return
+        val maxDX = (w * mScaleFactor - w) / 2f
+        val maxDY = (h * mScaleFactor - h) / 2f
+        mPosX = mPosX.coerceIn(-maxDX, maxDX)
+        mPosY = mPosY.coerceIn(-maxDY, maxDY)
+        remoteVideoContainer.scaleX = mScaleFactor
+        remoteVideoContainer.scaleY = mScaleFactor
+        remoteVideoContainer.translationX = mPosX
+        remoteVideoContainer.translationY = mPosY
+    }
+
+    private fun resetZoom() {
+        mScaleFactor = 1.0f
+        mPosX = 0f
+        mPosY = 0f
+        applyZoomTransformations()
+    }
+
+    private fun applyRemoteVideoFitLayout(screenShare: Boolean) {
+        if (!::remoteVideoContainer.isInitialized) return
+        val root = findViewById<ConstraintLayout>(R.id.call_root_layout) ?: return
+        val set = ConstraintSet()
+        set.clone(root)
+        
+        var appliedFit = false
+        if (screenShare && !isLocalLarge) {
+            val displayMetrics = resources.displayMetrics
+            val screenW = displayMetrics.widthPixels
+            val screenH = displayMetrics.heightPixels
+            val frameW = if (remoteFrameRotation % 180 == 0) remoteFrameWidth else remoteFrameHeight
+            val frameH = if (remoteFrameRotation % 180 == 0) remoteFrameHeight else remoteFrameWidth
+            
+            if (frameW > 0 && frameH > 0) {
+                val scale = Math.min(screenW.toFloat() / frameW, screenH.toFloat() / frameH)
+                val targetW = (frameW * scale).toInt()
+                val targetH = (frameH * scale).toInt()
+                set.constrainWidth(R.id.remote_video_container, targetW)
+                set.constrainHeight(R.id.remote_video_container, targetH)
+                appliedFit = true
+            }
+        }
+
+        if (!appliedFit) {
+            set.constrainWidth(R.id.remote_video_container, ConstraintSet.MATCH_CONSTRAINT)
+            set.constrainHeight(R.id.remote_video_container, ConstraintSet.MATCH_CONSTRAINT)
+        }
+        
+        set.applyTo(root)
+    }
+
+    private fun updateRemoteContentFitHint(w: Int, h: Int, rot: Int) {
+        remoteFrameWidth = w
+        remoteFrameHeight = h
+        remoteFrameRotation = rot
+        val isLandscape = if (rot % 180 == 0) w > h else h > w
+        remoteContentSuggestsFit = isLandscape
+        runOnUiThread {
+            updateVideoSinkTargets()
+            if (isRemoteScreenSharing) applyRemoteVideoFitLayout(true)
+        }
+    }
+
+    private fun shouldUseRemoteFitScaling(): Boolean =
+        isRemoteScreenSharing || remoteScalingManualFit || remoteContentSuggestsFit
+
+    private fun buildScreenCaptureIntent(projectionManager: MediaProjectionManager): Intent {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return projectionManager.createScreenCaptureIntent()
+        }
+        return try {
+            projectionManager.createScreenCaptureIntent(
+                MediaProjectionConfig.createConfigForDefaultDisplay(),
+            )
+        } catch (e: Exception) {
+            projectionManager.createScreenCaptureIntent()
+        }
+    }
+
+    private fun launchScreenSharePermission() {
+        if (screenSharePermissionRequestInFlight) return
+        val projectionManager = getSystemService(MediaProjectionManager::class.java) ?: return
+        screenSharePermissionRequestInFlight = true
+        screenSharePermissionLauncher.launch(buildScreenCaptureIntent(projectionManager))
+    }
+
+    fun setRemoteScreenShareState(screenShareActive: Boolean) {
+        runOnUiThread {
+            Log.d("CallActivity", "setRemoteScreenShareState: $screenShareActive")
+            if (isRemoteScreenSharing == screenShareActive) return@runOnUiThread
+            isRemoteScreenSharing = screenShareActive
+            updateScreenShareUiState()
+            updateVideoSinkTargets()
+            applyRemoteVideoFitLayout(screenShareActive)
         }
     }
 
@@ -463,6 +615,7 @@ class CallActivity : AppCompatActivity() {
         btnMute = findViewById(R.id.btn_mute)
         btnVideo = findViewById(R.id.btn_video)
         btnFlipPip = findViewById(R.id.btn_flip_pip)
+        btnScreenShare = findViewById(R.id.btn_screen_share)
         btnEnd = findViewById(R.id.btn_end)
         
         txtUserName = findViewById(R.id.txt_user_name)
@@ -482,7 +635,11 @@ class CallActivity : AppCompatActivity() {
         controlsContainer = findViewById(R.id.controls_container)
         connectingOverlay = findViewById(R.id.connecting_overlay)
         topBar = findViewById(R.id.top_bar)
+        screenShareIndicator = findViewById(R.id.screen_share_indicator)
+        txtScreenShareStatus = findViewById(R.id.txt_screen_share_status)
         localVideoContainer = findViewById(R.id.local_video_container)
+        remoteVideoContainer = findViewById(R.id.remote_video_container)
+        remoteVideoContainer.isClickable = true
         gradientTop = findViewById(R.id.gradient_top)
         gradientBottom = findViewById(R.id.gradient_bottom)
 
@@ -514,13 +671,15 @@ class CallActivity : AppCompatActivity() {
                 Log.d("CallActivity", "Remote video SurfaceView first frame rendered.")
             }
             override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
+                Log.d("CallActivity", "Remote video surface ready: ${videoWidth}x${videoHeight} — rotation: $rotation")
+                updateRemoteContentFitHint(videoWidth, videoHeight, rotation)
+
                 // Bug D fix: only attempt re-attachment during initial setup (before the first
                 // frame has been rendered). Once video is flowing, resolution changes (remote
                 // device rotation, network-driven quality adaptation) are handled natively by
                 // the renderer. Calling setRemoteVideoTrack() here mid-call causes unnecessary
                 // removeSink+addSink on a live surface, producing black flashes on some devices.
                 if (remoteFirstFrameRendered) return
-                Log.d("CallActivity", "Remote video surface ready: ${videoWidth}x${videoHeight} — attempting track attach")
                 NativeWebRTCPlugin.instance?.getRemoteVideoTrack()?.let {
                     setRemoteVideoTrack(it)
                 }
@@ -550,6 +709,62 @@ class CallActivity : AppCompatActivity() {
         localVideoView.setEnableHardwareScaler(false)
         localVideoView.setZOrderMediaOverlay(true) // CRITICAL: forces PiP SurfaceView to render ON TOP of remote video
         localVideoView.setMirror(true)
+
+        mGestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (mScaleFactor != 1.0f) {
+                    resetZoom()
+                    return true
+                }
+                remoteScalingManualFit = !remoteScalingManualFit
+                updateVideoSinkTargets()
+                applyRemoteVideoFitLayout(isRemoteScreenSharing && !isLocalLarge)
+                return true
+            }
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                // Toggle controls logic already exists in the original file, 
+                // but let's see if we should trigger it here or use the existing listener.
+                // The original file has remoteVideoView.setOnClickListener.
+                return false 
+            }
+        })
+
+        mScaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                mScaleFactor *= detector.scaleFactor
+                mScaleFactor = mScaleFactor.coerceIn(1.0f, 5.0f)
+                applyZoomTransformations()
+                return true
+            }
+        })
+
+        remoteVideoContainer.setOnTouchListener { _, event ->
+            mScaleDetector.onTouchEvent(event)
+            mGestureDetector.onTouchEvent(event)
+            val action = event.actionMasked
+            if (action == MotionEvent.ACTION_DOWN) {
+                mLastTouchX = event.x
+                mLastTouchY = event.y
+                mActivePointerId = event.getPointerId(0)
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                val pointerIndex = event.findPointerIndex(mActivePointerId)
+                if (pointerIndex != -1) {
+                    val x = event.getX(pointerIndex)
+                    val y = event.getY(pointerIndex)
+                    if (mScaleFactor > 1.0f && !mScaleDetector.isInProgress) {
+                        mPosX += x - mLastTouchX
+                        mPosY += y - mLastTouchY
+                        applyZoomTransformations()
+                    }
+                    mLastTouchX = x
+                    mLastTouchY = y
+                }
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                mActivePointerId = -1
+            }
+            true
+        }
+
         updateVideoSinkTargets()
     }
 
@@ -630,6 +845,15 @@ class CallActivity : AppCompatActivity() {
             NativeWebRTCPlugin.instance?.flipCameraNative()
         }
 
+        btnScreenShare.setOnClickListener {
+            if (NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true) {
+                NativeWebRTCPlugin.instance?.stopScreenShareNative()
+                updateScreenShareUiState()
+            } else {
+                launchScreenSharePermission()
+            }
+        }
+
         remoteVideoView.setOnClickListener {
             controlsVisible = !controlsVisible
             if (controlsVisible) {
@@ -645,7 +869,14 @@ class CallActivity : AppCompatActivity() {
                 localVideoContainer.isClickable = true
                 localVideoContainer.isFocusable = true
                 localVideoContainer.animate().alpha(1f).setDuration(200).start()
-                btnFlipPip.isEnabled = true
+                
+                btnFlipPip.visibility = View.VISIBLE
+                val isScreenSharing = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
+                val targetAlpha = if (isScreenSharing) 0.5f else 1.0f
+                btnFlipPip.animate().alpha(targetAlpha).setDuration(200).start()
+                
+                // Only enable the flip button if we are NOT sharing the screen
+                btnFlipPip.isEnabled = !isScreenSharing
             } else {
                 // Fade out controlsContainer and topBar, then set GONE so they stop
                 // intercepting touch events. These are safe to GONE (no SurfaceViewRenderer).
@@ -653,13 +884,11 @@ class CallActivity : AppCompatActivity() {
                     .withEndAction { controlsContainer.visibility = View.GONE }.start()
                 topBar.animate().alpha(0f).setDuration(200)
                     .withEndAction { topBar.visibility = View.GONE }.start()
-                // NOTE: localVideoContainer MUST NOT be set to GONE — EGL surface would be
-                // destroyed. Disable interactivity + fade to transparent instead.
-                localVideoContainer.animate().alpha(0f).setDuration(200).withEndAction {
-                    localVideoContainer.isClickable = false
-                    localVideoContainer.isFocusable = false
-                    btnFlipPip.isEnabled = false
-                }.start()
+                
+                // Keep localVideoContainer visible and interactive for dragging even when buttons are gone.
+                localVideoContainer.animate().alpha(0.85f).setDuration(200).start()
+                btnFlipPip.animate().alpha(0f).setDuration(200)
+                    .withEndAction { btnFlipPip.visibility = View.GONE }.start()
             }
         }
         
@@ -825,10 +1054,9 @@ class CallActivity : AppCompatActivity() {
         val tapSlopPx = resources.displayMetrics.density * 18f
 
         localVideoContainer.setOnTouchListener { view, event ->
-            // When controls are hidden, localVideoContainer.isClickable is false.
-            // Return false so the event falls through to remoteVideoView's onClick
-            // (which shows controls), and ghost-swaps on the invisible card are blocked.
-            if (!view.isClickable) return@setOnTouchListener false
+            // Allow dragging even if controls are hidden. 
+            // We only return false if the view itself is not visible or initialized.
+            if (view.alpha < 0.05f) return@setOnTouchListener false
 
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -936,9 +1164,11 @@ class CallActivity : AppCompatActivity() {
         try {
             isLocalLarge = !isLocalLarge
 
+            resetZoom()
             // Swap only by retargeting proxy sinks; avoid detach/attach churn on live tracks.
             updateVideoSinkTargets()
             updateLocalCameraOffState()
+            applyRemoteVideoFitLayout(isRemoteScreenSharing && !isLocalLarge)
             lastSwapAtMs = SystemClock.elapsedRealtime()
         } catch (e: Exception) {
             Log.e("CallActivity", "swapVideoTracksSync failed", e)
@@ -1339,4 +1569,43 @@ class CallActivity : AppCompatActivity() {
 
         return builder.build()
     }
+    private fun updateScreenShareUiState() {
+        if (!::btnScreenShare.isInitialized || !::screenShareIndicator.isInitialized) return
+        
+        val isLocalActive = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
+        Log.d("CallActivity", "updateScreenShareUiState: localActive=$isLocalActive, remoteActive=$isRemoteScreenSharing")
+        
+        // Force swap back to normal (local small, remote large) when starting local screen share.
+        if (isLocalActive && isLocalLarge) {
+            swapVideoTracks()
+        }
+        
+        btnScreenShare.setImageResource(R.drawable.ic_screen_share)
+        btnScreenShare.alpha = if (isLocalActive) 1.0f else 0.85f
+        
+        // Disable camera flip and video toggle during local screen share to prevent state conflicts
+        btnFlipPip.isEnabled = !isLocalActive
+        btnFlipPip.alpha = if (isLocalActive) 0.5f else 1.0f
+        btnVideo.isEnabled = !isLocalActive
+        btnVideo.alpha = if (isLocalActive) 0.5f else 1.0f
+
+        // Show indicator if LOCAL sharing is active.
+        screenShareIndicator.visibility = if (isLocalActive) View.VISIBLE else View.GONE
+        
+        // Update Video Sink Targets to ensure scaling is correct
+        updateVideoSinkTargets()
+    }
+
+    fun syncRemoteMediaUiState() {
+        runOnUiThread { updateLocalCameraOffState() }
+    }
+
+    fun syncLocalVideoUiState() {
+        runOnUiThread {
+            isVideoOff = NativeWebRTCPlugin.instance?.isVideoOffState() == true
+            updateLocalCameraOffState()
+            updateScreenShareUiState()
+        }
+    }
+
 }
