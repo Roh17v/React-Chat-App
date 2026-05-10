@@ -350,7 +350,7 @@ const MessageContainer = () => {
         reader.readAsDataURL(response.data);
         reader.onloadend = async () => {
           const base64data = reader.result.split(',')[1];
-          const nativePlugin = window?.Capacitor?.Plugins?.NativeWebRTCPlugin;
+          const nativePlugin = window?.Capacitor?.Plugins?.NativeWebRTC;
           if (nativePlugin?.saveFile) {
             try {
               await nativePlugin.saveFile({ 
