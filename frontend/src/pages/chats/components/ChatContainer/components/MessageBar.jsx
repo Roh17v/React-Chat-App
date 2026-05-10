@@ -144,6 +144,7 @@ const MessageBar = () => {
               receiver: selectedChatData._id,
               messageType: "file",
               fileUrl: response.data.fileUrl,
+              fileName: file.name,
               replyTo: replyTo || undefined,
             });
           } else if (selectedChatType === "channel") {
@@ -152,6 +153,7 @@ const MessageBar = () => {
               content: message,
               messageType: "file",
               fileUrl: response.data.fileUrl,
+              fileName: file.name,
               channelId: selectedChatData._id,
             });
           }

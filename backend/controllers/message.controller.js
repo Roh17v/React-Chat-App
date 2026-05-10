@@ -35,6 +35,7 @@ export const getMessages = async (req, res, next) => {
           ...msg,
           content: null,
           fileUrl: null,
+          fileName: null,
           messageType: msg.messageType,
         };
       }
@@ -91,6 +92,7 @@ export const getChannelMessages = async (req, res, next) => {
           ...msg,
           content: null,
           fileUrl: null,
+          fileName: null,
           messageType: msg.messageType,
         };
       }
@@ -150,6 +152,7 @@ export const deleteForEveryone = async (req, res, next) => {
       deletedAt: new Date(),
       content: null,
       fileUrl: null,
+      fileName: null,
     });
 
     // Notify all relevant users via socket

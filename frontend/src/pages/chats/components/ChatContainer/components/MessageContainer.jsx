@@ -74,6 +74,7 @@ const MessageContainer = () => {
 
   const [showImage, setShowImage] = useState(false);
   const [imageURL, setImageURL] = useState(null);
+  const [previewFileName, setPreviewFileName] = useState(null);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
@@ -331,7 +332,7 @@ const MessageContainer = () => {
     return imageRegex.test(filePath);
   };
 
-  const downloadFile = async (url) => {
+  const downloadFile = async (url, fileName) => {
     try {
       setIsDownloading(true);
       setFileDownloadingProgress(0);
@@ -355,7 +356,7 @@ const MessageContainer = () => {
             try {
               await nativePlugin.saveFile({ 
                 data: base64data, 
-                fileName: url.split("/").pop() || "file",
+                fileName: fileName || url.split("/").pop() || "file",
                 mimeType: response.data.type
               });
               toast.success("File saved to Downloads");
@@ -372,7 +373,7 @@ const MessageContainer = () => {
         const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
         const link = document.createElement("a");
         link.href = urlBlob;
-        link.setAttribute("download", url.split("/").pop() || "file");
+        link.setAttribute("download", fileName || url.split("/").pop() || "file");
 
         document.body.appendChild(link);
         link.click();
@@ -660,7 +661,7 @@ const MessageContainer = () => {
       return renderDeletedPlaceholder(message, isSent);
     }
 
-    const fileName = message.fileUrl?.split("/").pop() || "";
+    const fileName = message.fileName || message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const canReply =
       message.messageType === "text" || message.messageType === "file";
@@ -818,6 +819,7 @@ const MessageContainer = () => {
                   onClick={() => {
                     setShowImage(true);
                     setImageURL(message.fileUrl);
+                    setPreviewFileName(message.fileName);
                   }}
                 >
                   <img
@@ -847,7 +849,7 @@ const MessageContainer = () => {
                     {fileName}
                   </span>
                   <button
-                    onClick={() => downloadFile(message.fileUrl)}
+                    onClick={() => downloadFile(message.fileUrl, message.fileName)}
                     className={cn(
                       "touch-target rounded-full transition-colors",
                       isSent 
@@ -886,7 +888,7 @@ const MessageContainer = () => {
       return renderDeletedPlaceholder(message, isSent);
     }
 
-    const fileName = message.fileUrl?.split("/").pop() || "";
+    const fileName = message.fileName || message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
 
@@ -996,7 +998,7 @@ const MessageContainer = () => {
                     {fileName}
                   </span>
                   <button
-                    onClick={() => downloadFile(message.fileUrl)}
+                    onClick={() => downloadFile(message.fileUrl, message.fileName)}
                     className={cn(
                       "touch-target rounded-full transition-colors",
                       isSent 
@@ -1256,7 +1258,7 @@ const MessageContainer = () => {
           {/* Modal Actions */}
           <div className="fixed top-4 right-4 flex items-center gap-2">
             <button
-              onClick={() => downloadFile(imageURL)}
+              onClick={() => downloadFile(imageURL, previewFileName)}
               className="touch-target rounded-full bg-background-secondary hover:bg-accent transition-colors"
             >
               <IoArrowDownCircle className="w-7 h-7 text-foreground" />
