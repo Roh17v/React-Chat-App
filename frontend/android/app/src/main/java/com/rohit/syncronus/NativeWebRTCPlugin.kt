@@ -1563,6 +1563,62 @@ class NativeWebRTCPlugin : Plugin() {
         }
     }
 
+    @PluginMethod
+    fun saveFile(call: PluginCall) {
+        val data = call.getString("data")
+        val fileName = call.getString("fileName") ?: "downloaded_file"
+        val mimeType = call.getString("mimeType") ?: "application/octet-stream"
+        
+        if (data == null) {
+            call.reject("Data is required")
+            return
+        }
+        
+        val hostActivity = activity
+        if (hostActivity == null) {
+            call.reject("Host activity unavailable")
+            return
+        }
+
+        try {
+            val bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT)
+            val resolver = hostActivity.contentResolver
+            
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                }
+                val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { outputStream ->
+                        outputStream.write(bytes)
+                    }
+                    val ret = JSObject()
+                    ret.put("status", "success")
+                    call.resolve(ret)
+                } else {
+                    call.reject("Failed to create file in Downloads")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val file = java.io.File(downloadsDir, fileName)
+                java.io.FileOutputStream(file).use { outputStream ->
+                    outputStream.write(bytes)
+                }
+                android.media.MediaScannerConnection.scanFile(hostActivity, arrayOf(file.absolutePath), null, null)
+                
+                val ret = JSObject()
+                ret.put("status", "success")
+                call.resolve(ret)
+            }
+        } catch (e: Exception) {
+            call.reject("Failed to save file: ${e.message}")
+        }
+    }
+
     // ==================== INTERNAL HELPERS ====================
 
     private fun ensureAudioRoutingInitialized(context: Context) {

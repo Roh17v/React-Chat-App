@@ -345,15 +345,40 @@ const MessageContainer = () => {
 
       setIsDownloading(false);
 
-      const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement("a");
-      link.href = urlBlob;
-      link.setAttribute("download", url.split("/").pop() || "file");
+      if (Capacitor.isNativePlatform()) {
+        const reader = new FileReader();
+        reader.readAsDataURL(response.data);
+        reader.onloadend = async () => {
+          const base64data = reader.result.split(',')[1];
+          const nativePlugin = window?.Capacitor?.Plugins?.NativeWebRTCPlugin;
+          if (nativePlugin?.saveFile) {
+            try {
+              await nativePlugin.saveFile({ 
+                data: base64data, 
+                fileName: url.split("/").pop() || "file",
+                mimeType: response.data.type
+              });
+              toast.success("File saved to Downloads");
+            } catch (err) {
+              console.error("Failed to save file via native plugin:", err);
+              toast.error("Failed to save file");
+            }
+          } else {
+            console.error("NativeWebRTCPlugin or saveFile method not found");
+            toast.error("Native download not supported");
+          }
+        };
+      } else {
+        const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement("a");
+        link.href = urlBlob;
+        link.setAttribute("download", url.split("/").pop() || "file");
 
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(urlBlob);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(urlBlob);
+      }
     } catch (error) {
       console.log("Error downloading file: ", error);
       setIsDownloading(false);
