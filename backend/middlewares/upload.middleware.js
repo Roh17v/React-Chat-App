@@ -8,7 +8,7 @@ import { storageClient } from "../config/storage.client.js";
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10 MB
+    fileSize: 50 * 1024 * 1024, // 50 MB
   },
 });
 
