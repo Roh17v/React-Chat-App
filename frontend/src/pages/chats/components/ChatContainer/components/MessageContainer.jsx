@@ -290,7 +290,7 @@ const MessageContainer = () => {
   const getReplyPreviewText = (replyTo) => {
     if (!replyTo) return "";
     if (replyTo.messageType === "file") {
-      return replyTo.fileName || "File";
+      return replyTo.fileName || replyTo.previewText || "File";
     }
     return replyTo.previewText || "Message";
   };

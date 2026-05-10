@@ -178,6 +178,7 @@ const MessageBar = () => {
     if (!replyToMessage) return "";
     if (replyToMessage.messageType === "file") {
       return (
+        replyToMessage.fileName ||
         replyToMessage.fileUrl?.split("/").pop() ||
         "File"
       );
@@ -189,7 +190,7 @@ const MessageBar = () => {
     if (!sourceMessage) return null;
     const isFile = sourceMessage.messageType === "file";
     const fileName = isFile
-      ? sourceMessage.fileUrl?.split("/").pop() || "File"
+      ? sourceMessage.fileName || sourceMessage.fileUrl?.split("/").pop() || "File"
       : null;
     const previewText = isFile
       ? fileName
