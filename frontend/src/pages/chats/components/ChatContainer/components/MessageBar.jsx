@@ -8,6 +8,7 @@ import { useSocket } from "@/context/SocketContext";
 import axios from "axios";
 import { UPLOAD_FILE_ROUTE } from "@/utils/constants";
 import { cn } from "@/lib/utils";
+import { Capacitor } from "@capacitor/core";
 
 const MessageBar = () => {
   const [message, setMessage] = useState("");
@@ -65,6 +66,7 @@ const MessageBar = () => {
 
       // Clear the input immediately
       setMessage("");
+      if (inputRef.current) inputRef.current.style.height = "auto";
       clearReplyToMessage();
       keepInputFocused();
 
@@ -87,6 +89,7 @@ const MessageBar = () => {
         channelId: selectedChatData._id,
       });
       setMessage("");
+      if (inputRef.current) inputRef.current.style.height = "auto";
       clearReplyToMessage();
       keepInputFocused();
     }
@@ -335,9 +338,8 @@ const MessageBar = () => {
         />
 
         {/* Message input */}
-        <input
+        <textarea
           ref={inputRef}
-          type="text"
           className={cn(
             "flex-1 px-3 py-2 sm:py-2.5",
             "bg-transparent text-foreground",
@@ -345,16 +347,28 @@ const MessageBar = () => {
             "text-sm sm:text-base",
             "focus:outline-none",
             "min-w-0", // Prevent flex overflow
+            "resize-none", // Prevent manual resize
+            "max-h-32", // Limit max height
           )}
           placeholder="Type a message..."
           value={message}
-          onChange={(e) => setMessage(e.target.value)}
+          onChange={(e) => {
+            setMessage(e.target.value);
+            e.target.style.height = "auto";
+            e.target.style.height = `${e.target.scrollHeight}px`;
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSendMessage();
+              if (Capacitor.isNativePlatform()) {
+                // On mobile, let default behavior happen (insert newline)
+              } else {
+                // On web, send message
+                e.preventDefault();
+                handleSendMessage();
+              }
             }
           }}
+          rows={1}
         />
 
         {/* Emoji picker */}
