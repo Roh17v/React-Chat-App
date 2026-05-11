@@ -3,6 +3,7 @@ import ContactContainer from "./components/ContactContainer";
 import EmptyChatContainer from "./components/EmptyChatContainer";
 import ChatContainer from "./components/ChatContainer";
 import useAppStore from "@/store";
+import ShareModal from "@/components/ShareModal";
 
 const Chats = () => {
   const {
@@ -33,6 +34,7 @@ const Chats = () => {
       ) : (
         <ChatContainer />
       )}
+      <ShareModal />
     </div>
   );
 };
