@@ -94,6 +94,12 @@ function App() {
         return;
       }
 
+      // If image preview is showing, close it
+      if (state.showImage) {
+        state.setShowImage(false);
+        return;
+      }
+
       // Priority 2: If message action menu is showing, close it
       if (state.messageActionMenu) {
         state.setMessageActionMenu(null);

@@ -48,6 +48,10 @@ export const createChatSlice = (set, get) => ({
   setSelectedChatData: (selectedChatData) =>
     set({ selectedChatData, replyToMessage: null }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
+  showImage: false,
+  imageURL: null,
+  setShowImage: (showImage) => set({ showImage }),
+  setImageURL: (imageURL) => set({ imageURL }),
   setSelectedChatMessages: (newMessages, reset = false) =>
     set((state) => {
       const allMessages = reset

@@ -69,11 +69,13 @@ const MessageContainer = () => {
     replaceWithDeletedPlaceholder,
     messageActionMenu,
     setMessageActionMenu,
+    showImage,
+    setShowImage,
+    imageURL,
+    setImageURL,
   } = useAppStore();
   const { socket } = useSocket();
 
-  const [showImage, setShowImage] = useState(false);
-  const [imageURL, setImageURL] = useState(null);
   const [previewFileName, setPreviewFileName] = useState(null);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -336,7 +338,10 @@ const MessageContainer = () => {
     try {
       setIsDownloading(true);
       setFileDownloadingProgress(0);
-      const response = await axios.get(`${url}`, {
+      
+      const downloadUrl = `${url}${url.includes('?') ? '&' : '?'}nocache=${Date.now()}`;
+      
+      const response = await axios.get(downloadUrl, {
         responseType: "blob",
         onDownloadProgress: (data) =>
           setFileDownloadingProgress(
@@ -1272,7 +1277,6 @@ const MessageContainer = () => {
 
             <button
               onClick={() => {
-                setImageURL(null);
                 setShowImage(false);
               }}
               className="touch-target rounded-full bg-background-secondary hover:bg-destructive/20 transition-colors"
