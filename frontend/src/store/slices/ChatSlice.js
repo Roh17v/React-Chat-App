@@ -19,7 +19,9 @@ export const createChatSlice = (set, get) => ({
   replyToMessage: null,
   showAvatarPreview: false,
   messageActionMenu: null, // { message, isSent }
+  pendingShareData: null, // { text, fileUrl }
 
+  setPendingShareData: (data) => set({ pendingShareData: data }),
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
     set({ messageContainerRef: ref });
