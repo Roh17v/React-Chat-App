@@ -68,6 +68,7 @@ export default function ShareModal() {
     setIsSending(true);
     let fileUrl = null;
     let fileName = null;
+    let fileMetadata = {};
 
     if (pendingShareData.fileUrl) {
       try {
@@ -90,6 +91,18 @@ export default function ShareModal() {
         }
 
         const file = new File([blob], originalName, { type: mimeType });
+
+        if (file.type.startsWith('image/')) {
+          fileMetadata = await new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              resolve({ width: img.width, height: img.height });
+              URL.revokeObjectURL(img.src);
+            };
+            img.onerror = () => resolve({});
+            img.src = URL.createObjectURL(file);
+          });
+        }
 
         const formData = new FormData();
         formData.append("file", file);
@@ -125,9 +138,10 @@ export default function ShareModal() {
         messageType,
         fileUrl,
         fileName,
+        fileMetadata,
       });
     }
-
+    
     for (const channelId of selectedChannels) {
       socket.emit("send-channel-message", {
         sender: user.id,
@@ -135,6 +149,7 @@ export default function ShareModal() {
         messageType,
         fileUrl,
         fileName,
+        fileMetadata,
         channelId,
       });
     }

@@ -815,7 +815,13 @@ const MessageContainer = () => {
             <div className="flex flex-col">
               {isImage ? (
                 <div
-                  className="cursor-pointer overflow-hidden rounded-xl"
+                  className="cursor-pointer overflow-hidden rounded-xl max-w-[240px] sm:max-w-[280px] bg-accent/20 relative"
+                  style={{
+                    width: message.fileMetadata?.width ? `${message.fileMetadata.width}px` : "280px",
+                    aspectRatio: message.fileMetadata?.width && message.fileMetadata?.height
+                      ? `${message.fileMetadata.width} / ${message.fileMetadata.height}`
+                      : undefined,
+                  }}
                   onClick={() => {
                     setShowImage(true);
                     setImageURL(message.fileUrl);
@@ -825,7 +831,7 @@ const MessageContainer = () => {
                   <img
                     src={message.fileUrl}
                     alt="Shared image"
-                    className="max-w-[240px] sm:max-w-[280px] h-auto object-cover transition-transform duration-200 hover:scale-105"
+                    className="w-full h-full object-cover transition-transform duration-200 hover:scale-105"
                   />
                 </div>
               ) : (

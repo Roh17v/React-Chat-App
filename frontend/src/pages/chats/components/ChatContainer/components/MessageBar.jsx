@@ -119,6 +119,19 @@ const MessageBar = () => {
     const file = e.target.files[0];
     try {
       if (file) {
+        let fileMetadata = {};
+        if (file.type.startsWith('image/')) {
+          fileMetadata = await new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              resolve({ width: img.width, height: img.height });
+              URL.revokeObjectURL(img.src);
+            };
+            img.onerror = () => resolve({});
+            img.src = URL.createObjectURL(file);
+          });
+        }
+
         const formData = new FormData();
         setIsUploading(true);
         setFileUploadingProgress(0);
@@ -145,6 +158,7 @@ const MessageBar = () => {
               messageType: "file",
               fileUrl: response.data.fileUrl,
               fileName: file.name,
+              fileMetadata,
               replyTo: replyTo || undefined,
             });
           } else if (selectedChatType === "channel") {
@@ -154,6 +168,7 @@ const MessageBar = () => {
               messageType: "file",
               fileUrl: response.data.fileUrl,
               fileName: file.name,
+              fileMetadata,
               channelId: selectedChatData._id,
             });
           }
