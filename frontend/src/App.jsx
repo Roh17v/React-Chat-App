@@ -226,19 +226,21 @@ function App() {
       const listener = CapacitorShareTarget.addListener("shareReceived", (event) => {
         console.log("Shared content received:", event);
         const text = event.texts && event.texts.length > 0 ? event.texts[0] : null;
-        let fileUrl = null;
-        let fileName = null;
-        let fileMimeType = null;
+        const files = [];
 
         if (event.files && event.files.length > 0) {
-          fileUrl = event.files[0].uri;
-          fileName = event.files[0].name;
-          fileMimeType = event.files[0].mimeType;
+          event.files.forEach((f) => {
+            files.push({
+              fileUrl: f.uri,
+              fileName: f.name,
+              fileMimeType: f.mimeType,
+            });
+          });
         }
         
-        if (text || fileUrl) {
+        if (text || files.length > 0) {
           const setPendingShareData = useAppStore.getState().setPendingShareData;
-          setPendingShareData({ text, fileUrl, fileName, fileMimeType });
+          setPendingShareData({ text, files });
           
           // If the user is on the chat view, we don't necessarily need to navigate,
           // but if they are elsewhere, we should probably take them to chats.

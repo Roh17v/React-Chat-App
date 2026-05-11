@@ -66,21 +66,46 @@ export default function ShareModal() {
     }
 
     setIsSending(true);
-    let fileUrl = null;
-    let fileName = null;
-    let fileMetadata = {};
 
-    if (pendingShareData.fileUrl) {
+    // 1. Send text message if present
+    if (pendingShareData.text) {
+      for (const receiverId of selectedContacts) {
+        socket.emit("sendMessage", {
+          sender: user.id,
+          content: pendingShareData.text,
+          receiver: receiverId,
+          messageType: "text",
+        });
+      }
+      for (const channelId of selectedChannels) {
+        socket.emit("send-channel-message", {
+          sender: user.id,
+          content: pendingShareData.text,
+          messageType: "text",
+          channelId,
+        });
+      }
+    }
+
+    // 2. Loop over files and send them
+    const files = pendingShareData.files || [];
+    
+    for (let i = 0; i < files.length; i++) {
+      const fileData = files[i];
+      let fileUrl = null;
+      let fileName = null;
+      let fileMetadata = {};
+
       try {
         setIsUploading(true);
         setFileUploadingProgress(0);
-        const src = Capacitor.convertFileSrc(pendingShareData.fileUrl);
+        
+        const src = Capacitor.convertFileSrc(fileData.fileUrl);
         const res = await fetch(src);
         const blob = await res.blob();
 
-        const mimeType =
-          pendingShareData.fileMimeType || blob.type || "application/octet-stream";
-        let originalName = pendingShareData.fileName || "shared_file";
+        const mimeType = fileData.fileMimeType || blob.type || "application/octet-stream";
+        let originalName = fileData.fileName || fileData.fileUrl.split('/').pop() || "shared_file";
 
         const hasExtension = /\.[a-zA-Z0-9]+$/.test(originalName);
         if (!hasExtension && mimeType.includes("/")) {
@@ -116,49 +141,45 @@ export default function ShareModal() {
         if (response.status === 201 && response.data) {
           fileUrl = response.data.fileUrl;
           fileName = file.name;
+          
+          // Send message for this file
+          for (const receiverId of selectedContacts) {
+            socket.emit("sendMessage", {
+              sender: user.id,
+              content: undefined,
+              receiver: receiverId,
+              messageType: "file",
+              fileUrl,
+              fileName,
+              fileMetadata,
+            });
+          }
+          
+          for (const channelId of selectedChannels) {
+            socket.emit("send-channel-message", {
+              sender: user.id,
+              content: undefined,
+              messageType: "file",
+              fileUrl,
+              fileName,
+              fileMetadata,
+              channelId,
+            });
+          }
         }
         setIsUploading(false);
       } catch (e) {
-        console.error("Failed to upload shared file", e);
-        setIsUploading(false);
+        console.error(`Failed to upload file ${i + 1}`, e);
         toast.error("Failed to upload shared file");
-        setIsSending(false);
-        return;
+        setIsUploading(false);
       }
     }
 
-    const messageContent = pendingShareData.text || undefined;
-    const messageType = fileUrl ? "file" : "text";
-
-    for (const receiverId of selectedContacts) {
-      socket.emit("sendMessage", {
-        sender: user.id,
-        content: messageContent,
-        receiver: receiverId,
-        messageType,
-        fileUrl,
-        fileName,
-        fileMetadata,
-      });
-    }
-    
-    for (const channelId of selectedChannels) {
-      socket.emit("send-channel-message", {
-        sender: user.id,
-        content: messageContent,
-        messageType,
-        fileUrl,
-        fileName,
-        fileMetadata,
-        channelId,
-      });
-    }
-
-    toast.success("Shared successfully!");
     setIsSending(false);
     setPendingShareData(null);
     setSelectedContacts([]);
     setSelectedChannels([]);
+    toast.success("Shared successfully!");
   };
 
   const totalSelected = selectedContacts.length + selectedChannels.length;
