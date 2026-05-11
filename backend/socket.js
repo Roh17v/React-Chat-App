@@ -513,6 +513,7 @@ const setupSocket = (server) => {
         messageType: messageFields.messageType,
         fileUrl: messageFields.fileUrl || null,
         fileName: messageFields.fileName || null,
+        fileMetadata: messageFields.fileMetadata || {},
         replyTo: messageFields.replyTo || null,
         status: deliveryStatus,
         createdAt: now,
@@ -616,7 +617,7 @@ const setupSocket = (server) => {
 
   const sendChannelMessage = async (message, socket) => {
     try {
-      const { channelId, messageType, content, sender, fileUrl, fileName } = message;
+      const { channelId, messageType, content, sender, fileUrl, fileName, fileMetadata } = message;
 
       const newMessage = await Message.create({
         sender,
@@ -626,6 +627,7 @@ const setupSocket = (server) => {
         fileUrl,
         channelId,
         fileName,
+        fileMetadata: fileMetadata || {},
       });
 
       const messageData = await Message.findById(newMessage._id)

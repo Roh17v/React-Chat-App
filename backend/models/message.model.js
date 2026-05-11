@@ -38,6 +38,10 @@ const messageSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    fileMetadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
     channelId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Channel",
