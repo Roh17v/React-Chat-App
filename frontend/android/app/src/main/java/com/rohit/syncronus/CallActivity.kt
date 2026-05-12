@@ -346,15 +346,15 @@ class CallActivity : AppCompatActivity() {
         val root = findViewById<ConstraintLayout>(R.id.call_root_layout) ?: return
         val set = ConstraintSet()
         set.clone(root)
-        
+
         var appliedFit = false
-        if (screenShare && !isLocalLarge) {
+        if (shouldUseRemoteFitScaling() && !isLocalLarge) {
             val displayMetrics = resources.displayMetrics
             val screenW = displayMetrics.widthPixels
             val screenH = displayMetrics.heightPixels
             val frameW = if (remoteFrameRotation % 180 == 0) remoteFrameWidth else remoteFrameHeight
             val frameH = if (remoteFrameRotation % 180 == 0) remoteFrameHeight else remoteFrameWidth
-            
+
             if (frameW > 0 && frameH > 0) {
                 val scale = Math.min(screenW.toFloat() / frameW, screenH.toFloat() / frameH)
                 val targetW = (frameW * scale).toInt()
@@ -369,7 +369,7 @@ class CallActivity : AppCompatActivity() {
             set.constrainWidth(R.id.remote_video_container, ConstraintSet.MATCH_CONSTRAINT)
             set.constrainHeight(R.id.remote_video_container, ConstraintSet.MATCH_CONSTRAINT)
         }
-        
+
         set.applyTo(root)
     }
 
@@ -381,7 +381,7 @@ class CallActivity : AppCompatActivity() {
         remoteContentSuggestsFit = isLandscape
         runOnUiThread {
             updateVideoSinkTargets()
-            if (isRemoteScreenSharing) applyRemoteVideoFitLayout(true)
+            if (shouldUseRemoteFitScaling()) applyRemoteVideoFitLayout(true)
         }
     }
 
@@ -1493,6 +1493,7 @@ class CallActivity : AppCompatActivity() {
             // correct fullscreen-measured position, never at stale PiP coordinates.
             window.decorView.post {
                 if (!isFinishing && !isDestroyed) {
+                    applyRemoteVideoFitLayout(isRemoteScreenSharing && !isLocalLarge)
                     localVideoContainer.animate().alpha(1f).setDuration(250).start()
                 }
             }
