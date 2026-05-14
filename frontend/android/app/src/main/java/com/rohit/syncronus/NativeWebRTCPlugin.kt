@@ -47,8 +47,8 @@ class NativeWebRTCPlugin : Plugin() {
         private const val MAX_VIDEO_BITRATE = 1_500_000 // 1.5 Mbps for smooth HD video/screen share
         private const val CAMERA_VIDEO_BITRATE = 800_000 // 800 kbps for standard camera video
         private const val ICE_BATCH_DELAY_MS = 100L
-        private const val FREEZE_MONITOR_INTERVAL_MS = 4000L
-        private const val FREEZE_DETECT_CONSECUTIVE_CHECKS = 3
+        private const val FREEZE_MONITOR_INTERVAL_MS = 2000L
+        private const val FREEZE_DETECT_CONSECUTIVE_CHECKS = 2
         private const val REMOTE_RECOVERY_COOLDOWN_MS = 6000L
         private const val LOCAL_RECOVERY_COOLDOWN_MS = 8000L
         private const val UI_RESUME_RECOVERY_COOLDOWN_MS = 2500L
@@ -2652,7 +2652,7 @@ class NativeWebRTCPlugin : Plugin() {
 
     private fun checkRemoteVideoHealth() {
         if (isCleaningUp) return
-        if (!callActivityActive || isInPipMode) return
+        if (!callActivityActive) return
         val pc = peerConnection ?: return
         val iceState = pc.iceConnectionState()
         if (iceState != PeerConnection.IceConnectionState.CONNECTED &&
@@ -2852,32 +2852,52 @@ class NativeWebRTCPlugin : Plugin() {
                 lastOutboundBytesSent >= 0L &&
                 bytesSent > lastOutboundBytesSent
 
-        consecutiveLocalFreezeChecks = when {
-            hasFrameProgress -> 0
-            hasByteProgress -> consecutiveLocalFreezeChecks + 1
-            else -> consecutiveLocalFreezeChecks + 1
-        }
-
-        if (consecutiveLocalFreezeChecks >= FREEZE_DETECT_CONSECUTIVE_CHECKS) {
+        // Differentiate two distinct stall types so recovery is correctly targeted:
+        //   hasByteProgress=true, hasFrameProgress=false → encoder/decoder stall: bytes leave the
+        //     device but the encoder stopped producing frames. Camera restart is the right first step.
+        //   hasByteProgress=false, hasFrameProgress=false (else) → network/ICE stall: nothing at all
+        //     is leaving the device. Restarting the camera here is pointless — the pipe itself is
+        //     broken. Skip straight to ICE restart with its own cooldown-guarded path.
+        if (!hasFrameProgress && !hasByteProgress) {
+            // Network stall: act immediately once the cooldown has passed, independent of the
+            // encoder-stall counter so the two recovery paths don't interfere with each other.
+            consecutiveLocalFreezeChecks = 0 // reset encoder-stall counter — different root cause
             val now = System.currentTimeMillis()
             if (now - lastLocalRecoveryAtMs >= LOCAL_RECOVERY_COOLDOWN_MS) {
                 lastLocalRecoveryAtMs = now
-                consecutiveLocalFreezeChecks = 0
-                localRecoveryEscalation = (localRecoveryEscalation + 1).coerceAtMost(2)
-                when (localRecoveryEscalation) {
-                    1 -> {
-                        Log.w(TAG, "Local video send stall detected. Restarting camera capture.")
-                        restartLocalVideoCapture()
-                    }
-                    else -> {
-                        Log.w(TAG, "Local video send stall persists. Restarting ICE.")
-                        safeRestartIce("local_video_stall", allowPolite = true)
-                        localRecoveryEscalation = 0
+                localRecoveryEscalation = 0
+                Log.w(TAG, "Local video: zero bytes sent — network/ICE stall. Restarting ICE directly.")
+                safeRestartIce("local_video_network_stall", allowPolite = true)
+            }
+        } else {
+            // Encoder/decoder stall (bytes moving but frames stalled) or healthy — use the
+            // existing escalation ladder: camera restart first, then ICE restart.
+            consecutiveLocalFreezeChecks = when {
+                hasFrameProgress -> 0
+                else -> consecutiveLocalFreezeChecks + 1 // hasByteProgress only
+            }
+
+            if (consecutiveLocalFreezeChecks >= FREEZE_DETECT_CONSECUTIVE_CHECKS) {
+                val now = System.currentTimeMillis()
+                if (now - lastLocalRecoveryAtMs >= LOCAL_RECOVERY_COOLDOWN_MS) {
+                    lastLocalRecoveryAtMs = now
+                    consecutiveLocalFreezeChecks = 0
+                    localRecoveryEscalation = (localRecoveryEscalation + 1).coerceAtMost(2)
+                    when (localRecoveryEscalation) {
+                        1 -> {
+                            Log.w(TAG, "Local video send stall detected. Restarting camera capture.")
+                            restartLocalVideoCapture()
+                        }
+                        else -> {
+                            Log.w(TAG, "Local video send stall persists. Restarting ICE.")
+                            safeRestartIce("local_video_stall", allowPolite = true)
+                            localRecoveryEscalation = 0
+                        }
                     }
                 }
+            } else if (hasFrameProgress) {
+                localRecoveryEscalation = 0
             }
-        } else if (hasFrameProgress) {
-            localRecoveryEscalation = 0
         }
 
         lastOutboundFramesSent = framesSent

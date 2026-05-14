@@ -212,7 +212,6 @@ class CallActivity : AppCompatActivity() {
 
                 val shouldCheck =
                     isConnected &&
-                        !lastKnownPipMode &&
                         !enteringPipTransition &&
                         remoteTrack != null
 
@@ -220,7 +219,7 @@ class CallActivity : AppCompatActivity() {
                     val now = SystemClock.elapsedRealtime()
                     val frameAgeMs = if (lastRemoteFrameAtMs > 0L) now - lastRemoteFrameAtMs else 0L
                     val cooldownPassed = now - lastRemoteRecoveryAtMs > 3500L
-                    if (frameAgeMs > 4500L && cooldownPassed) {
+                    if (frameAgeMs > 2500L && cooldownPassed) {
                         lastRemoteRecoveryAtMs = now
                         receiverFreezeRecoveries += 1
                         remoteFirstFrameRendered = false
@@ -232,11 +231,11 @@ class CallActivity : AppCompatActivity() {
                     }
                 }
 
-                window.decorView.postDelayed(this, 1200L)
+                window.decorView.postDelayed(this, 800L)
             }
         }
         frameWatchdogRunnable = task
-        window.decorView.postDelayed(task, 1200L)
+        window.decorView.postDelayed(task, 800L)
     }
 
     private fun stopFrameWatchdog() {
@@ -1426,6 +1425,13 @@ class CallActivity : AppCompatActivity() {
             gradientBottom.visibility = View.GONE
             connectingOverlay.visibility = View.GONE
 
+            // CRITICAL: Reset the remoteVideoContainer back to MATCH_CONSTRAINT so it fills
+            // the PiP window naturally. Without this, any fixed pixel dimensions set by
+            // applyRemoteVideoFitLayout() (sized for the fullscreen display) persist into
+            // PiP, causing the video to appear zoomed/cropped because the container is
+            // still sized as if it were 1080×2400 but displayed in a tiny ~400×225 window.
+            applyRemoteVideoFitLayout(false)
+
             // Keep PiP strictly single-video: never render the local mini preview there.
             // For pre-connect/minimize-before-first-frame, show only the remote user name.
             refreshPipPreconnectHeader()
@@ -1577,7 +1583,23 @@ class CallActivity : AppCompatActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun getPictureInPictureParams(): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
-        builder.setAspectRatio(Rational(9, 16))
+
+        // Use the actual remote stream aspect ratio so the PiP window is sized correctly
+        // for both portrait camera feeds (9:16) and landscape screen shares (e.g. 16:9).
+        // Without this, a landscape screen share would be letterboxed inside a portrait
+        // PiP window, wasting space and looking wrong.
+        val pipRatio: Rational = if (isRemoteScreenSharing && remoteFrameWidth > 0 && remoteFrameHeight > 0) {
+            val frameW = if (remoteFrameRotation % 180 == 0) remoteFrameWidth else remoteFrameHeight
+            val frameH = if (remoteFrameRotation % 180 == 0) remoteFrameHeight else remoteFrameWidth
+            // Android requires the ratio to be between 1:2.39 and 2.39:1.
+            // Clamp to safe landscape bounds when the stream is wider than it is tall.
+            val clampedW = frameW.coerceAtMost(frameH * 239 / 100)
+            val clampedH = frameH.coerceAtMost(frameW * 239 / 100)
+            Rational(clampedW.coerceAtLeast(1), clampedH.coerceAtLeast(1))
+        } else {
+            Rational(9, 16) // Default: portrait camera call
+        }
+        builder.setAspectRatio(pipRatio)
 
         val sourceRectHint = android.graphics.Rect()
         remoteVideoView.getGlobalVisibleRect(sourceRectHint)
