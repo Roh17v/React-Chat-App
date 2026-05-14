@@ -30,20 +30,18 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
 
-            <!-- Accept shared media (images, videos, etc.) -->
+            <!-- Accept all shared files -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
-                <data android:mimeType="video/*" />
+                <data android:mimeType="*/*" />
             </intent-filter>
 
-            <!-- Accept multiple shared media -->
+            <!-- Accept multiple shared files -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
-                <data android:mimeType="video/*" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 
