@@ -21,6 +21,8 @@ import { Capacitor } from "@capacitor/core";
 const Auth = lazy(() => import("./pages/auth/Auth"));
 const Chats = lazy(() => import("./pages/chats"));
 const Profile = lazy(() => import("./pages/profile/Profile"));
+const VerifyEmail = lazy(() => import("./pages/auth/VerifyEmail"));
+const ForgotPassword = lazy(() => import("./pages/auth/ForgotPassword"));
 
 function App() {
   const checkAuth = useAppStore((state) => state.checkAuth);
@@ -425,6 +427,8 @@ function App() {
     <Suspense fallback={<Loader />}>
       <Routes>
         <Route path="/auth" element={<Auth />} />
+        <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
 
         <Route
           path="/profile"

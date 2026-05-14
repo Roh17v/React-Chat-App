@@ -6,6 +6,14 @@ export const SIGNUP_ROUTE = `${AUTH_ROUTES}/signup`;
 
 export const LOGIN_ROUTE = `${AUTH_ROUTES}/login`;
 
+export const VERIFY_EMAIL_ROUTE = `${AUTH_ROUTES}/verify-email`;
+
+export const RESEND_OTP_ROUTE = `${AUTH_ROUTES}/resend-otp`;
+
+export const FORGOT_PASSWORD_ROUTE = `${AUTH_ROUTES}/forgot-password`;
+
+export const RESET_PASSWORD_ROUTE = `${AUTH_ROUTES}/reset-password`;
+
 export const USER_ROUTES = "/api/users";
 
 export const LOGOUT_ROUTE = `${AUTH_ROUTES}/logout`;

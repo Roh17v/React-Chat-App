@@ -83,6 +83,7 @@ export const updateProfile = async (req, res, next) => {
       lastName: updatedUser.lastName,
       color: updatedUser.color,
       image: updatedUser.image, // ✅ public URL
+      isVerified: updatedUser.isVerified,
     });
   } catch (error) {
     next(error);

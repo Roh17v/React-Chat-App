@@ -23,6 +23,10 @@ const Auth = () => {
 
   useEffect(() => {
     if (!user) return;
+    if (!user.isVerified) {
+      navigate("/verify-email", { state: { email: user.email } });
+      return;
+    }
     navigate(user.profileSetup ? "/chats" : "/profile");
   }, [navigate, user]);
   
@@ -85,7 +89,14 @@ const Auth = () => {
           }, 2000);
         }
       } catch (error) {
-        toast.error(error.response?.data?.message || "Something went wrong");
+        if (error.response?.status === 403) {
+          toast.info(error.response?.data?.message || "Please verify your email first.");
+          setTimeout(() => {
+            navigate("/verify-email", { state: { email } });
+          }, 2500);
+        } else {
+          toast.error(error.response?.data?.message || "Something went wrong");
+        }
         console.log(error);
       } finally {
         setIsLoading(false);
@@ -106,10 +117,9 @@ const Auth = () => {
           { withCredentials: true }
         );
         if (response.status === 201) {
-          setUser(response.data);
-          toast.success("User registration successful.");
+          toast.success("Verification OTP sent to your email.");
           setTimeout(() => {
-            navigate("/profile");
+            navigate("/verify-email", { state: { email } });
           }, 2000);
         }
       } catch (error) {
@@ -121,24 +131,24 @@ const Auth = () => {
     }
   };
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-background p-4">
+    <div className="min-h-[100dvh] w-full flex items-center justify-center bg-background overflow-hidden px-4 py-8 safe-area-top safe-area-bottom">
       {/* Ambient background effects */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 -left-32 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
         <div className="absolute bottom-1/4 -right-32 w-96 h-96 bg-primary/5 rounded-full blur-3xl" />
       </div>
-      <div className="relative w-full max-w-5xl grid lg:grid-cols-2 gap-8 items-center animate-fade-in">
+      <div className="relative w-full max-w-5xl grid lg:grid-cols-2 gap-8 items-center lg:min-h-[80vh] animate-fade-in">
         {/* Left side - Branding */}
-        <div className="hidden lg:flex flex-col items-center justify-center p-8">
+        <div className="hidden lg:flex flex-col items-center justify-center p-8 h-full">
           <div className="relative">
             <div className="absolute inset-0 bg-primary/20 blur-3xl rounded-full" />
             <img
               src={Background}
               alt="Chat illustration"
-              className="relative w-full max-w-md object-contain drop-shadow-2xl"
+              className="relative w-full max-w-md max-h-[55vh] object-contain drop-shadow-2xl"
             />
           </div>
-          <div className="mt-8 text-center space-y-4">
+          <div className="mt-4 text-center space-y-2">
             <h2 className="text-3xl font-bold text-foreground">
               Connect Instantly
             </h2>
@@ -222,6 +232,7 @@ const Auth = () => {
                   <div className="text-right">
                     <button
                       type="button"
+                      onClick={() => navigate("/forgot-password")}
                       className="text-sm text-primary hover:text-primary-hover transition-colors"
                     >
                       Forgot password?
