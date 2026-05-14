@@ -94,6 +94,12 @@ function App() {
         return;
       }
 
+      // If image preview is showing, close it
+      if (state.showImage) {
+        state.setShowImage(false);
+        return;
+      }
+
       // Priority 2: If message action menu is showing, close it
       if (state.messageActionMenu) {
         state.setMessageActionMenu(null);
@@ -213,6 +219,39 @@ function App() {
 
     return () => cleanup();
   }, [user]);
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    import("@capgo/capacitor-share-target").then(({ CapacitorShareTarget }) => {
+      const listener = CapacitorShareTarget.addListener("shareReceived", (event) => {
+        console.log("Shared content received:", event);
+        const text = event.texts && event.texts.length > 0 ? event.texts[0] : null;
+        const files = [];
+
+        if (event.files && event.files.length > 0) {
+          event.files.forEach((f) => {
+            files.push({
+              fileUrl: f.uri,
+              fileName: f.name,
+              fileMimeType: f.mimeType,
+            });
+          });
+        }
+        
+        if (text || files.length > 0) {
+          const setPendingShareData = useAppStore.getState().setPendingShareData;
+          setPendingShareData({ text, files });
+          
+          // If the user is on the chat view, we don't necessarily need to navigate,
+          // but if they are elsewhere, we should probably take them to chats.
+          if (window.location.pathname !== "/chats") {
+            navigate("/chats", { replace: true });
+          }
+        }
+      });
+      return () => listener.then((l) => l.remove());
+    });
+  }, []);
 
   useEffect(() => {
     if (!pendingNotification || !user) return;

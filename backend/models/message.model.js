@@ -34,6 +34,14 @@ const messageSchema = new mongoose.Schema(
         return this.messageType === "file";
       },
     },
+    fileName: {
+      type: String,
+      default: null,
+    },
+    fileMetadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
     channelId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Channel",

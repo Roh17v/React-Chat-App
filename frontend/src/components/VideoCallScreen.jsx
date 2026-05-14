@@ -16,6 +16,7 @@ import {
   SignalLow,
   SignalZero,
   SwitchCamera,
+  MonitorUp,
 } from "lucide-react";
 import useAppStore from "@/store";
 import { useSocket } from "@/context/SocketContext";
@@ -26,6 +27,12 @@ import { cn } from "@/lib/utils";
 import CallTimer from "@/components/CallTimer";
 import { Capacitor } from "@capacitor/core";
 import { App as CapacitorApp } from "@capacitor/app";
+import NativeCallPlugin from "@/plugins/NativeCallPlugin";
+import {
+  CALL_VIDEO_SOURCE_CAMERA,
+  CALL_VIDEO_SOURCE_SCREEN,
+  normalizeCallMediaState,
+} from "@/utils/callMediaState";
 
 const VIDEO_CONSTRAINTS = {
   width: { ideal: 640, max: 720 },
@@ -80,6 +87,12 @@ const VideoCallScreen = () => {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [isRemoteVideoOff, setIsRemoteVideoOff] = useState(false);
+  const [localVideoSource, setLocalVideoSource] = useState(
+    CALL_VIDEO_SOURCE_CAMERA,
+  );
+  const [remoteVideoSource, setRemoteVideoSource] = useState(
+    CALL_VIDEO_SOURCE_CAMERA,
+  );
   const [showControls, setShowControls] = useState(true);
   const [pipExpanded, setPipExpanded] = useState(false);
   const [facingMode, setFacingMode] = useState("user");
@@ -100,6 +113,14 @@ const VideoCallScreen = () => {
   const connectionLossMonitorRef = useRef(null);
   const connectionLossMonitorStartedAtRef = useRef(0);
   const connectionLossProbeInFlightRef = useRef(false);
+  const screenStreamRef = useRef(null);
+  const preScreenShareVideoOffRef = useRef(false);
+  const localMediaStateRef = useRef(
+    normalizeCallMediaState({
+      videoOff: false,
+      videoSource: CALL_VIDEO_SOURCE_CAMERA,
+    }),
+  );
 
   // ROBUSTNESS BUFFERS
   const pendingOffer = useRef(null);
@@ -157,6 +178,11 @@ const VideoCallScreen = () => {
   const pipSize = pipExpanded
     ? { width: 200, height: 280 }
     : { width: 120, height: 160 };
+  const isConnecting =
+    callStatus === "ringing" ||
+    (connectionStatus !== "connected" && connectionStatus !== "completed");
+  const isScreenSharing = localVideoSource === CALL_VIDEO_SOURCE_SCREEN;
+  const isRemoteScreenSharing = remoteVideoSource === CALL_VIDEO_SOURCE_SCREEN;
 
   if (!activeCall || activeCall.callType !== "video") return null;
 
@@ -257,7 +283,9 @@ const VideoCallScreen = () => {
     if (!Capacitor.isNativePlatform()) return;
 
     const listener = CapacitorApp.addListener("appStateChange", ({ isActive }) => {
-      const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+      const videoTrack =
+        screenStreamRef.current?.getVideoTracks?.()[0] ||
+        localStreamRef.current?.getVideoTracks?.()[0];
       if (videoTrack) {
         videoTrack.enabled = isActive && !isVideoOff;
       }
@@ -280,7 +308,16 @@ const VideoCallScreen = () => {
   useEffect(() => {
     cleanedUpRef.current = false;
     clearConnectionLossMonitor();
+    const resetMediaState = normalizeCallMediaState({
+      videoOff: false,
+      videoSource: CALL_VIDEO_SOURCE_CAMERA,
+    });
+    localMediaStateRef.current = resetMediaState;
     setIsRemoteVideoOff(false);
+    setIsVideoOff(resetMediaState.videoOff);
+    setLocalVideoSource(resetMediaState.videoSource);
+    setRemoteVideoSource(CALL_VIDEO_SOURCE_CAMERA);
+    preScreenShareVideoOffRef.current = false;
     latestIncomingMediaSeqRef.current = -1;
     outgoingMediaSeqRef.current = 0;
     latestIncomingControlSeqRef.current = -1;
@@ -316,16 +353,68 @@ const VideoCallScreen = () => {
     }
   }, []);
 
+  const replaceOutgoingVideoTrack = useCallback(
+    async (nextTrack) => {
+      if (!pc.current) return;
+      const sender = pc.current
+        .getSenders()
+        .find((currentSender) => currentSender.track?.kind === "video");
+      if (!sender) return;
+      await sender.replaceTrack(nextTrack ?? null);
+      if (nextTrack) {
+        await applyBitrateCap();
+      }
+    },
+    [applyBitrateCap],
+  );
+
+  const stopScreenShareTracks = useCallback(() => {
+    if (!screenStreamRef.current) return;
+    screenStreamRef.current.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+    screenStreamRef.current = null;
+  }, []);
+
+  const applyRemoteMediaState = useCallback((mediaState = {}) => {
+    const normalizedState = normalizeCallMediaState(mediaState);
+    setIsRemoteVideoOff(normalizedState.videoOff);
+    setRemoteVideoSource(normalizedState.videoSource);
+
+    // On Android native, forward the state to the native plugin
+    if (Capacitor.isNativePlatform()) {
+      NativeCallPlugin.setRemoteMediaState({
+        videoOff: normalizedState.videoOff,
+        videoSource: normalizedState.videoSource,
+        screenShareActive: normalizedState.screenShareActive,
+        mediaSeq: mediaState.mediaSeq, // Pass sequence for authoritative sync
+      }).catch(() => {});
+    }
+  }, []);
+
+  const applyLocalMediaState = useCallback((nextState = {}) => {
+    const normalizedState = normalizeCallMediaState({
+      ...localMediaStateRef.current,
+      ...nextState,
+    });
+    localMediaStateRef.current = normalizedState;
+    setIsVideoOff(normalizedState.videoOff);
+    setLocalVideoSource(normalizedState.videoSource);
+    return normalizedState;
+  }, []);
+
   const emitLocalVideoState = useCallback(
-    (videoOff) => {
+    (mediaState = {}) => {
       const targetId = getTargetId();
       if (!targetId || !activeCall?.callId) return;
+      const normalizedState = normalizeCallMediaState(mediaState);
       const mediaSeq = outgoingMediaSeqRef.current + 1;
       outgoingMediaSeqRef.current = mediaSeq;
       const payload = {
         to: targetId,
         callId: activeCall.callId,
-        videoOff: Boolean(videoOff),
+        ...normalizedState,
         mediaSeq,
       };
       socket.emit("call:media-state", payload);
@@ -348,10 +437,11 @@ const VideoCallScreen = () => {
     }
   }, []);
 
-  const sendVideoStateViaControlChannel = useCallback((videoOff) => {
+  const sendVideoStateViaControlChannel = useCallback((mediaState = {}) => {
+    const normalizedState = normalizeCallMediaState(mediaState);
     const payload = JSON.stringify({
       type: "video_state",
-      videoOff: Boolean(videoOff),
+      ...normalizedState,
       seq: localControlSeqRef.current + 1,
     });
     localControlSeqRef.current += 1;
@@ -498,7 +588,7 @@ const VideoCallScreen = () => {
           // keep pending
         }
       }
-      sendVideoStateViaControlChannel(isVideoOff);
+      sendVideoStateViaControlChannel(localMediaStateRef.current);
     };
 
     channel.onmessage = (event) => {
@@ -511,7 +601,7 @@ const VideoCallScreen = () => {
             if (seq <= latestIncomingControlSeqRef.current) return;
             latestIncomingControlSeqRef.current = seq;
           }
-          setIsRemoteVideoOff(Boolean(payload?.videoOff));
+          applyRemoteMediaState(payload);
           return;
         }
 
@@ -522,10 +612,124 @@ const VideoCallScreen = () => {
         // Ignore malformed control messages.
       }
     };
-  }, [isVideoOff, sendVideoStateViaControlChannel]);
+  }, [
+    applyRemoteMediaState,
+    sendVideoStateViaControlChannel,
+  ]);
+
+  const stopScreenShare = useCallback(
+    async ({ restoreCamera = true } = {}) => {
+      console.log("stopScreenShare called", { restoreCamera });
+      try {
+        const cameraStream = localStreamRef.current;
+        const cameraTrack = cameraStream?.getVideoTracks?.()[0] || null;
+        const shouldRestoreVideoOff = preScreenShareVideoOffRef.current;
+
+        stopScreenShareTracks();
+
+        if (restoreCamera && cameraTrack) {
+          console.log("Restoring camera track after screen share");
+          cameraTrack.enabled = !shouldRestoreVideoOff;
+          await replaceOutgoingVideoTrack(cameraTrack);
+          updateVisibleLocalVideo(cameraStream);
+          const restoredMediaState = applyLocalMediaState({
+            videoOff: shouldRestoreVideoOff,
+            videoSource: CALL_VIDEO_SOURCE_CAMERA,
+            screenShareActive: false,
+          });
+          emitLocalVideoState(restoredMediaState);
+          sendVideoStateViaControlChannel(restoredMediaState);
+          return;
+        }
+
+        console.log("Turning off video after screen share (no camera to restore)");
+        await replaceOutgoingVideoTrack(null);
+        const offMediaState = applyLocalMediaState({
+          videoOff: true,
+          videoSource: CALL_VIDEO_SOURCE_CAMERA,
+          screenShareActive: false,
+        });
+        emitLocalVideoState(offMediaState);
+        sendVideoStateViaControlChannel(offMediaState);
+      } catch (err) {
+        console.error("Error during stopScreenShare:", err);
+        // Fallback: ensure UI state is reset even if track operations fail
+        applyLocalMediaState({
+          videoSource: CALL_VIDEO_SOURCE_CAMERA,
+          screenShareActive: false,
+        });
+      }
+    },
+    [
+      applyLocalMediaState,
+      emitLocalVideoState,
+      replaceOutgoingVideoTrack,
+      sendVideoStateViaControlChannel,
+      stopScreenShareTracks,
+      updateVisibleLocalVideo,
+    ],
+  );
+
+  const startScreenShare = useCallback(async () => {
+    if (isFlipping || isConnecting || !pc.current) return;
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setMediaError("Screen sharing is not supported on this device/browser.");
+      return;
+    }
+
+    try {
+      preScreenShareVideoOffRef.current = isVideoOff;
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          frameRate: { ideal: 15, max: 24 },
+        },
+        audio: false,
+      });
+      const screenTrack = displayStream.getVideoTracks()[0];
+      if (!screenTrack) {
+        displayStream.getTracks().forEach((track) => track.stop());
+        setMediaError("Unable to start screen sharing.");
+        return;
+      }
+
+      stopScreenShareTracks();
+      screenStreamRef.current = displayStream;
+      screenTrack.onended = () => {
+        void stopScreenShare({ restoreCamera: true });
+      };
+
+      await replaceOutgoingVideoTrack(screenTrack);
+      updateVisibleLocalVideo(displayStream);
+      const screenMediaState = applyLocalMediaState({
+        videoOff: false,
+        videoSource: CALL_VIDEO_SOURCE_SCREEN,
+        screenShareActive: true,
+      });
+      setMediaError(null);
+
+      emitLocalVideoState(screenMediaState);
+      sendVideoStateViaControlChannel(screenMediaState);
+    } catch (err) {
+      const errorName = String(err?.name || "");
+      if (errorName === "NotAllowedError" || errorName === "AbortError") {
+        return;
+      }
+      setMediaError("Failed to start screen sharing. Please try again.");
+    }
+  }, [
+    applyLocalMediaState,
+    emitLocalVideoState,
+    isConnecting,
+    isFlipping,
+    replaceOutgoingVideoTrack,
+    sendVideoStateViaControlChannel,
+    stopScreenShare,
+    stopScreenShareTracks,
+    updateVisibleLocalVideo,
+  ]);
 
   const flipCamera = async () => {
-    if (isFlipping || isVideoOff) return;
+    if (isFlipping || isVideoOff || isScreenSharing) return;
     setIsFlipping(true);
 
     try {
@@ -549,6 +753,7 @@ const VideoCallScreen = () => {
 
       const newStream = new MediaStream(tracks);
       localStreamRef.current = newStream;
+      applyLocalMediaState({ videoSource: CALL_VIDEO_SOURCE_CAMERA });
 
       updateVisibleLocalVideo(newStream);
 
@@ -571,19 +776,29 @@ const VideoCallScreen = () => {
 
   const handleDeviceChange = async () => {
     try {
+      const previousStream = localStreamRef.current;
+      const isSharingScreen =
+        localVideoSource === CALL_VIDEO_SOURCE_SCREEN && Boolean(screenStreamRef.current);
       const newStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode, ...VIDEO_CONSTRAINTS },
         audio: AUDIO_CONSTRAINTS,
       });
       localStreamRef.current = newStream;
 
-      updateVisibleLocalVideo(newStream);
+      previousStream?.getTracks().forEach((track) => track.stop());
+
+      if (!isSharingScreen) {
+        applyLocalMediaState({ videoSource: CALL_VIDEO_SOURCE_CAMERA });
+        updateVisibleLocalVideo(newStream);
+      }
 
       if (pc.current) {
         const senders = pc.current.getSenders();
         newStream.getTracks().forEach((newTrack) => {
           const sender = senders.find((s) => s.track?.kind === newTrack.kind);
-          if (sender) sender.replaceTrack(newTrack);
+          if (!sender) return;
+          if (newTrack.kind === "video" && isSharingScreen) return;
+          sender.replaceTrack(newTrack);
         });
         applyBitrateCap();
       }
@@ -601,6 +816,10 @@ const VideoCallScreen = () => {
           audio: AUDIO_CONSTRAINTS,
         });
         localStreamRef.current = stream;
+        applyLocalMediaState({
+          videoOff: false,
+          videoSource: CALL_VIDEO_SOURCE_CAMERA,
+        });
 
         updateVisibleLocalVideo(stream);
 
@@ -967,14 +1186,25 @@ const VideoCallScreen = () => {
       }
     };
 
-    const onMediaState = ({ from, callId, videoOff, mediaSeq }) => {
+    const onMediaState = ({
+      from,
+      callId,
+      videoOff,
+      videoSource,
+      screenShareActive,
+      mediaSeq,
+    }) => {
       if (!matchesCurrentCall({ from, callId })) return;
       const parsedSeq = Number(mediaSeq);
       if (Number.isFinite(parsedSeq)) {
         if (parsedSeq <= latestIncomingMediaSeqRef.current) return;
         latestIncomingMediaSeqRef.current = parsedSeq;
       }
-      setIsRemoteVideoOff(Boolean(videoOff));
+      applyRemoteMediaState({
+        videoOff,
+        videoSource,
+        screenShareActive,
+      });
     };
 
     const onEnd = ({ from, callId } = {}) => {
@@ -997,7 +1227,7 @@ const VideoCallScreen = () => {
       socket.off("call:media-state", onMediaState);
       socket.off("call:end", onEnd);
     };
-  }, [socket, handleDescription, matchesCurrentCall]);
+  }, [applyRemoteMediaState, socket, handleDescription, matchesCurrentCall]);
 
   useEffect(() => {
     if (!socket || activeCall?.isCaller) return;
@@ -1067,12 +1297,14 @@ const VideoCallScreen = () => {
   useEffect(() => {
     if (!activeCall?.callId) return;
     if (connectionStatus !== "connected" && connectionStatus !== "completed") return;
-    emitLocalVideoState(isVideoOff);
-    sendVideoStateViaControlChannel(isVideoOff);
+    const currentMediaState = localMediaStateRef.current;
+    emitLocalVideoState(currentMediaState);
+    sendVideoStateViaControlChannel(currentMediaState);
   }, [
     activeCall?.callId,
     connectionStatus,
     isVideoOff,
+    localVideoSource,
     emitLocalVideoState,
     sendVideoStateViaControlChannel,
   ]);
@@ -1082,6 +1314,7 @@ const VideoCallScreen = () => {
     cleanedUpRef.current = true;
     clearConnectionLossMonitor();
 
+    stopScreenShareTracks();
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     pc.current?.close();
     pc.current = null;
@@ -1129,8 +1362,16 @@ const VideoCallScreen = () => {
       clearInterval(statsIntervalRef.current);
       statsIntervalRef.current = null;
     }
+    const resetMediaState = normalizeCallMediaState({
+      videoOff: false,
+      videoSource: CALL_VIDEO_SOURCE_CAMERA,
+    });
+    localMediaStateRef.current = resetMediaState;
     setIsRemoteVideoOff(false);
-    setIsVideoOff(false);
+    setIsVideoOff(resetMediaState.videoOff);
+    setLocalVideoSource(resetMediaState.videoSource);
+    setRemoteVideoSource(CALL_VIDEO_SOURCE_CAMERA);
+    preScreenShareVideoOffRef.current = false;
     setIsMuted(false);
     setCallStatus("ringing");
     clearActiveCall();
@@ -1144,6 +1385,7 @@ const VideoCallScreen = () => {
     clearOfferKickstartTimeout,
     clearOfferRetryInterval,
     setIsMinimized,
+    stopScreenShareTracks,
   ]);
   cleanupRef.current = cleanup;
 
@@ -1171,13 +1413,16 @@ const VideoCallScreen = () => {
   };
 
   const toggleVideo = () => {
+    if (isScreenSharing) return;
     const t = localStreamRef.current?.getVideoTracks()[0];
     if (t) {
       t.enabled = !t.enabled;
       const nextVideoOff = !t.enabled;
-      setIsVideoOff(nextVideoOff);
-      emitLocalVideoState(nextVideoOff);
-      sendVideoStateViaControlChannel(nextVideoOff);
+      const nextMediaState = applyLocalMediaState({
+        videoOff: nextVideoOff,
+      });
+      emitLocalVideoState(nextMediaState);
+      sendVideoStateViaControlChannel(nextMediaState);
     }
   };
 
@@ -1313,10 +1558,6 @@ const VideoCallScreen = () => {
     }
   }, [pipSize.width, pipSize.height, updatePipPosition]);
 
-  const isConnecting =
-    callStatus === "ringing" ||
-    (connectionStatus !== "connected" && connectionStatus !== "completed");
-
   return (
     <>
       {/* MINIMIZED PIP VIEW */}
@@ -1351,7 +1592,10 @@ const VideoCallScreen = () => {
             ref={pipRemoteVideoRef}
             autoPlay
             playsInline
-            className="absolute inset-0 w-full h-full object-cover"
+            className={cn(
+              "absolute inset-0 w-full h-full",
+              isRemoteScreenSharing ? "object-contain bg-black" : "object-cover",
+            )}
           />
           {isRemoteVideoOff && (
             <div className="absolute inset-0 bg-background-secondary/95 flex items-center justify-center">
@@ -1389,6 +1633,12 @@ const VideoCallScreen = () => {
             </button>
           </div>
 
+          {isRemoteScreenSharing && !isRemoteVideoOff && (
+            <div className="absolute top-10 left-2 px-2 py-1 rounded-full bg-black/60 text-[10px] font-medium text-white">
+              Screen share
+            </div>
+          )}
+
           {/* Local Video Inset */}
           <div className="absolute bottom-10 right-2 w-12 h-16 rounded-lg overflow-hidden ring-1 ring-white/20 shadow-md">
             <video
@@ -1397,8 +1647,11 @@ const VideoCallScreen = () => {
               playsInline
               muted
               className={cn(
-                "w-full h-full object-cover",
-                facingMode === "user" && "-scale-x-100",
+                "w-full h-full",
+                isScreenSharing ? "object-contain bg-black" : "object-cover",
+                facingMode === "user" &&
+                  !isScreenSharing &&
+                  "-scale-x-100",
               )}
             />
             {/* Flip Camera Button */}
@@ -1407,15 +1660,21 @@ const VideoCallScreen = () => {
                 e.stopPropagation();
                 flipCamera();
               }}
-              disabled={isFlipping || isVideoOff}
+              disabled={isFlipping || isVideoOff || isScreenSharing}
               className={cn(
                 "absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/50",
                 "flex items-center justify-center text-white/80 hover:text-white transition-all",
-                (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed",
+                (isFlipping || isVideoOff || isScreenSharing) &&
+                  "opacity-50 cursor-not-allowed",
               )}
             >
               <SwitchCamera className="w-3 h-3" />
             </button>
+            {isScreenSharing && (
+              <div className="absolute top-1 left-1 px-1.5 py-0.5 rounded-full bg-black/60 text-[9px] font-medium text-white">
+                Sharing
+              </div>
+            )}
           </div>
 
           {/* End Call Button */}
@@ -1449,7 +1708,10 @@ const VideoCallScreen = () => {
             ref={fullscreenRemoteVideoRef}
             autoPlay
             playsInline
-            className="w-full h-full object-cover md:max-w-[1920px] md:max-h-[1080px] md:object-contain"
+            className={cn(
+              "w-full h-full md:max-w-[1920px] md:max-h-[1080px]",
+              isRemoteScreenSharing ? "object-contain bg-black" : "object-cover md:object-contain",
+            )}
           />
 
           {/* Video Off Fallback */}
@@ -1463,6 +1725,12 @@ const VideoCallScreen = () => {
                 <VideoOff className="w-7 h-7 text-muted-foreground" />
               </div>
               <p className="text-sm text-foreground-secondary">Camera off</p>
+            </div>
+          )}
+
+          {isRemoteScreenSharing && !isRemoteVideoOff && (
+            <div className="absolute top-20 left-4 z-10 px-3 py-1.5 rounded-full bg-black/50 text-xs font-medium text-white">
+              Sharing screen
             </div>
           )}
 
@@ -1592,8 +1860,11 @@ const VideoCallScreen = () => {
             playsInline
             muted
             className={cn(
-              "w-full h-full object-cover",
-              facingMode === "user" && "-scale-x-100",
+              "w-full h-full",
+              isScreenSharing ? "object-contain bg-black" : "object-cover",
+              facingMode === "user" &&
+                !isScreenSharing &&
+                "-scale-x-100",
             )}
           />
           {isVideoOff && (
@@ -1610,15 +1881,20 @@ const VideoCallScreen = () => {
                 e.stopPropagation();
                 flipCamera();
               }}
-              disabled={isFlipping}
+              disabled={isFlipping || isScreenSharing}
               className={cn(
                 "absolute bottom-2 right-2 w-8 h-8 rounded-full bg-black/60",
                 "flex items-center justify-center text-white/80 hover:text-white hover:bg-black/70 transition-all",
-                isFlipping && "opacity-50 cursor-not-allowed",
+                (isFlipping || isScreenSharing) && "opacity-50 cursor-not-allowed",
               )}
             >
               <SwitchCamera className="w-4 h-4" />
             </button>
+          )}
+          {isScreenSharing && (
+            <div className="absolute top-2 left-2 px-2 py-1 rounded-full bg-black/60 text-[11px] font-medium text-white">
+              Sharing screen
+            </div>
           )}
         </div>
 
@@ -1654,14 +1930,31 @@ const VideoCallScreen = () => {
               {/* Flip Camera Button */}
               <button
                 onClick={flipCamera}
-                disabled={isFlipping || isVideoOff}
+                disabled={isFlipping || isVideoOff || isScreenSharing}
                 className={cn(
                   "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
                   "bg-white/15 text-white hover:bg-white/25",
-                  (isFlipping || isVideoOff) && "opacity-50 cursor-not-allowed",
+                  (isFlipping || isVideoOff || isScreenSharing) &&
+                    "opacity-50 cursor-not-allowed",
                 )}
               >
                 <SwitchCamera className="w-6 h-6" />
+              </button>
+
+              {/* Screen Share Button */}
+              <button
+                onClick={isScreenSharing ? () => stopScreenShare() : startScreenShare}
+                disabled={isConnecting || isFlipping || !pc.current}
+                className={cn(
+                  "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
+                  isScreenSharing
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-white/15 text-white hover:bg-white/25",
+                  (isConnecting || isFlipping || !pc.current) &&
+                    "opacity-50 cursor-not-allowed",
+                )}
+              >
+                <MonitorUp className="w-6 h-6" />
               </button>
 
               {/* End Call Button */}
@@ -1675,11 +1968,13 @@ const VideoCallScreen = () => {
               {/* Video Button */}
               <button
                 onClick={toggleVideo}
+                disabled={isScreenSharing}
                 className={cn(
                   "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-90",
                   isVideoOff
                     ? "bg-destructive/20 text-destructive"
                     : "bg-white/15 text-white hover:bg-white/25",
+                  isScreenSharing && "opacity-50 cursor-not-allowed",
                 )}
               >
                 {isVideoOff ? (

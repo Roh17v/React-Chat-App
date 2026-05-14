@@ -19,7 +19,9 @@ export const createChatSlice = (set, get) => ({
   replyToMessage: null,
   showAvatarPreview: false,
   messageActionMenu: null, // { message, isSent }
+  pendingShareData: null, // { text, fileUrl }
 
+  setPendingShareData: (data) => set({ pendingShareData: data }),
   setPage: (pageNo) => set({ page: pageNo }),
   setMessageContainerRef: (ref) => {
     set({ messageContainerRef: ref });
@@ -46,6 +48,10 @@ export const createChatSlice = (set, get) => ({
   setSelectedChatData: (selectedChatData) =>
     set({ selectedChatData, replyToMessage: null }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
+  showImage: false,
+  imageURL: null,
+  setShowImage: (showImage) => set({ showImage }),
+  setImageURL: (imageURL) => set({ imageURL }),
   setSelectedChatMessages: (newMessages, reset = false) =>
     set((state) => {
       const allMessages = reset

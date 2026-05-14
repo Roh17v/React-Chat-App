@@ -27,7 +27,7 @@ const getMessagePreview = (message) => {
   }
 
   if (message.messageType === "file") {
-    return `Attachment: ${getFileNameFromUrl(message.fileUrl)}`;
+    return `Attachment: ${message.fileName || getFileNameFromUrl(message.fileUrl)}`;
   }
 
   if (message.messageType === "call") {

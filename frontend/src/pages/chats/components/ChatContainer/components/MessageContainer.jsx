@@ -69,11 +69,14 @@ const MessageContainer = () => {
     replaceWithDeletedPlaceholder,
     messageActionMenu,
     setMessageActionMenu,
+    showImage,
+    setShowImage,
+    imageURL,
+    setImageURL,
   } = useAppStore();
   const { socket } = useSocket();
 
-  const [showImage, setShowImage] = useState(false);
-  const [imageURL, setImageURL] = useState(null);
+  const [previewFileName, setPreviewFileName] = useState(null);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
@@ -289,7 +292,7 @@ const MessageContainer = () => {
   const getReplyPreviewText = (replyTo) => {
     if (!replyTo) return "";
     if (replyTo.messageType === "file") {
-      return replyTo.fileName || "File";
+      return replyTo.fileName || replyTo.previewText || "File";
     }
     return replyTo.previewText || "Message";
   };
@@ -331,11 +334,14 @@ const MessageContainer = () => {
     return imageRegex.test(filePath);
   };
 
-  const downloadFile = async (url) => {
+  const downloadFile = async (url, fileName) => {
     try {
       setIsDownloading(true);
       setFileDownloadingProgress(0);
-      const response = await axios.get(`${url}`, {
+      
+      const downloadUrl = `${url}${url.includes('?') ? '&' : '?'}nocache=${Date.now()}`;
+      
+      const response = await axios.get(downloadUrl, {
         responseType: "blob",
         onDownloadProgress: (data) =>
           setFileDownloadingProgress(
@@ -345,15 +351,40 @@ const MessageContainer = () => {
 
       setIsDownloading(false);
 
-      const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement("a");
-      link.href = urlBlob;
-      link.setAttribute("download", url.split("/").pop() || "file");
+      if (Capacitor.isNativePlatform()) {
+        const reader = new FileReader();
+        reader.readAsDataURL(response.data);
+        reader.onloadend = async () => {
+          const base64data = reader.result.split(',')[1];
+          const nativePlugin = window?.Capacitor?.Plugins?.NativeWebRTC;
+          if (nativePlugin?.saveFile) {
+            try {
+              await nativePlugin.saveFile({ 
+                data: base64data, 
+                fileName: fileName || url.split("/").pop() || "file",
+                mimeType: response.data.type
+              });
+              toast.success("File saved to Downloads");
+            } catch (err) {
+              console.error("Failed to save file via native plugin:", err);
+              toast.error("Failed to save file");
+            }
+          } else {
+            console.error("NativeWebRTCPlugin or saveFile method not found");
+            toast.error("Native download not supported");
+          }
+        };
+      } else {
+        const urlBlob = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement("a");
+        link.href = urlBlob;
+        link.setAttribute("download", fileName || url.split("/").pop() || "file");
 
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(urlBlob);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(urlBlob);
+      }
     } catch (error) {
       console.log("Error downloading file: ", error);
       setIsDownloading(false);
@@ -635,7 +666,7 @@ const MessageContainer = () => {
       return renderDeletedPlaceholder(message, isSent);
     }
 
-    const fileName = message.fileUrl?.split("/").pop() || "";
+    const fileName = message.fileName || message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const canReply =
       message.messageType === "text" || message.messageType === "file";
@@ -789,16 +820,23 @@ const MessageContainer = () => {
             <div className="flex flex-col">
               {isImage ? (
                 <div
-                  className="cursor-pointer overflow-hidden rounded-xl"
+                  className="cursor-pointer overflow-hidden rounded-xl max-w-[240px] sm:max-w-[280px] bg-accent/20 relative"
+                  style={{
+                    width: message.fileMetadata?.width ? `${message.fileMetadata.width}px` : "280px",
+                    aspectRatio: message.fileMetadata?.width && message.fileMetadata?.height
+                      ? `${message.fileMetadata.width} / ${message.fileMetadata.height}`
+                      : undefined,
+                  }}
                   onClick={() => {
                     setShowImage(true);
                     setImageURL(message.fileUrl);
+                    setPreviewFileName(message.fileName);
                   }}
                 >
                   <img
                     src={message.fileUrl}
                     alt="Shared image"
-                    className="max-w-[240px] sm:max-w-[280px] h-auto object-cover transition-transform duration-200 hover:scale-105"
+                    className="w-full h-full object-cover transition-transform duration-200 hover:scale-105"
                   />
                 </div>
               ) : (
@@ -822,7 +860,7 @@ const MessageContainer = () => {
                     {fileName}
                   </span>
                   <button
-                    onClick={() => downloadFile(message.fileUrl)}
+                    onClick={() => downloadFile(message.fileUrl, message.fileName)}
                     className={cn(
                       "touch-target rounded-full transition-colors",
                       isSent 
@@ -861,7 +899,7 @@ const MessageContainer = () => {
       return renderDeletedPlaceholder(message, isSent);
     }
 
-    const fileName = message.fileUrl?.split("/").pop() || "";
+    const fileName = message.fileName || message.fileUrl?.split("/").pop() || "";
     const isImage = message.messageType === "file" && checkIfImage(fileName);
     const emoji = message.messageType === "text" ? analyzeEmoji(message.content) : null;
 
@@ -971,7 +1009,7 @@ const MessageContainer = () => {
                     {fileName}
                   </span>
                   <button
-                    onClick={() => downloadFile(message.fileUrl)}
+                    onClick={() => downloadFile(message.fileUrl, message.fileName)}
                     className={cn(
                       "touch-target rounded-full transition-colors",
                       isSent 
@@ -1231,7 +1269,7 @@ const MessageContainer = () => {
           {/* Modal Actions */}
           <div className="fixed top-4 right-4 flex items-center gap-2">
             <button
-              onClick={() => downloadFile(imageURL)}
+              onClick={() => downloadFile(imageURL, previewFileName)}
               className="touch-target rounded-full bg-background-secondary hover:bg-accent transition-colors"
             >
               <IoArrowDownCircle className="w-7 h-7 text-foreground" />
@@ -1239,7 +1277,6 @@ const MessageContainer = () => {
 
             <button
               onClick={() => {
-                setImageURL(null);
                 setShowImage(false);
               }}
               className="touch-target rounded-full bg-background-secondary hover:bg-destructive/20 transition-colors"

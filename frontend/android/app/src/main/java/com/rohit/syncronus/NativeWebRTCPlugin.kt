@@ -1,13 +1,17 @@
 package com.rohit.syncronus
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.projection.MediaProjection
 import android.os.Build
 import android.util.Log
+import android.view.WindowManager
 import android.webkit.CookieManager
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
@@ -40,10 +44,11 @@ class NativeWebRTCPlugin : Plugin() {
     companion object {
         private const val TAG = "NativeWebRTC"
         // Stability-first cap for heterogeneous Android app-to-app calls.
-        private const val MAX_VIDEO_BITRATE = 350_000 // 350 kbps
+        private const val MAX_VIDEO_BITRATE = 1_500_000 // 1.5 Mbps for smooth HD video/screen share
+        private const val CAMERA_VIDEO_BITRATE = 800_000 // 800 kbps for standard camera video
         private const val ICE_BATCH_DELAY_MS = 100L
-        private const val FREEZE_MONITOR_INTERVAL_MS = 4000L
-        private const val FREEZE_DETECT_CONSECUTIVE_CHECKS = 3
+        private const val FREEZE_MONITOR_INTERVAL_MS = 2000L
+        private const val FREEZE_DETECT_CONSECUTIVE_CHECKS = 2
         private const val REMOTE_RECOVERY_COOLDOWN_MS = 6000L
         private const val LOCAL_RECOVERY_COOLDOWN_MS = 8000L
         private const val UI_RESUME_RECOVERY_COOLDOWN_MS = 2500L
@@ -71,14 +76,20 @@ class NativeWebRTCPlugin : Plugin() {
     // native resource limits are hit and the next call fails to start media.
     private var localAudioSource: org.webrtc.AudioSource? = null
     private var localVideoSource: org.webrtc.VideoSource? = null
+    private var screenVideoSource: org.webrtc.VideoSource? = null
     private var localVideoSender: RtpSender? = null
     private var remoteVideoTrack: VideoTrack? = null
+    private var screenVideoTrack: VideoTrack? = null
     private var controlDataChannel: DataChannel? = null
     private var localControlChannelSeq: Long = 0L
     private var latestRemoteControlSeq: Long = -1L
+    private var latestRemoteMediaStateSeq: Long = -1L
+    private var latestRemoteSocketMediaStateSeq: Long = -1L
     private var videoCapturer: CameraVideoCapturer? = null
+    private var screenVideoCapturer: ScreenCapturerAndroid? = null
     private var eglBase: EglBase? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
+    private var screenSurfaceTextureHelper: SurfaceTextureHelper? = null
     // Root Cause 2 fix: track camera release thread so startLocalMedia() can join
     // it before opening the camera, preventing CAMERA_IN_USE race conditions.
     @Volatile private var cameraReleaseThread: Thread? = null
@@ -108,6 +119,10 @@ class NativeWebRTCPlugin : Plugin() {
     private var isMuted = false
     private var isVideoOff = false
     private var isRemoteVideoOff = false
+    private var isRemoteScreenShareActive = false
+    private var localVideoSourceMode = "camera"
+    private var wasVideoOffBeforeScreenShare = false
+    private var wasCameraCaptureSuspendedForScreenShare = false
     private var facingMode = "user" // "user" or "environment"
     private var isPolite = false
     private var makingOffer = false
@@ -168,6 +183,59 @@ class NativeWebRTCPlugin : Plugin() {
         CaptureProfile(640, 480, 20),
         CaptureProfile(320, 240, 15),
     )
+
+    private fun buildScreenCaptureProfile(context: Context): CaptureProfile {
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        var width: Int
+        var height: Int
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.currentWindowMetrics.bounds
+            width = bounds.width()
+            height = bounds.height()
+        } else {
+            val metrics = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(metrics)
+            width = metrics.widthPixels
+            height = metrics.heightPixels
+        }
+
+        // Smart Scaling: Cap resolution at 1280px (approx 720p) to maintain high FPS and low latency.
+        // Screen sharing at full 1080p/1440p is too heavy for real-time mobile encoding.
+        val maxDim = 1280
+        if (width > maxDim || height > maxDim) {
+            val scale = maxDim.toFloat() / maxOf(width, height)
+            width = (width * scale).toInt()
+            height = (height * scale).toInt()
+        }
+
+        // Hardware video encoders STRICTLY require dimensions to be multiples of 16 (or at least even).
+        width = width - (width % 16)
+        height = height - (height % 16)
+
+        return CaptureProfile(width, height, 30)
+    }
+
+    fun canToggleScreenShareNative(): Boolean {
+        if (activeCallType != "video" || isCleaningUp) return false
+        if (isScreenShareActive()) return true
+        return peerConnection != null &&
+            localVideoSender != null &&
+            eglBase?.eglBaseContext != null
+    }
+
+    fun getScreenShareUnavailableReason(): String {
+        return when {
+            activeCallType != "video" -> "Screen share is only available during video calls."
+            isCleaningUp -> "Call is ending. Please try again in a new call."
+            peerConnection == null || localVideoSender == null ->
+                "Screen share will be available once the call finishes connecting."
+            eglBase?.eglBaseContext == null ->
+                "Screen share is still getting ready. Please try again in a moment."
+            else -> "Screen share is not available right now."
+        }
+    }
 
     override fun load() {
         instance = this
@@ -528,6 +596,7 @@ class NativeWebRTCPlugin : Plugin() {
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf(localStreamId)) }
         localVideoSender = localVideoTrack?.let { peerConnection?.addTrack(it, listOf(localStreamId)) }
         applyLocalVideoSendState()
+        CallActivity.instance?.syncLocalVideoUiState()
 
         // Process any pending remote description
         pendingRemoteDescription?.let { desc ->
@@ -736,18 +805,60 @@ class NativeWebRTCPlugin : Plugin() {
         if (shouldThrottleVideoToggle()) return
         isVideoOff = !isVideoOff
         applyLocalVideoSendState()
-        sendVideoStateViaDataChannel(isVideoOff)
-        notifyListeners("onLocalVideoToggled", JSObject().put("isVideoOff", isVideoOff))
+        sendVideoStateViaDataChannel()
+        notifyListeners("onLocalVideoToggled", buildLocalVideoStatePayload())
     }
 
     fun isVideoOffState(): Boolean = isVideoOff
 
     fun setRemoteVideoOffNative(videoOff: Boolean) {
-        isRemoteVideoOff = videoOff
-        CallActivity.instance?.setRemoteVideoOffState(videoOff)
+        setRemoteMediaStateNative(videoOff = videoOff, source = "legacy_video_off")
     }
 
     fun isRemoteVideoOffState(): Boolean = isRemoteVideoOff
+    fun isRemoteScreenShareActiveState(): Boolean = isRemoteScreenShareActive
+
+    fun setRemoteMediaStateNative(
+        videoOff: Boolean,
+        videoSource: String? = null,
+        screenShareActive: Boolean = false,
+        mediaSeq: Long? = null,
+        source: String = "unknown",
+    ) {
+        val shouldTrackSocketSequence =
+            source == "plugin_call" || source == "socket" || source == "legacy_video_off"
+        if (shouldTrackSocketSequence && mediaSeq != null && mediaSeq >= 0L) {
+            if (mediaSeq < latestRemoteSocketMediaStateSeq) {
+                Log.d(
+                    TAG,
+                    "Ignoring stale remote socket media state from $source (seq=$mediaSeq < latest=$latestRemoteSocketMediaStateSeq)",
+                )
+                return
+            }
+            latestRemoteSocketMediaStateSeq = mediaSeq
+        }
+        if (mediaSeq != null && mediaSeq >= 0L) {
+            latestRemoteMediaStateSeq = maxOf(latestRemoteMediaStateSeq, mediaSeq)
+        }
+
+        val normalizedVideoSource = videoSource?.trim()?.lowercase()
+        val resolvedScreenShareActive =
+            !videoOff &&
+                (screenShareActive || normalizedVideoSource == "screen")
+
+        val videoOffChanged = isRemoteVideoOff != videoOff
+        val screenShareChanged = isRemoteScreenShareActive != resolvedScreenShareActive
+
+        isRemoteVideoOff = videoOff
+        isRemoteScreenShareActive = resolvedScreenShareActive
+        
+        if (videoOffChanged) {
+            CallActivity.instance?.setRemoteVideoOffState(videoOff)
+        }
+        if (screenShareChanged) {
+            CallActivity.instance?.setRemoteScreenShareState(resolvedScreenShareActive)
+        }
+    }
 
     fun isFrontFacingCamera(): Boolean = facingMode == "user"
 
@@ -779,7 +890,7 @@ class NativeWebRTCPlugin : Plugin() {
                 Log.d(TAG, "Control DataChannel state: $state")
                 if (state == DataChannel.State.OPEN) {
                     flushPendingControlMessage()
-                    sendVideoStateViaDataChannel(isVideoOff)
+                    sendVideoStateViaDataChannel()
                 }
             }
 
@@ -800,7 +911,17 @@ class NativeWebRTCPlugin : Plugin() {
                             if (remoteSeq >= 0L) {
                                 latestRemoteControlSeq = remoteSeq
                             }
-                            setRemoteVideoOffNative(obj.optBoolean("videoOff", false))
+                            Log.d(
+                                TAG,
+                                "Received remote media state via DataChannel: videoOff=${obj.optBoolean("videoOff", false)}, videoSource=${obj.optString("videoSource", "")}, screenShareActive=${obj.optBoolean("screenShareActive", false)}, seq=$remoteSeq",
+                            )
+                            setRemoteMediaStateNative(
+                                videoOff = obj.optBoolean("videoOff", false),
+                                videoSource = obj.optString("videoSource", ""),
+                                screenShareActive = obj.optBoolean("screenShareActive", false),
+                                mediaSeq = if (remoteSeq >= 0L) remoteSeq else null,
+                                source = "data_channel",
+                            )
                         }
                         "call_end" -> {
                             notifyListeners(
@@ -822,7 +943,7 @@ class NativeWebRTCPlugin : Plugin() {
 
         if (channel.state() == DataChannel.State.OPEN) {
             flushPendingControlMessage()
-            sendVideoStateViaDataChannel(isVideoOff)
+            sendVideoStateViaDataChannel()
         }
     }
 
@@ -858,11 +979,37 @@ class NativeWebRTCPlugin : Plugin() {
         }
     }
 
-    private fun sendVideoStateViaDataChannel(videoOff: Boolean) {
+    private fun buildLocalVideoStatePayload(): JSObject {
+        val resolvedVideoSource = when {
+            isVideoOff -> "off"
+            localVideoSourceMode == "screen" -> "screen"
+            else -> "camera"
+        }
+        return JSObject()
+            .put("isVideoOff", isVideoOff)
+            .put("videoOff", isVideoOff)
+            .put("videoSource", resolvedVideoSource)
+            .put("screenShareActive", resolvedVideoSource == "screen")
+    }
+
+    private fun isScreenShareActive(): Boolean =
+        localVideoSourceMode == "screen" && screenVideoTrack != null
+
+    private fun getActiveLocalVideoTrack(): VideoTrack? =
+        if (isScreenShareActive()) screenVideoTrack else localVideoTrack
+
+    private fun sendVideoStateViaDataChannel() {
         if (activeCallType != "video") return
+        val resolvedVideoSource = when {
+            isVideoOff -> "off"
+            localVideoSourceMode == "screen" -> "screen"
+            else -> "camera"
+        }
         val payload = JSONObject().apply {
             put("type", "video_state")
-            put("videoOff", videoOff)
+            put("videoOff", isVideoOff)
+            put("videoSource", resolvedVideoSource)
+            put("screenShareActive", resolvedVideoSource == "screen")
             put("seq", ++localControlChannelSeq)
         }.toString()
 
@@ -952,6 +1099,7 @@ class NativeWebRTCPlugin : Plugin() {
     fun recoverVideoAfterUiResume(pausedForMs: Long) {
         if (pausedForMs < 1200L) return
         if (isCleaningUp || activeCallType != "video" || isVideoOff) return
+        if (localVideoSourceMode == "screen") return
         val pc = peerConnection ?: return
         val state = pc.iceConnectionState()
         if (state == PeerConnection.IceConnectionState.CLOSED ||
@@ -971,7 +1119,7 @@ class NativeWebRTCPlugin : Plugin() {
                 // Fast path: re-assert sender wiring and renderer binding first.
                 // This avoids unnecessary camera restart on normal PiP/fullscreen transitions.
                 applyLocalVideoSendState()
-                localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
+                getActiveLocalVideoTrack()?.let { CallActivity.instance?.setLocalVideoTrack(it) }
                 if (callActivityActive) {
                     refreshRemoteTrackAttachment()
                 }
@@ -1017,7 +1165,9 @@ class NativeWebRTCPlugin : Plugin() {
                                     "Outbound video appears stalled after resume; restarting local capture."
                                 )
                                 restartLocalVideoCapture()
-                                localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
+                                getActiveLocalVideoTrack()?.let {
+                                    CallActivity.instance?.setLocalVideoTrack(it)
+                                }
                                 if (callActivityActive) {
                                     refreshRemoteTrackAttachment()
                                 }
@@ -1122,29 +1272,215 @@ class NativeWebRTCPlugin : Plugin() {
     fun toggleVideo(call: PluginCall) {
         if (shouldThrottleVideoToggle()) {
             call.resolve(
-                JSObject()
-                    .put("isVideoOff", isVideoOff)
+                buildLocalVideoStatePayload()
                     .put("throttled", true),
             )
             return
         }
         isVideoOff = !isVideoOff
         applyLocalVideoSendState()
-        sendVideoStateViaDataChannel(isVideoOff)
-        notifyListeners("onLocalVideoToggled", JSObject().put("isVideoOff", isVideoOff))
-        call.resolve(JSObject().put("isVideoOff", isVideoOff))
+        sendVideoStateViaDataChannel()
+        notifyListeners("onLocalVideoToggled", buildLocalVideoStatePayload())
+        call.resolve(buildLocalVideoStatePayload())
     }
 
     @PluginMethod
     fun getLocalVideoState(call: PluginCall) {
-        call.resolve(JSObject().put("isVideoOff", isVideoOff))
+        call.resolve(buildLocalVideoStatePayload())
     }
+
+    fun startScreenShareNative(resultCode: Int, permissionData: Intent): Boolean {
+        if (activeCallType != "video") {
+            Log.w(TAG, "startScreenShareNative ignored: active call is not video")
+            return false
+        }
+        if (resultCode != Activity.RESULT_OK) {
+            Log.w(TAG, "startScreenShareNative ignored: permission result was not OK")
+            return false
+        }
+        if (isScreenShareActive()) return true
+
+        val factory = peerConnectionFactory
+        if (factory == null) {
+            Log.w(TAG, "startScreenShareNative ignored: PeerConnectionFactory unavailable")
+            return false
+        }
+        if (localVideoSender == null || peerConnection == null) {
+            Log.w(TAG, "startScreenShareNative ignored: local video sender not ready yet")
+            return false
+        }
+        val hostActivity = CallActivity.instance ?: activity
+        if (hostActivity == null) {
+            Log.w(TAG, "startScreenShareNative ignored: host activity unavailable")
+            return false
+        }
+        val eglContext = eglBase?.eglBaseContext
+        if (eglContext == null) {
+            Log.w(TAG, "startScreenShareNative ignored: EGL context unavailable")
+            return false
+        }
+
+        val previousVideoOff = isVideoOff
+        val profile = buildScreenCaptureProfile(hostActivity)
+
+        // Fix 3 — Resource-leak prevention:
+        // Create helper and source here and assign them to class fields immediately so
+        // disposeScreenShareResources() can clean them up even if startCapture() throws
+        // or the foreground-service start fails.  Previously these were local variables
+        // outside the try block, so the catch path's disposeScreenShareResources() could
+        // not reach them, leaking native objects on every failed attempt.
+        val helper = SurfaceTextureHelper.create("ScreenCaptureThread", eglContext)
+        val source = factory.createVideoSource(true)
+        screenSurfaceTextureHelper = helper
+        screenVideoSource = source
+
+        val capturer = ScreenCapturerAndroid(
+            permissionData,
+            object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Log.w(TAG, "MediaProjection callback stopped the active screen-share session")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (!isCleaningUp && isScreenShareActive()) {
+                            stopScreenShareNative(
+                                restoreCamera = true,
+                                notifyState = true,
+                                stopReason = "media_projection_stopped",
+                            )
+                        }
+                    }
+                }
+            },
+        )
+
+        // Fix 4 — Hardware Encoder Limit & EGL Deadlock Prevention:
+        // On many mid-range OEM devices (like Xiaomi), the hardware video encoder and EGL
+        // resources cannot handle two simultaneous high-resolution capture sessions (Camera + Screen).
+        // If we try to start the ScreenCapturer while the Camera is still active, the VirtualDisplay
+        // silently outputs black frames or the EGL context deadlocks.
+        // Solution: Safely stop the camera hardware first on a background thread. Once it's fully stopped
+        // and resources are freed, we proceed to start the ScreenShareForegroundService on the main thread.
+        val startScreenShareSequence = {
+            ScreenShareForegroundService.start(hostActivity) {
+                try {
+                    capturer.initialize(helper, hostActivity, source.capturerObserver)
+                    capturer.startCapture(profile.width, profile.height, profile.fps)
+
+                    val track = factory.createVideoTrack("screen-video-track", source)
+                    screenVideoCapturer = capturer
+                    screenVideoTrack = track
+
+                    wasVideoOffBeforeScreenShare = previousVideoOff
+                    localVideoSourceMode = "screen"
+                    isVideoOff = false
+                    wasCameraCaptureSuspendedForScreenShare = false
+
+                    val senderSwitchedToScreen = applyLocalVideoSendState()
+                    if (!senderSwitchedToScreen) {
+                        Log.e(TAG, "Screen share start aborted: sender refused screen track")
+                        localVideoSourceMode = "camera"
+                        isVideoOff = previousVideoOff
+                        disposeScreenShareResources(stopService = true)
+                        CallActivity.instance?.syncLocalVideoUiState()
+                        return@start
+                    }
+
+                    val trackToUse = localVideoTrack ?: track
+                    CallActivity.instance?.setLocalVideoTrack(trackToUse)
+                    CallActivity.instance?.syncLocalVideoUiState()
+
+                    applyBitrateCap()
+                    sendVideoStateViaDataChannel()
+                    notifyListeners("onLocalVideoToggled", buildLocalVideoStatePayload())
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start screen share", e)
+                    localVideoSourceMode = "camera"
+                    isVideoOff = previousVideoOff
+                    screenVideoCapturer = null
+                    disposeScreenShareResources(stopService = true)
+                    applyLocalVideoSendState()
+                    CallActivity.instance?.syncLocalVideoUiState()
+                }
+            }
+        }
+
+        // CRITICAL: Do NOT stop the camera capturer before starting screen share.
+        // Calling videoCapturer.stopCapture() triggers internal WebRTC cleanup that
+        // disposes the RtpSender. By the time the ScreenShareForegroundService callback
+        // fires on the main thread, the sender is gone and applyLocalVideoSendState() throws
+        // "RtpSender has been disposed" — aborting the screen share entirely.
+        // The camera encoder will remain alive but idle; WebRTC won't send its frames
+        // because we swap the sender's track to the screen track in applyLocalVideoSendState().
+        startScreenShareSequence()
+
+        return true
+    }
+
+    fun stopScreenShareNative(
+        restoreCamera: Boolean = true,
+        notifyState: Boolean = true,
+        stopReason: String = "manual_stop",
+    ): Boolean {
+        if (!isScreenShareActive()) return false
+
+        Log.d(TAG, "Stopping native screen share (reason=$stopReason, restoreCamera=$restoreCamera)")
+        val previousVideoOff = wasVideoOffBeforeScreenShare
+        localVideoSourceMode = "camera"
+        disposeScreenShareResources(stopService = true)
+
+        isVideoOff = if (restoreCamera) previousVideoOff else true
+        if (restoreCamera && !previousVideoOff) {
+            val resumed = resumeLocalCameraCaptureAfterScreenShare()
+            if (!resumed) {
+                isVideoOff = true
+            }
+        } else {
+            wasCameraCaptureSuspendedForScreenShare = false
+        }
+        val restoredSenderTrack = applyLocalVideoSendState()
+        if (!restoredSenderTrack) {
+            Log.w(TAG, "Failed to restore camera track after screen share; forcing video off")
+            isVideoOff = true
+            localVideoTrack?.setEnabled(false)
+        }
+        localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
+        CallActivity.instance?.refreshRendererMirroring()
+        CallActivity.instance?.syncLocalVideoUiState()
+
+        if (notifyState) {
+            applyBitrateCap()
+            sendVideoStateViaDataChannel()
+            notifyListeners("onLocalVideoToggled", buildLocalVideoStatePayload())
+        }
+        return true
+    }
+
+    fun isScreenShareActiveNative(): Boolean = isScreenShareActive()
 
     @PluginMethod
     fun setRemoteVideoOff(call: PluginCall) {
         val videoOff = call.getBoolean("videoOff", false) ?: false
         setRemoteVideoOffNative(videoOff)
         call.resolve(JSObject().put("isRemoteVideoOff", isRemoteVideoOff))
+    }
+
+    @PluginMethod
+    fun setRemoteMediaState(call: PluginCall) {
+        val videoOff = call.getBoolean("videoOff", false) ?: false
+        val videoSource = call.getString("videoSource", "") ?: ""
+        val screenShareActive = call.getBoolean("screenShareActive", false) ?: false
+        val mediaSeq = call.getLong("mediaSeq")
+        setRemoteMediaStateNative(
+            videoOff = videoOff,
+            videoSource = videoSource,
+            screenShareActive = screenShareActive,
+            mediaSeq = mediaSeq,
+            source = "plugin_call",
+        )
+        call.resolve(
+            JSObject()
+                .put("isRemoteVideoOff", isRemoteVideoOff)
+                .put("remoteScreenShareActive", isRemoteScreenShareActive),
+        )
     }
 
     @PluginMethod
@@ -1224,6 +1560,62 @@ class NativeWebRTCPlugin : Plugin() {
             } catch (e: Exception) {
                 call.reject("Failed to restore audio routing: ${e.message}")
             }
+        }
+    }
+
+    @PluginMethod
+    fun saveFile(call: PluginCall) {
+        val data = call.getString("data")
+        val fileName = call.getString("fileName") ?: "downloaded_file"
+        val mimeType = call.getString("mimeType") ?: "application/octet-stream"
+        
+        if (data == null) {
+            call.reject("Data is required")
+            return
+        }
+        
+        val hostActivity = activity
+        if (hostActivity == null) {
+            call.reject("Host activity unavailable")
+            return
+        }
+
+        try {
+            val bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT)
+            val resolver = hostActivity.contentResolver
+            
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                }
+                val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { outputStream ->
+                        outputStream.write(bytes)
+                    }
+                    val ret = JSObject()
+                    ret.put("status", "success")
+                    call.resolve(ret)
+                } else {
+                    call.reject("Failed to create file in Downloads")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val file = java.io.File(downloadsDir, fileName)
+                java.io.FileOutputStream(file).use { outputStream ->
+                    outputStream.write(bytes)
+                }
+                android.media.MediaScannerConnection.scanFile(hostActivity, arrayOf(file.absolutePath), null, null)
+                
+                val ret = JSObject()
+                ret.put("status", "success")
+                call.resolve(ret)
+            }
+        } catch (e: Exception) {
+            call.reject("Failed to save file: ${e.message}")
         }
     }
 
@@ -1524,6 +1916,7 @@ class NativeWebRTCPlugin : Plugin() {
                 activeCaptureProfile = startedProfile
                 surfaceTextureHelper = helper
                 localVideoSource = videoSource  // store so cleanup() can dispose it
+                localVideoSourceMode = "camera"
                 localVideoTrack = factory.createVideoTrack("video-track", videoSource)
                 localVideoTrack?.setEnabled(true)
                 localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
@@ -1620,6 +2013,88 @@ class NativeWebRTCPlugin : Plugin() {
         }
     }
 
+    private fun disposeScreenShareResources(stopService: Boolean) {
+        val capturerToDispose = screenVideoCapturer
+        screenVideoCapturer = null
+        if (capturerToDispose != null) {
+            try {
+                capturerToDispose.stopCapture()
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                Log.w(TAG, "Interrupted while stopping screen capture", e)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed while stopping screen capture", e)
+            }
+            try {
+                capturerToDispose.dispose()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed disposing screen capturer", e)
+            }
+        }
+
+        screenVideoTrack?.dispose()
+        screenVideoTrack = null
+        screenVideoSource?.dispose()
+        screenVideoSource = null
+        screenSurfaceTextureHelper?.dispose()
+        screenSurfaceTextureHelper = null
+
+        if (stopService) {
+            try {
+                ScreenShareForegroundService.stop(context)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed stopping screen-share foreground service", e)
+            }
+        }
+    }
+
+    private fun suspendLocalCameraCaptureForScreenShare(): Boolean {
+        val capturer = videoCapturer ?: return false
+        return try {
+            capturer.stopCapture()
+            wasCameraCaptureSuspendedForScreenShare = true
+            true
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            Log.w(TAG, "Interrupted while suspending camera for screen share", e)
+            false
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to suspend camera for screen share", e)
+            false
+        }
+    }
+
+    private fun resumeLocalCameraCaptureAfterScreenShare(): Boolean {
+        if (!wasCameraCaptureSuspendedForScreenShare) return true
+        val capturer = videoCapturer ?: return false
+
+        fun tryStart(profile: CaptureProfile): Boolean {
+            return try {
+                capturer.startCapture(profile.width, profile.height, profile.fps)
+                activeCaptureProfile = profile
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        val preferredProfile = activeCaptureProfile ?: stableCaptureProfiles().first()
+        if (tryStart(preferredProfile)) {
+            wasCameraCaptureSuspendedForScreenShare = false
+            return true
+        }
+
+        for (fallback in stableCaptureProfiles()) {
+            if (tryStart(fallback)) {
+                wasCameraCaptureSuspendedForScreenShare = false
+                return true
+            }
+        }
+
+        Log.w(TAG, "Failed to resume camera capture after screen share")
+        return false
+    }
+
     private fun releasePreparedLocalMedia() {
         val capturerToDispose = videoCapturer
         videoCapturer = null
@@ -1644,6 +2119,10 @@ class NativeWebRTCPlugin : Plugin() {
         localAudioSource?.dispose()
         localAudioSource = null
         activeCaptureProfile = null
+        localVideoSourceMode = "camera"
+        disposeScreenShareResources(stopService = true)
+        wasVideoOffBeforeScreenShare = false
+        wasCameraCaptureSuspendedForScreenShare = false
 
         surfaceTextureHelper?.dispose()
         surfaceTextureHelper = null
@@ -2021,28 +2500,88 @@ class NativeWebRTCPlugin : Plugin() {
         }
     }
 
-    private fun applyLocalVideoSendState() {
-        val sender = localVideoSender
-        val track = localVideoTrack
+    private fun applyLocalVideoSendState(): Boolean {
+        val track = getActiveLocalVideoTrack()
 
-        if (isVideoOff) {
-            // Detach track from the sender: remote side receives black/silence immediately.
-            // setEnabled(false) alone only pauses encoding but can leave a frozen frame.
-            try { sender?.setTrack(null, false) } catch (e: Exception) {
-                Log.w(TAG, "Failed to detach local video sender track", e)
+        // Self-healing sender lookup:
+        // During renegotiation or UI transitions (like the screen share permission dialog),
+        // the WebRTC engine or our own lifecycle logic might dispose the active RtpSender.
+        // We detect this by probing the stored sender and scanning the live senders list
+        // on the PeerConnection if the stored one is dead.
+        fun getActiveSender(): RtpSender? {
+            val stored = localVideoSender
+            if (stored != null) {
+                try {
+                    // checkRtpSenderExists() is internal but called by setTrack().
+                    // We call setTrack with the current track as a safe probe.
+                    stored.setTrack(stored.track(), false)
+                    return stored
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "Stored localVideoSender is disposed, scanning for live replacement")
+                } catch (e: Exception) {
+                    // ignore other probe errors
+                }
             }
-            track?.setEnabled(false)
-            return
+
+            // Recovery: Find the current video sender in the peer connection.
+            return peerConnection?.senders?.firstOrNull { s ->
+                try {
+                    // A valid video sender will either have a video track or no track at all.
+                    // Accessing .track() will throw IllegalStateException if the sender is disposed.
+                    val t = s.track()
+                    t == null || t.kind() == "video"
+                } catch (e: Exception) {
+                    false
+                }
+            }?.also { fresh ->
+                Log.w(TAG, "Recovered fresh RtpSender from peer connection")
+                localVideoSender = fresh
+            }
         }
 
-        track?.setEnabled(true)
+        if (isVideoOff) {
+            val activeSender = getActiveSender()
+            try {
+                val detached = activeSender?.setTrack(null, false) ?: true
+                if (!detached) {
+                    Log.w(TAG, "Failed to detach local video sender track")
+                    return false
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to detach local video sender track", e)
+                return false
+            }
+            localVideoTrack?.setEnabled(false)
+            screenVideoTrack?.setEnabled(false)
+            return true
+        }
+
+        // Always keep the camera track enabled so it can be shown in the local preview window,
+        // even if we are currently sending the screen track to the remote peer.
+        localVideoTrack?.setEnabled(true)
+        screenVideoTrack?.setEnabled(localVideoSourceMode == "screen")
+        if (track == null) {
+            Log.w(TAG, "No active local video track available for sender attachment")
+            return false
+        }
+
+        val activeSender = getActiveSender()
         try {
-            if (sender != null && track != null) {
-                sender.setTrack(track, false)
+            if (activeSender != null) {
+                val attached = activeSender.setTrack(track, false)
+                if (!attached) {
+                    Log.w(TAG, "Failed to reattach local video sender track")
+                    return false
+                }
+            } else {
+                Log.w(TAG, "No active video sender found; cannot attach track")
+                return false
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to reattach local video sender track", e)
+            return false
         }
+        return true
     }
 
 
@@ -2071,7 +2610,8 @@ class NativeWebRTCPlugin : Plugin() {
             try {
                 val params = sender.parameters
                 if (params.encodings.isNotEmpty()) {
-                    params.encodings[0].maxBitrateBps = MAX_VIDEO_BITRATE
+                    val bitrate = if (isScreenShareActive()) MAX_VIDEO_BITRATE else CAMERA_VIDEO_BITRATE
+                    params.encodings[0].maxBitrateBps = bitrate
                     sender.parameters = params
                 }
             } catch (e: Exception) {
@@ -2112,7 +2652,7 @@ class NativeWebRTCPlugin : Plugin() {
 
     private fun checkRemoteVideoHealth() {
         if (isCleaningUp) return
-        if (!callActivityActive || isInPipMode) return
+        if (!callActivityActive) return
         val pc = peerConnection ?: return
         val iceState = pc.iceConnectionState()
         if (iceState != PeerConnection.IceConnectionState.CONNECTED &&
@@ -2312,32 +2852,52 @@ class NativeWebRTCPlugin : Plugin() {
                 lastOutboundBytesSent >= 0L &&
                 bytesSent > lastOutboundBytesSent
 
-        consecutiveLocalFreezeChecks = when {
-            hasFrameProgress -> 0
-            hasByteProgress -> consecutiveLocalFreezeChecks + 1
-            else -> consecutiveLocalFreezeChecks + 1
-        }
-
-        if (consecutiveLocalFreezeChecks >= FREEZE_DETECT_CONSECUTIVE_CHECKS) {
+        // Differentiate two distinct stall types so recovery is correctly targeted:
+        //   hasByteProgress=true, hasFrameProgress=false → encoder/decoder stall: bytes leave the
+        //     device but the encoder stopped producing frames. Camera restart is the right first step.
+        //   hasByteProgress=false, hasFrameProgress=false (else) → network/ICE stall: nothing at all
+        //     is leaving the device. Restarting the camera here is pointless — the pipe itself is
+        //     broken. Skip straight to ICE restart with its own cooldown-guarded path.
+        if (!hasFrameProgress && !hasByteProgress) {
+            // Network stall: act immediately once the cooldown has passed, independent of the
+            // encoder-stall counter so the two recovery paths don't interfere with each other.
+            consecutiveLocalFreezeChecks = 0 // reset encoder-stall counter — different root cause
             val now = System.currentTimeMillis()
             if (now - lastLocalRecoveryAtMs >= LOCAL_RECOVERY_COOLDOWN_MS) {
                 lastLocalRecoveryAtMs = now
-                consecutiveLocalFreezeChecks = 0
-                localRecoveryEscalation = (localRecoveryEscalation + 1).coerceAtMost(2)
-                when (localRecoveryEscalation) {
-                    1 -> {
-                        Log.w(TAG, "Local video send stall detected. Restarting camera capture.")
-                        restartLocalVideoCapture()
-                    }
-                    else -> {
-                        Log.w(TAG, "Local video send stall persists. Restarting ICE.")
-                        safeRestartIce("local_video_stall", allowPolite = true)
-                        localRecoveryEscalation = 0
+                localRecoveryEscalation = 0
+                Log.w(TAG, "Local video: zero bytes sent — network/ICE stall. Restarting ICE directly.")
+                safeRestartIce("local_video_network_stall", allowPolite = true)
+            }
+        } else {
+            // Encoder/decoder stall (bytes moving but frames stalled) or healthy — use the
+            // existing escalation ladder: camera restart first, then ICE restart.
+            consecutiveLocalFreezeChecks = when {
+                hasFrameProgress -> 0
+                else -> consecutiveLocalFreezeChecks + 1 // hasByteProgress only
+            }
+
+            if (consecutiveLocalFreezeChecks >= FREEZE_DETECT_CONSECUTIVE_CHECKS) {
+                val now = System.currentTimeMillis()
+                if (now - lastLocalRecoveryAtMs >= LOCAL_RECOVERY_COOLDOWN_MS) {
+                    lastLocalRecoveryAtMs = now
+                    consecutiveLocalFreezeChecks = 0
+                    localRecoveryEscalation = (localRecoveryEscalation + 1).coerceAtMost(2)
+                    when (localRecoveryEscalation) {
+                        1 -> {
+                            Log.w(TAG, "Local video send stall detected. Restarting camera capture.")
+                            restartLocalVideoCapture()
+                        }
+                        else -> {
+                            Log.w(TAG, "Local video send stall persists. Restarting ICE.")
+                            safeRestartIce("local_video_stall", allowPolite = true)
+                            localRecoveryEscalation = 0
+                        }
                     }
                 }
+            } else if (hasFrameProgress) {
+                localRecoveryEscalation = 0
             }
-        } else if (hasFrameProgress) {
-            localRecoveryEscalation = 0
         }
 
         lastOutboundFramesSent = framesSent
@@ -2356,6 +2916,7 @@ class NativeWebRTCPlugin : Plugin() {
     private fun restartLocalVideoCapture() {
         if (isCleaningUp) return
         if (activeCallType != "video" || isVideoOff) return
+        if (localVideoSourceMode == "screen") return
         val capturer = videoCapturer ?: return
 
         val profile = activeCaptureProfile ?: stableCaptureProfiles().first()
@@ -2389,7 +2950,11 @@ class NativeWebRTCPlugin : Plugin() {
     }
 
     fun getEglBase(): EglBase? = eglBase
-    fun getLocalVideoTrack(): VideoTrack? = localVideoTrack
+    fun getLocalVideoTrack(): VideoTrack? = getActiveLocalVideoTrack()
+
+    fun getLocalCameraTrack(): VideoTrack? = localVideoTrack
+
+    fun getLocalScreenTrack(): VideoTrack? = screenVideoTrack
     fun getRemoteVideoTrack(): VideoTrack? = remoteVideoTrack
     fun isPeerConnected(): Boolean = peerConnection?.iceConnectionState() == PeerConnection.IceConnectionState.CONNECTED || peerConnection?.iceConnectionState() == PeerConnection.IceConnectionState.COMPLETED
     fun getCallStartTime(): Long = callStartTime
@@ -2520,6 +3085,8 @@ class NativeWebRTCPlugin : Plugin() {
             clearDisconnectFailsafeTimer()
             stopRemoteFreezeMonitor()
             releaseAudioRouting()
+            disposeScreenShareResources(stopService = true)
+            wasVideoOffBeforeScreenShare = false
 
             val capturerToStop = videoCapturer
             videoCapturer = null
@@ -2589,6 +3156,8 @@ class NativeWebRTCPlugin : Plugin() {
             isMuted = false
             isVideoOff = false
             isRemoteVideoOff = false
+            isRemoteScreenShareActive = false
+            localVideoSourceMode = "camera"
             makingOffer = false
             ignoreOffer = false
             callStartTime = 0L
@@ -2606,6 +3175,8 @@ class NativeWebRTCPlugin : Plugin() {
             activeCaptureProfile = null
             localControlChannelSeq = 0L
             latestRemoteControlSeq = -1L
+            latestRemoteMediaStateSeq = -1L
+            latestRemoteSocketMediaStateSeq = -1L
             pendingControlMessage = null
             lastUiResumeRecoveryAtMs = 0L
             uiResumeRecoverySeq = 0L

@@ -119,6 +119,21 @@ const NativeCallPlugin = {
     return NativeWebRTC.setRemoteVideoOff({ videoOff });
   },
 
+  /** Update remote peer media state for native UI rendering. */
+  async setRemoteMediaState({
+    videoOff,
+    videoSource,
+    screenShareActive,
+    mediaSeq,
+  }) {
+    return NativeWebRTC.setRemoteMediaState({
+      videoOff,
+      videoSource,
+      screenShareActive,
+      ...(Number.isFinite(mediaSeq) ? { mediaSeq } : {}),
+    });
+  },
+
   /** Flip camera. Returns { facingMode: string } */
   async flipCamera() {
     return NativeWebRTC.flipCamera();
