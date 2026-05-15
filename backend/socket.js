@@ -2,6 +2,8 @@ import { Server as SocketIoServer } from "socket.io";
 import Message from "./models/message.model.js";
 import { Channel } from "./models/channel.model.js";
 import { User } from "./models/user.model.js";
+import { Connection } from "./models/connection.model.js";
+import redis from "./config/redis.js";
 import Call from "./models/call.model.js";
 import { sendPushToTokens } from "./utils/pushNotifications.js";
 import mongoose from "mongoose";
@@ -16,6 +18,21 @@ const CONNECTED_CALL_BUSY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const RINGING_CALL_AUTO_END_MS = 45_000;
 const CALL_PEER_DISCONNECT_GRACE_MS = 12_000;
 const CALL_PEER_HEARTBEAT_STALE_MS = 30_000;
+
+export const addContactToActiveSockets = (userId, contactId) => {
+  const sockets = userSocketMap?.get(userId);
+  if (sockets) {
+    sockets.forEach(socketId => {
+      const socketObj = io.sockets.sockets.get(socketId);
+      if (socketObj) {
+        if (!socketObj.contacts) socketObj.contacts = new Set();
+        socketObj.contacts.add(contactId);
+        console.log(`Added contact ${contactId} to active socket ${socketId} for user ${userId}`);
+      }
+    });
+  }
+};
+
 const activeCallByUser = new Map();
 const activeCallById = new Map();
 const ringingCallTimeoutById = new Map();
@@ -496,6 +513,15 @@ const setupSocket = (server) => {
       const receiverSockets = userSocketMap.get(messageFields.receiver) || new Set();
       const senderSockets = userSocketMap.get(messageFields.sender) || new Set();
 
+      // Enforce connection rule using in-memory cache!
+      const isConnected = socket.contacts && socket.contacts.has(messageFields.receiver);
+
+      if (!isConnected) {
+        console.log(`Blocked unauthorized message from ${messageFields.sender} to ${messageFields.receiver}`);
+        socket.emit("errorMessage", "You must be connected to message this user.");
+        return;
+      }
+
       // Determine delivery status instantly
       const isReceiverOnline = receiverSockets.size > 0;
       const deliveryStatus = isReceiverOnline ? "delivered" : "sent";
@@ -560,6 +586,19 @@ const setupSocket = (server) => {
 
         // Post-save operations
         try {
+          // Invalidate sidebar cache for both users!
+          if (redis) {
+            await redis.del(`user:${messageFields.sender}:sidebar`);
+            await redis.del(`user:${messageFields.receiver}:sidebar`);
+            console.log(`[Redis] Invalidated sidebar cache for ${messageFields.sender} and ${messageFields.receiver}`);
+            
+            // Push to message cache!
+            const cacheKey = `chat:dm:${[messageFields.sender, messageFields.receiver].sort().join(":")}`;
+            await redis.lpush(cacheKey, JSON.stringify(instantPayload));
+            await redis.ltrim(cacheKey, 0, 99); // Keep only last 100
+            console.log(`[Redis] Pushed new message to cache for chat ${cacheKey}`);
+          }
+
           const messageData = await Message.findById(createdMessage._id)
             .populate("sender", "id email firstName lastName image color lastSeen")
             .populate("receiver", "id email firstName lastName image color lastSeen");
@@ -640,6 +679,18 @@ const setupSocket = (server) => {
 
       const channel = await Channel.findById(channelId).populate("members");
 
+      // Invalidate sidebar cache for all channel members!
+      if (redis && channel && channel.members) {
+        const memberIds = channel.members.map(m => m._id.toString());
+        if (channel.admin) memberIds.push(channel.admin.toString());
+        
+        const uniqueMemberIds = [...new Set(memberIds)];
+        for (const memberId of uniqueMemberIds) {
+          await redis.del(`user:${memberId}:sidebar`);
+        }
+        console.log(`[Redis] Invalidated sidebar cache for ${uniqueMemberIds.length} members of channel ${channelId}`);
+      }
+
       const finalData = { ...messageData._doc, channelId: channel._id };
 
       if (channel && channel.members) {
@@ -708,6 +759,13 @@ const setupSocket = (server) => {
         { $set: { status: "read" } },
       );
       if (updatedMessages.modifiedCount > 0) {
+        // Invalidate message cache in Redis!
+        if (redis) {
+          const cacheKey = `chat:dm:${[userId.toString(), senderId.toString()].sort().join(":")}`;
+          await redis.del(cacheKey);
+          console.log(`[Redis] Invalidated message cache for chat ${cacheKey} because messages were read.`);
+        }
+
         const senderSockets = userSocketMap.get(senderId) || new Set();
         senderSockets.forEach((socketId) => {
           io.to(socketId).emit("message-status-update", {
@@ -730,6 +788,7 @@ const setupSocket = (server) => {
       console.error("Error updating message status to read:", error);
     }
   };
+
 
   const emitToUser = (userId, event, payload) => {
     const sockets = userSocketMap.get(userId);
@@ -883,6 +942,22 @@ const setupSocket = (server) => {
       io.emit("onlineUsers", Array.from(userSocketMap.keys()));
       console.log(`User Connected: ${userId} with socket ID: ${socket.id}`);
 
+      // Fetch contacts for in-memory check to save Redis commands!
+      try {
+        let contacts = [];
+        if (redis) {
+          contacts = await redis.smembers(`user:${userId}:contacts`);
+        } else {
+          const user = await User.findById(userId).select("contacts");
+          contacts = user?.contacts?.map(c => c.toString()) || [];
+        }
+        socket.contacts = new Set(contacts);
+        console.log(`Loaded ${contacts.length} contacts for User ${userId} in memory.`);
+      } catch (err) {
+        console.error(`Error loading contacts for User ${userId}:`, err);
+        socket.contacts = new Set();
+      }
+
       // Handle undelivered messages
       const undeliveredMessages = await Message.find({
         receiver: userId,
@@ -920,6 +995,14 @@ const setupSocket = (server) => {
     );
 
     socket.on("sendMessage", (message) => sendMessage(message, socket));
+
+    socket.on("connection-request-sent", ({ receiverId, requestData }) => {
+      emitToUser(receiverId, "connection-request-received", requestData);
+    });
+
+    socket.on("connection-request-accepted", ({ requesterId, connectionData }) => {
+      emitToUser(requesterId, "connection-accepted", connectionData);
+    });
 
     socket.on("disconnect", async () => {
       // If this user was actively typing when they disconnected, clear the
@@ -1914,7 +1997,38 @@ const setupSocket = (server) => {
         senderId: userId,
       });
     });
+
+    socket.on("connection-request-sent", ({ receiverId }) => {
+      emitToUser(receiverId, "connection-request-received", {});
+    });
+
+    socket.on("connection-request-accepted", ({ requesterId, connectionData }) => {
+      emitToUser(requesterId, "connection-request-accepted", connectionData);
+      
+      // Fetch and send contact data to BOTH users so they appear in sidebars instantly!
+      User.findById(userId).select("firstName lastName email image color lastSeen").then(user => {
+        if (user) {
+          emitToUser(requesterId, "new-dm-contact", {
+            ...user._doc,
+            lastMessage: "No messages yet",
+            lastMessageAt: new Date(),
+            unreadCount: 0
+          });
+        }
+      });
+      
+      User.findById(requesterId).select("firstName lastName email image color lastSeen").then(requester => {
+        if (requester) {
+          emitToUser(userId, "new-dm-contact", {
+            ...requester._doc,
+            lastMessage: "No messages yet",
+            lastMessageAt: new Date(),
+            unreadCount: 0
+          });
+        }
+      });
+    });
   });
-};
+}
 
 export { io, setupSocket, userSocketMap };

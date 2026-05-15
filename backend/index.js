@@ -12,6 +12,7 @@ import messageRouter from "./routes/message.routes.js";
 import channelRouter from "./routes/channel.routes.js";
 import turnRouter from "./routes/turn.routes.js";
 import callRouter from "./routes/call.routes.js";
+import connectionRouter from "./routes/connection.routes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,6 +54,7 @@ app.use("/api/messages", messageRouter);
 app.use("/api/channels", channelRouter);
 app.use("/api/turn", turnRouter);
 app.use("/api/calls", callRouter);
+app.use("/api/connections", connectionRouter);
 app.get("/api/data", (req, res) => res.json({ message: "Secret Data" }));
 
 //middleware to server static files

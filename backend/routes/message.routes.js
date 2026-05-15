@@ -8,14 +8,16 @@ import {
 } from "../controllers/message.controller.js";
 import { validateToken } from "../middlewares/auth.js";
 import upload from "../middlewares/upload.middleware.js";
+import { ensureUsersCanCommunicate } from "../middlewares/permission.js";
 
 const messageRouter = Router();
 
-messageRouter.get("/private/:contactId", validateToken, getMessages);
+messageRouter.get("/private/:contactId", validateToken, ensureUsersCanCommunicate, getMessages);
 messageRouter.get("/channel/:channelId", validateToken, getChannelMessages);
 messageRouter.post(
   "/upload-file",
   validateToken,
+  ensureUsersCanCommunicate,
   upload.single("file"),
   uploadFile
 );

@@ -6,6 +6,7 @@ import { createContext, useContext } from "react";
 import useMediaStream from "@/hooks/useMediaStream";
 import { Capacitor } from "@capacitor/core";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
+import { toast } from "sonner";
 
 const SocketContext = createContext(null);
 
@@ -247,6 +248,25 @@ export const SocketProvider = ({ children }) => {
         addContact(contact);
       });
 
+      socket.current.on("user-profile-updated", (data) => {
+        const state = useAppStore.getState();
+        const contacts = state.directMessagesContacts || [];
+        
+        // Update contacts list
+        const updatedContacts = contacts.map((c) => 
+          c._id.toString() === data.userId.toString() 
+            ? { ...c, ...data } 
+            : c
+        );
+        useAppStore.setState({ directMessagesContacts: updatedContacts });
+        
+        // Also update selected chat if it's the same user!
+        const selectedChat = state.selectedChatData;
+        if (selectedChat && selectedChat._id.toString() === data.userId.toString()) {
+          useAppStore.setState({ selectedChatData: { ...selectedChat, ...data } });
+        }
+      });
+
       socket.current.on("message-status-update", ({ receiverId, status }) => {
         console.log("Message Status Update!", ` status: ${status}`);
         updatedMessageStatus(receiverId, status);
@@ -255,6 +275,14 @@ export const SocketProvider = ({ children }) => {
       socket.current.on("new-channel-contact", (channel) => {
         console.log("New Channel Received: ", channel);
         addChannel(channel);
+      });
+
+      socket.current.on("connection-request-received", (data) => {
+        toast.info("You received a new connection request!");
+      });
+
+      socket.current.on("connection-accepted", (data) => {
+        toast.success("Your connection request was accepted!");
       });
 
       const onCallSession = (session = {}) => {
@@ -538,6 +566,8 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("stop-typing");
           socket.current.off("user-last-seen");
           socket.current.off("message-deleted");
+          socket.current.off("connection-request-received");
+          socket.current.off("connection-accepted");
 
           socket.current.disconnect();
           socket.current = null;
