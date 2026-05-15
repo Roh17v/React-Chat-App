@@ -267,6 +267,12 @@ class CallActivity : AppCompatActivity() {
             localVideoContainer.alpha = 0f
         }
         enteringPipTransition = true
+        // Do NOT call applyRemoteVideoFitLayout(false) here.
+        // The OS captures the current view state at the moment enterPictureInPictureMode()
+        // is called to start the shrink animation. Resetting the layout here causes a jarring
+        // full-screen flash just before the animation — like WhatsApp, we let the OS
+        // animate from the current correct state. setSourceRectHint already tells Android
+        // exactly which rectangle to animate from.
         val entered = enterPictureInPictureMode(getPictureInPictureParams())
         if (!entered) {
             enteringPipTransition = false
@@ -347,7 +353,7 @@ class CallActivity : AppCompatActivity() {
         set.clone(root)
 
         var appliedFit = false
-        if (shouldUseRemoteFitScaling() && !isLocalLarge) {
+        if (screenShare && shouldUseRemoteFitScaling() && !isLocalLarge) {
             val displayMetrics = resources.displayMetrics
             val screenW = displayMetrics.widthPixels
             val screenH = displayMetrics.heightPixels
@@ -377,10 +383,20 @@ class CallActivity : AppCompatActivity() {
         remoteFrameHeight = h
         remoteFrameRotation = rot
         val isLandscape = if (rot % 180 == 0) w > h else h > w
-        remoteContentSuggestsFit = isLandscape
+        // Do NOT update remoteContentSuggestsFit while in PiP — WebRTC may send lower-res
+        // or portrait-aspect frames for the tiny PiP window. If we update the flag here,
+        // it corrupts the scaling state so the video appears zoomed after returning to
+        // full screen. We preserve the pre-PiP value and only update in full-screen mode.
+        if (!lastKnownPipMode) {
+            remoteContentSuggestsFit = isLandscape
+        }
         runOnUiThread {
-            updateVideoSinkTargets()
-            if (shouldUseRemoteFitScaling()) applyRemoteVideoFitLayout(true)
+            if (!lastKnownPipMode) {
+                updateVideoSinkTargets()
+                if (shouldUseRemoteFitScaling()) {
+                    applyRemoteVideoFitLayout(true)
+                }
+            }
         }
     }
 
@@ -672,12 +688,12 @@ class CallActivity : AppCompatActivity() {
             override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
                 Log.d("CallActivity", "Remote video surface ready: ${videoWidth}x${videoHeight} — rotation: $rotation")
                 updateRemoteContentFitHint(videoWidth, videoHeight, rotation)
+                
+                // Refresh scaling type when resolution changes (e.g. after returning from PiP)
+                runOnUiThread {
+                    updateVideoSinkTargets()
+                }
 
-                // Bug D fix: only attempt re-attachment during initial setup (before the first
-                // frame has been rendered). Once video is flowing, resolution changes (remote
-                // device rotation, network-driven quality adaptation) are handled natively by
-                // the renderer. Calling setRemoteVideoTrack() here mid-call causes unnecessary
-                // removeSink+addSink on a live surface, producing black flashes on some devices.
                 if (remoteFirstFrameRendered) return
                 NativeWebRTCPlugin.instance?.getRemoteVideoTrack()?.let {
                     setRemoteVideoTrack(it)
@@ -1167,7 +1183,7 @@ class CallActivity : AppCompatActivity() {
             // Swap only by retargeting proxy sinks; avoid detach/attach churn on live tracks.
             updateVideoSinkTargets()
             updateLocalCameraOffState()
-            applyRemoteVideoFitLayout(isRemoteScreenSharing && !isLocalLarge)
+            applyRemoteVideoFitLayout((isRemoteScreenSharing || remoteContentSuggestsFit) && !isLocalLarge)
             lastSwapAtMs = SystemClock.elapsedRealtime()
         } catch (e: Exception) {
             Log.e("CallActivity", "swapVideoTracksSync failed", e)
@@ -1499,7 +1515,11 @@ class CallActivity : AppCompatActivity() {
             // correct fullscreen-measured position, never at stale PiP coordinates.
             window.decorView.post {
                 if (!isFinishing && !isDestroyed) {
-                    applyRemoteVideoFitLayout(isRemoteScreenSharing && !isLocalLarge)
+                    resetZoom()
+                    // Re-apply scaling type now that lastKnownPipMode=false and
+                    // remoteContentSuggestsFit reflects the correct pre-PiP state.
+                    updateVideoSinkTargets()
+                    applyRemoteVideoFitLayout((isRemoteScreenSharing || remoteContentSuggestsFit) && !isLocalLarge)
                     localVideoContainer.animate().alpha(1f).setDuration(250).start()
                 }
             }
@@ -1588,7 +1608,7 @@ class CallActivity : AppCompatActivity() {
         // for both portrait camera feeds (9:16) and landscape screen shares (e.g. 16:9).
         // Without this, a landscape screen share would be letterboxed inside a portrait
         // PiP window, wasting space and looking wrong.
-        val pipRatio: Rational = if (isRemoteScreenSharing && remoteFrameWidth > 0 && remoteFrameHeight > 0) {
+        val pipRatio: Rational = if (remoteFrameWidth > 0 && remoteFrameHeight > 0) {
             val frameW = if (remoteFrameRotation % 180 == 0) remoteFrameWidth else remoteFrameHeight
             val frameH = if (remoteFrameRotation % 180 == 0) remoteFrameHeight else remoteFrameWidth
             // Android requires the ratio to be between 1:2.39 and 2.39:1.
@@ -1613,8 +1633,8 @@ class CallActivity : AppCompatActivity() {
         val isLocalActive = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
         Log.d("CallActivity", "updateScreenShareUiState: localActive=$isLocalActive, remoteActive=$isRemoteScreenSharing")
         
-        // Force swap back to normal (local small, remote large) when starting local screen share.
-        if (isLocalActive && isLocalLarge) {
+        // Force swap back to normal (local small, remote large) when starting any screen share.
+        if ((isLocalActive || isRemoteScreenSharing) && isLocalLarge) {
             swapVideoTracks()
         }
         

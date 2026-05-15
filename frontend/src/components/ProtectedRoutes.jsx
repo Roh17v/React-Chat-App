@@ -10,6 +10,10 @@ const ProtectedRoute = ({ children, requireProfileSetup = true }) => {
     return <Navigate to="/auth" />;
   }
 
+  if (!user.isVerified) {
+    return <Navigate to="/auth" />;
+  }
+
   if (requireProfileSetup && !user.profileSetup) {
     return <Navigate to="/profile" />;
   }
