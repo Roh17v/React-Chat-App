@@ -295,8 +295,8 @@ export const dmContacts = async (req, res, next) => {
 
     const sidebarData = Array.from(contactsMap.values());
     if (redis) {
-      // Cache it for 1 hour!
-      await redis.setex(`user:${userId}:sidebar`, 3600, JSON.stringify(sidebarData));
+      // Cache it for 24 hours!
+      await redis.setex(`user:${userId}:sidebar`, 86400, JSON.stringify(sidebarData));
       console.log(`[Redis] Cached sidebar for user ${userId}.`);
     }
     res.status(200).json(sidebarData);

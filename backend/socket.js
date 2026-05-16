@@ -783,6 +783,12 @@ const setupSocket = (server) => {
         { $set: { status: "read" } },
       );
       if (updatedMessages.modifiedCount > 0) {
+        // Invalidate sidebar cache for the user who read the messages!
+        if (redis) {
+          await redis.del(`user:${userId}:sidebar`);
+          console.log(`[Redis] Invalidated sidebar cache for user ${userId} because messages were read.`);
+        }
+
         const senderSockets = userSocketMap.get(senderId) || new Set();
         senderSockets.forEach((socketId) => {
           io.to(socketId).emit("message-status-update", {
