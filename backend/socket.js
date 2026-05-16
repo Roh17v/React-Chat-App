@@ -514,7 +514,37 @@ const setupSocket = (server) => {
       const senderSockets = userSocketMap.get(messageFields.sender) || new Set();
 
       // Enforce connection rule using in-memory cache!
-      const isConnected = socket.contacts && socket.contacts.has(messageFields.receiver);
+      let isConnected = socket.contacts && socket.contacts.has(messageFields.receiver);
+
+      if (!isConnected) {
+        // FALLBACK FOR OLD USERS/CONTACTS:
+        // Check if they are in each other's contacts array in DB 
+        // OR if they have any existing message history.
+        const user = await User.findById(messageFields.sender).select("contacts");
+        const inDbContacts = user?.contacts?.some(c => c.toString() === messageFields.receiver);
+        
+        if (inDbContacts) {
+          isConnected = true;
+          if (socket.contacts) socket.contacts.add(messageFields.receiver);
+        } else {
+          // Check if there is ANY existing message history between them
+          const existingHistory = await Message.findOne({
+            $or: [
+              { sender: messageFields.sender, receiver: messageFields.receiver },
+              { sender: messageFields.receiver, receiver: messageFields.sender }
+            ]
+          }).lean();
+          
+          if (existingHistory) {
+            isConnected = true;
+            // Auto-add to contacts so next time it's fast!
+            await User.findByIdAndUpdate(messageFields.sender, { $addToSet: { contacts: messageFields.receiver } });
+            await User.findByIdAndUpdate(messageFields.receiver, { $addToSet: { contacts: messageFields.sender } });
+            if (socket.contacts) socket.contacts.add(messageFields.receiver);
+            console.log(`[Transition] Auto-added contact ${messageFields.receiver} for user ${messageFields.sender} due to existing history.`);
+          }
+        }
+      }
 
       if (!isConnected) {
         console.log(`Blocked unauthorized message from ${messageFields.sender} to ${messageFields.receiver}`);
