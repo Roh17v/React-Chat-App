@@ -17,17 +17,6 @@ export const getMessages = async (req, res, next) => {
     page = parseInt(page);
     limit = parseInt(limit);
 
-    const cacheKey = `chat:dm:${[userId.toString(), contactId.toString()].sort().join(":")}`;
-
-    if (redis && page === 1) {
-      const cachedMessages = await redis.lrange(cacheKey, 0, limit - 1);
-      if (cachedMessages && cachedMessages.length > 0) {
-        console.log(`[Redis] Serving messages for chat ${cacheKey} from cache.`);
-        const parsed = cachedMessages.map((m) => JSON.parse(m));
-        return res.status(200).json(parsed.reverse());
-      }
-    }
-
     const messages = await Message.find({
       $or: [
         { sender: userId, receiver: contactId },
@@ -56,16 +45,7 @@ export const getMessages = async (req, res, next) => {
 
     const responseData = sanitized.reverse();
 
-    if (redis && page === 1 && responseData.length > 0) {
-      // Clear old cache first to avoid duplicates
-      await redis.del(cacheKey);
-      
-      // Push to Redis (reverse back to newest first!)
-      const toCache = responseData.slice().reverse().map((m) => JSON.stringify(m));
-      await redis.rpush(cacheKey, ...toCache);
-      await redis.expire(cacheKey, 7200); // 2 hours TTL
-      console.log(`[Redis] Cached ${toCache.length} messages for chat ${cacheKey}`);
-    }
+
 
     res.status(200).json(responseData);
   } catch (error) {
@@ -151,16 +131,9 @@ export const deleteForMe = async (req, res, next) => {
       $addToSet: { deletedFor: userId },
     });
 
-    // Invalidate caches!
+    // Invalidate sidebar cache!
     if (redis) {
       await redis.del(`user:${userId}:sidebar`);
-      
-      // Also invalidate message cache for DMs!
-      if (!isChannelMsg && message.sender && message.receiver) {
-        const cacheKey = `chat:dm:${[message.sender.toString(), message.receiver.toString()].sort().join(":")}`;
-        await redis.del(cacheKey);
-        console.log(`[Redis] Invalidated message cache for chat ${cacheKey} (Message deleted for me).`);
-      }
     }
 
     res.status(200).json({ success: true, messageId });
@@ -230,13 +203,11 @@ export const deleteForEveryone = async (req, res, next) => {
         message.receiver.toString(),
       ];
       
-      // Invalidate message and sidebar cache!
+      // Invalidate sidebar cache!
       if (redis) {
-        const cacheKey = `chat:dm:${[message.sender.toString(), message.receiver.toString()].sort().join(":")}`;
-        await redis.del(cacheKey);
         await redis.del(`user:${message.sender}:sidebar`);
         await redis.del(`user:${message.receiver}:sidebar`);
-        console.log(`[Redis] Invalidated caches for chat ${cacheKey} (Message deleted for everyone).`);
+        console.log(`[Redis] Invalidated sidebar caches for users (Message deleted for everyone).`);
       }
 
       participants.forEach((uid) => {

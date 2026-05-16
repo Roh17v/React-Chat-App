@@ -621,12 +621,6 @@ const setupSocket = (server) => {
             await redis.del(`user:${messageFields.sender}:sidebar`);
             await redis.del(`user:${messageFields.receiver}:sidebar`);
             console.log(`[Redis] Invalidated sidebar cache for ${messageFields.sender} and ${messageFields.receiver}`);
-            
-            // Push to message cache!
-            const cacheKey = `chat:dm:${[messageFields.sender, messageFields.receiver].sort().join(":")}`;
-            await redis.lpush(cacheKey, JSON.stringify(instantPayload));
-            await redis.ltrim(cacheKey, 0, 99); // Keep only last 100
-            console.log(`[Redis] Pushed new message to cache for chat ${cacheKey}`);
           }
 
           const messageData = await Message.findById(createdMessage._id)
@@ -789,13 +783,6 @@ const setupSocket = (server) => {
         { $set: { status: "read" } },
       );
       if (updatedMessages.modifiedCount > 0) {
-        // Invalidate message cache in Redis!
-        if (redis) {
-          const cacheKey = `chat:dm:${[userId.toString(), senderId.toString()].sort().join(":")}`;
-          await redis.del(cacheKey);
-          console.log(`[Redis] Invalidated message cache for chat ${cacheKey} because messages were read.`);
-        }
-
         const senderSockets = userSocketMap.get(senderId) || new Set();
         senderSockets.forEach((socketId) => {
           io.to(socketId).emit("message-status-update", {
