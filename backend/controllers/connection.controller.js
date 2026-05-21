@@ -1,7 +1,6 @@
 import { Connection } from "../models/connection.model.js";
 import { User } from "../models/user.model.js";
 import { createError } from "../utils/error.js";
-import redis from "../config/redis.js";
 import { addContactToActiveSockets } from "../socket.js";
 
 // Send a connection request
@@ -90,15 +89,7 @@ export const respondRequest = async (req, res, next) => {
       // Add to contacts array for both users to maintain the friends list!
       await User.findByIdAndUpdate(connection.requester_id, { $addToSet: { contacts: connection.receiver_id } });
       await User.findByIdAndUpdate(connection.receiver_id, { $addToSet: { contacts: connection.requester_id } });
-      
-      // Add to Redis for fast socket checks!
-      if (redis) {
-        await redis.sadd(`user:${connection.requester_id}:contacts`, connection.receiver_id.toString());
-        await redis.sadd(`user:${connection.receiver_id}:contacts`, connection.requester_id.toString());
-        await redis.del(`user:${connection.requester_id}:sidebar`);
-        await redis.del(`user:${connection.receiver_id}:sidebar`);
-        console.log(`[Redis] Invalidated sidebar cache for ${connection.requester_id} and ${connection.receiver_id}`);
-      }
+
       
       // Update in-memory cache for active sockets!
       addContactToActiveSockets(connection.requester_id.toString(), connection.receiver_id.toString());

@@ -3,7 +3,6 @@ import { createError } from "../utils/error.js";
 import { Channel } from "../models/channel.model.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
 import { io, userSocketMap } from "../socket.js";
-import redis from "../config/redis.js";
 
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
@@ -131,10 +130,6 @@ export const deleteForMe = async (req, res, next) => {
       $addToSet: { deletedFor: userId },
     });
 
-    // Invalidate sidebar cache!
-    if (redis) {
-      await redis.del(`user:${userId}:sidebar`);
-    }
 
     res.status(200).json({ success: true, messageId });
   } catch (error) {
@@ -177,13 +172,6 @@ export const deleteForEveryone = async (req, res, next) => {
         );
         if (channel.admin) memberIds.add(channel.admin.toString());
 
-        // Invalidate sidebar cache for all members!
-        if (redis) {
-          for (const memberId of memberIds) {
-            await redis.del(`user:${memberId}:sidebar`);
-          }
-          console.log(`[Redis] Invalidated sidebar cache for ${memberIds.size} members of channel ${message.channelId}`);
-        }
 
         memberIds.forEach((memberId) => {
           const sockets = userSocketMap.get(memberId) || new Set();
@@ -202,13 +190,7 @@ export const deleteForEveryone = async (req, res, next) => {
         message.sender.toString(),
         message.receiver.toString(),
       ];
-      
-      // Invalidate sidebar cache!
-      if (redis) {
-        await redis.del(`user:${message.sender}:sidebar`);
-        await redis.del(`user:${message.receiver}:sidebar`);
-        console.log(`[Redis] Invalidated sidebar caches for users (Message deleted for everyone).`);
-      }
+
 
       participants.forEach((uid) => {
         const sockets = userSocketMap.get(uid) || new Set();

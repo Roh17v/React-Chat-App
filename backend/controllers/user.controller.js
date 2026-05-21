@@ -5,7 +5,6 @@ import path from "path";
 import fs from "fs";
 import mongoose from "mongoose";
 import Message from "../models/message.model.js";
-import redis from "../config/redis.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
 import { io, userSocketMap } from "../socket.js";
 
@@ -99,13 +98,7 @@ export const updateProfile = async (req, res, next) => {
     try {
       const userWithContacts = await User.findById(userId).select("contacts");
       const contacts = userWithContacts?.contacts || [];
-      
-      if (redis) {
-        for (const contactId of contacts) {
-          await redis.del(`user:${contactId}:sidebar`);
-        }
-        console.log(`[Redis] Invalidated sidebar cache for ${contacts.length} contacts of user ${userId}`);
-      }
+
       
       // Emit socket event to all contacts!
       contacts.forEach((contactId) => {
@@ -220,17 +213,7 @@ export const searchUsers = async (req, res, next) => {
 };
 
 export const dmContacts = async (req, res, next) => {
-  const userId = req.user._id;
-
   try {
-    // Check Redis Cache!
-    if (redis) {
-      const cachedSidebar = await redis.get(`user:${userId}:sidebar`);
-      if (cachedSidebar) {
-        console.log(`[Redis] Serving sidebar for user ${userId} from cache.`);
-        return res.status(200).json(JSON.parse(cachedSidebar));
-      }
-    }
     const messages = await Message.find({
       $or: [{ sender: userId }, { receiver: userId }],
       receiver: { $ne: null },
@@ -294,11 +277,7 @@ export const dmContacts = async (req, res, next) => {
     }
 
     const sidebarData = Array.from(contactsMap.values());
-    if (redis) {
-      // Cache it for 24 hours!
-      await redis.setex(`user:${userId}:sidebar`, 86400, JSON.stringify(sidebarData));
-      console.log(`[Redis] Cached sidebar for user ${userId}.`);
-    }
+
     res.status(200).json(sidebarData);
   } catch (error) {
     next(error);

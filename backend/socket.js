@@ -3,7 +3,6 @@ import Message from "./models/message.model.js";
 import { Channel } from "./models/channel.model.js";
 import { User } from "./models/user.model.js";
 import { Connection } from "./models/connection.model.js";
-import redis from "./config/redis.js";
 import Call from "./models/call.model.js";
 import { sendPushToTokens } from "./utils/pushNotifications.js";
 import mongoose from "mongoose";
@@ -616,12 +615,7 @@ const setupSocket = (server) => {
 
         // Post-save operations
         try {
-          // Invalidate sidebar cache for both users!
-          if (redis) {
-            await redis.del(`user:${messageFields.sender}:sidebar`);
-            await redis.del(`user:${messageFields.receiver}:sidebar`);
-            console.log(`[Redis] Invalidated sidebar cache for ${messageFields.sender} and ${messageFields.receiver}`);
-          }
+
 
           const messageData = await Message.findById(createdMessage._id)
             .populate("sender", "id email firstName lastName image color lastSeen")
@@ -703,17 +697,7 @@ const setupSocket = (server) => {
 
       const channel = await Channel.findById(channelId).populate("members");
 
-      // Invalidate sidebar cache for all channel members!
-      if (redis && channel && channel.members) {
-        const memberIds = channel.members.map(m => m._id.toString());
-        if (channel.admin) memberIds.push(channel.admin.toString());
-        
-        const uniqueMemberIds = [...new Set(memberIds)];
-        for (const memberId of uniqueMemberIds) {
-          await redis.del(`user:${memberId}:sidebar`);
-        }
-        console.log(`[Redis] Invalidated sidebar cache for ${uniqueMemberIds.length} members of channel ${channelId}`);
-      }
+
 
       const finalData = { ...messageData._doc, channelId: channel._id };
 
@@ -783,11 +767,7 @@ const setupSocket = (server) => {
         { $set: { status: "read" } },
       );
       if (updatedMessages.modifiedCount > 0) {
-        // Invalidate sidebar cache for the user who read the messages!
-        if (redis) {
-          await redis.del(`user:${userId}:sidebar`);
-          console.log(`[Redis] Invalidated sidebar cache for user ${userId} because messages were read.`);
-        }
+
 
         const senderSockets = userSocketMap.get(senderId) || new Set();
         senderSockets.forEach((socketId) => {
@@ -965,15 +945,10 @@ const setupSocket = (server) => {
       io.emit("onlineUsers", Array.from(userSocketMap.keys()));
       console.log(`User Connected: ${userId} with socket ID: ${socket.id}`);
 
-      // Fetch contacts for in-memory check to save Redis commands!
+      // Fetch contacts for in-memory check
       try {
-        let contacts = [];
-        if (redis) {
-          contacts = await redis.smembers(`user:${userId}:contacts`);
-        } else {
-          const user = await User.findById(userId).select("contacts");
-          contacts = user?.contacts?.map(c => c.toString()) || [];
-        }
+        const user = await User.findById(userId).select("contacts");
+        const contacts = user?.contacts?.map(c => c.toString()) || [];
         socket.contacts = new Set(contacts);
         console.log(`Loaded ${contacts.length} contacts for User ${userId} in memory.`);
       } catch (err) {
