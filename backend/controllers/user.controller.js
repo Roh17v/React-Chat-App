@@ -1,10 +1,12 @@
 import { User } from "../models/user.model.js";
+import { Connection } from "../models/connection.model.js";
 import { createError } from "../utils/error.js";
 import path from "path";
 import fs from "fs";
 import mongoose from "mongoose";
 import Message from "../models/message.model.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
+import { io, userSocketMap } from "../socket.js";
 
 const getFileNameFromUrl = (url) => {
   if (!url) return "File";
@@ -40,21 +42,42 @@ const getMessagePreview = (message) => {
 export const updateProfile = async (req, res, next) => {
   try {
     const { userId } = req.params;
-    const { firstName, lastName, color, profileSetup } = req.body;
+    const { firstName, lastName, color, profileSetup, username } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) return next(createError(404, "User not found"));
 
     const updateData = {};
 
     if (firstName) updateData.firstName = firstName;
     if (lastName) updateData.lastName = lastName;
     if (color) updateData.color = JSON.parse(color);
-    if (profileSetup) updateData.profileSetup = true;
+
+    if (username) {
+      // Check if username is already taken by another user
+      const existingUser = await User.findOne({
+        username: username.toLowerCase(),
+        _id: { $ne: userId },
+      });
+      if (existingUser) {
+        return next(createError(409, "Username is already taken."));
+      }
+      updateData.username = username.toLowerCase();
+    }
+
+    if (profileSetup) {
+      // Enforce username during profile setup
+      if (!username && !user.username) {
+        return next(
+          createError(400, "Username is required to complete profile setup."),
+        );
+      }
+      updateData.profileSetup = true;
+    }
 
     // Upload profile image to cloudflare R2
     if (req.file) {
-      const imageUrl = await uploadToStorage(
-        req.file,
-        "profile-images"
-      );
+      const imageUrl = await uploadToStorage(req.file, "profile-images");
       updateData.image = imageUrl;
     }
 
@@ -68,16 +91,36 @@ export const updateProfile = async (req, res, next) => {
       {
         new: true,
         runValidators: true,
-      }
+      },
     );
 
-    if (!updatedUser) {
-      return next(createError(404, "User not found"));
+    // Invalidate sidebar caches and notify contacts!
+    try {
+      const userWithContacts = await User.findById(userId).select("contacts");
+      const contacts = userWithContacts?.contacts || [];
+
+      
+      // Emit socket event to all contacts!
+      contacts.forEach((contactId) => {
+        const sockets = userSocketMap.get(contactId.toString()) || new Set();
+        sockets.forEach((socketId) => {
+          io.to(socketId).emit("user-profile-updated", {
+            userId: updatedUser._id,
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            image: updatedUser.image,
+            color: updatedUser.color,
+          });
+        });
+      });
+    } catch (err) {
+      console.error("Error in profile update cache invalidation/notification:", err);
     }
 
     return res.status(200).json({
       id: updatedUser._id,
       email: updatedUser.email,
+      username: updatedUser.username,
       profileSetup: updatedUser.profileSetup,
       firstName: updatedUser.firstName,
       lastName: updatedUser.lastName,
@@ -119,55 +162,59 @@ export const deleteProfileImage = async (req, res, next) => {
 export const searchUsers = async (req, res, next) => {
   try {
     const { q } = req.query;
-
     const currUserId = req.user._id;
 
     if (q === undefined || q === null)
       return next(createError(400, "searchTerm is required."));
 
-    // Utilize MongoDB Atlas Search for fast type-ahead 
-    const users = await User.aggregate([
-      {
-        $search: {
-          index: "userAutocompleteIndex", 
-          compound: {
-            should: [
-              { autocomplete: { query: q, path: "firstName", fuzzy: { maxEdits: 1 } } },
-              { autocomplete: { query: q, path: "lastName", fuzzy: { maxEdits: 1 } } },
-              { autocomplete: { query: q, path: "email" } },
-            ],
-            minimumShouldMatch: 1
-          }
-        }
-      },
-      {
-        $match: {
-          _id: { $ne: new mongoose.Types.ObjectId(currUserId) }
-        }
-      },
-      {
-        $project: {
-          firstName: 1,
-          lastName: 1,
-          email: 1,
-          image: 1,
-          color: 1,
-          lastSeen: 1
-        }
-      },
-      { $limit: 20 } // Cap autocomplete return sizes
-    ]);
+    // Use standard query for exact match on email or username (or partial match if you prefer)
+    // For privacy and correctness, we will use exact match for email/username as you requested.
+    const users = await User.find({
+      _id: { $ne: currUserId },
+      $or: [{ email: q }, { username: q }],
+    })
+      .select("firstName lastName email username image color lastSeen")
+      .limit(20)
+      .lean();
 
-    res.status(200).json(users);
+    // Fetch connections for these users to determine relationship status
+    const userIds = users.map((u) => u._id);
+    const connections = await Connection.find({
+      $or: [
+        { requester_id: currUserId, receiver_id: { $in: userIds } },
+        { requester_id: { $in: userIds }, receiver_id: currUserId },
+      ],
+    });
+
+    // Map connection status to users
+    const usersWithStatus = users.map((u) => {
+      const conn = connections.find(
+        (c) =>
+          (c.requester_id.toString() === currUserId.toString() &&
+            c.receiver_id.toString() === u._id.toString()) ||
+          (c.requester_id.toString() === u._id.toString() &&
+            c.receiver_id.toString() === currUserId.toString()),
+      );
+
+      return {
+        ...u,
+        connectionStatus: conn ? conn.status : "none",
+        isRequester: conn
+          ? conn.requester_id.toString() === currUserId.toString()
+          : false,
+        requestId: conn ? conn._id : null,
+      };
+    });
+
+    res.status(200).json(usersWithStatus);
   } catch (error) {
     next(error);
   }
 };
 
 export const dmContacts = async (req, res, next) => {
-  const userId = req.user._id;
-
   try {
+    const userId = req.user._id;
     const messages = await Message.find({
       $or: [{ sender: userId }, { receiver: userId }],
       receiver: { $ne: null },
@@ -181,6 +228,8 @@ export const dmContacts = async (req, res, next) => {
     const contactsMap = new Map();
 
     for (const msg of messages) {
+      if (!msg.sender || !msg.receiver) continue; // Skip messages where sender or receiver was deleted
+
       const contact =
         msg.sender._id.toString() === userId.toString()
           ? msg.receiver
@@ -205,7 +254,32 @@ export const dmContacts = async (req, res, next) => {
       }
     }
 
-    res.status(200).json(Array.from(contactsMap.values()));
+    // Fetch the user's contacts array to include friends with no messages yet
+    const currentUser = await User.findById(userId).populate(
+      "contacts",
+      "firstName lastName email image color lastSeen _id",
+    );
+
+    if (currentUser && currentUser.contacts) {
+      for (const friend of currentUser.contacts) {
+        if (!friend) continue; // Skip if user was deleted
+
+        const friendId = friend._id.toString();
+
+        if (!contactsMap.has(friendId)) {
+          contactsMap.set(friendId, {
+            ...friend._doc,
+            unreadCount: 0,
+            lastMessage: "No messages yet",
+            lastMessageAt: friend.createdAt || new Date(),
+          });
+        }
+      }
+    }
+
+    const sidebarData = Array.from(contactsMap.values());
+
+    res.status(200).json(sidebarData);
   } catch (error) {
     next(error);
   }

@@ -42,7 +42,11 @@ export const getMessages = async (req, res, next) => {
       return msg;
     });
 
-    res.status(200).json(sanitized.reverse());
+    const responseData = sanitized.reverse();
+
+
+
+    res.status(200).json(responseData);
   } catch (error) {
     next(error);
   }
@@ -126,6 +130,7 @@ export const deleteForMe = async (req, res, next) => {
       $addToSet: { deletedFor: userId },
     });
 
+
     res.status(200).json({ success: true, messageId });
   } catch (error) {
     next(error);
@@ -167,6 +172,7 @@ export const deleteForEveryone = async (req, res, next) => {
         );
         if (channel.admin) memberIds.add(channel.admin.toString());
 
+
         memberIds.forEach((memberId) => {
           const sockets = userSocketMap.get(memberId) || new Set();
           sockets.forEach((socketId) => {
@@ -184,6 +190,8 @@ export const deleteForEveryone = async (req, res, next) => {
         message.sender.toString(),
         message.receiver.toString(),
       ];
+
+
       participants.forEach((uid) => {
         const sockets = userSocketMap.get(uid) || new Set();
         sockets.forEach((socketId) => {

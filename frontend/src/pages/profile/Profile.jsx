@@ -14,6 +14,7 @@ const Profile = () => {
   const [image, setImage] = useState(null);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
+  const [username, setUsername] = useState("");
   const [hovered, setHovered] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedColor, setSelectedColor] = useState({
@@ -27,6 +28,7 @@ const Profile = () => {
     setImage(user.image || null);
     setFirstName(user.firstName || "");
     setLastName(user.lastName || "");
+    setUsername(user.username || "");
     setSelectedColor(
       user.color || { bgColor: "#ff007f", textColor: "#ff006e" }
     );
@@ -43,10 +45,12 @@ const Profile = () => {
     e.preventDefault();
     if (!firstName) return toast.error("First Name is required.");
     if (!lastName) return toast.error("Last Name is required.");
+    if (!username) return toast.error("Username is required.");
     setIsLoading(true);
     const formData = new FormData();
     formData.append("firstName", firstName);
     formData.append("lastName", lastName);
+    formData.append("username", username);
     formData.append("color", JSON.stringify(selectedColor));
     formData.append("profileSetup", "true");
     if (selectedFile) {
@@ -218,6 +222,18 @@ const Profile = () => {
                     className="h-12 bg-background-tertiary border-border-subtle rounded-xl focus:border-primary focus:ring-primary/20 transition-all"
                   />
                 </div>
+              </div>
+              {/* Username Field */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground-secondary">
+                  Username
+                </label>
+                <Input
+                  placeholder="johndoe"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value.toLowerCase())}
+                  className="h-12 bg-background-tertiary border-border-subtle rounded-xl focus:border-primary focus:ring-primary/20 transition-all"
+                />
               </div>
               {/* Email Display */}
               <div className="space-y-2">

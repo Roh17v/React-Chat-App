@@ -10,6 +10,7 @@ import ContactList from "@/components/ContactList.jsx";
 import ProfileInfo from "./components/ProfileInfo";
 import NewDm from "./components/NewDm/NewDm";
 import CreateChannel from "./components/CreateChannel";
+import PendingRequests from "./components/PendingRequests";
 import { Capacitor } from "@capacitor/core";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import CallTimer from "@/components/CallTimer";
@@ -111,6 +112,9 @@ const ContactContainer = () => {
             <ContactList contacts={directMessagesContacts} />
           </div>
         </div>
+
+        {/* Connection Requests Section */}
+        <PendingRequests />
 
         {/* Divider */}
         <div className="mx-4 border-t border-sidebar-border" />

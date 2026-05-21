@@ -67,7 +67,10 @@ export const createChatSlice = (set, get) => ({
 
   addContact: (contact) => {
     const contacts = get().directMessagesContacts || [];
-    set({ directMessagesContacts: [...contacts, contact] });
+    const exists = contacts.some((c) => c._id.toString() === contact._id.toString());
+    if (!exists) {
+      set({ directMessagesContacts: [...contacts, contact] });
+    }
   },
 
   addChannel: (channel) => {

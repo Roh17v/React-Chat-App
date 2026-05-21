@@ -9,6 +9,14 @@ const userSchema = new mongoose.Schema({
     required: [true, "Email is required."],
     unique: true,
   },
+  username: {
+    type: String,
+    required: false,
+    unique: true,
+    sparse: true,
+    lowercase: true,
+    trim: true,
+  },
   password: {
     type: String,
     required: [true, "Password is required."],
@@ -92,6 +100,7 @@ export const validateUser = (user) => {
   const schema = Joi.object({
     email: Joi.string().email().required(),
     password: Joi.string().required().min(5).max(1024),
+    username: Joi.string().optional().min(3).max(30).alphanum().lowercase(),
     firstName: Joi.string().optional(),
     lastName: Joi.string().optional(),
     image: Joi.string().optional(),
@@ -103,6 +112,6 @@ export const validateUser = (user) => {
 };
 
 // Text index for robust and scalable full-text searching
-userSchema.index({ firstName: "text", lastName: "text", email: "text" });
+userSchema.index({ firstName: "text", lastName: "text", email: "text", username: "text" });
 
 export const User = mongoose.model("User", userSchema);
