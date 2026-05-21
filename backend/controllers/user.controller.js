@@ -214,6 +214,7 @@ export const searchUsers = async (req, res, next) => {
 
 export const dmContacts = async (req, res, next) => {
   try {
+    const userId = req.user._id;
     const messages = await Message.find({
       $or: [{ sender: userId }, { receiver: userId }],
       receiver: { $ne: null },
