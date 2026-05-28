@@ -17,6 +17,7 @@ import { initializePushNotifications } from "./utils/pushNotifications";
 import { useSocket } from "./context/SocketContext";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
+import { Preferences } from "@capacitor/preferences";
 
 const Auth = lazy(() => import("./pages/auth/Auth"));
 const Chats = lazy(() => import("./pages/chats"));
@@ -148,10 +149,12 @@ function App() {
           setUser(response.data);
         } else {
           setUser(null);
+          await Preferences.remove({ key: "auth_token" }).catch(() => {});
         }
       } catch (error) {
         console.log("Error checking user!", error);
         setUser(null);
+        await Preferences.remove({ key: "auth_token" }).catch(() => {});
       } finally {
         setIsLoading(false);
         console.log(useAppStore.getState().user);

@@ -121,6 +121,7 @@ export const verifyEmail = async (req, res, next) => {
       color: user.color,
       image: user.image,
       isVerified: true,
+      token,
     });
   } catch (error) {
     next(error);
@@ -375,6 +376,7 @@ export const login = async (req, res, next) => {
       color: user.color,
       image: user.image,
       isVerified: true,
+      token,
     });
   } catch (error) {
     next(error);

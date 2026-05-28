@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { Preferences } from "@capacitor/preferences";
 import Background from "@/assets/login2.png";
 import Victory from "@/assets/victory.svg";
 import { Tabs, TabsContent, TabsTrigger, TabsList } from "@/components/ui/tabs";
@@ -82,6 +83,9 @@ const Auth = () => {
           { withCredentials: true }
         );
         if (response.status === 200) {
+          if (response.data.token) {
+            await Preferences.set({ key: "auth_token", value: response.data.token });
+          }
           setUser(response.data);
           toast.success("Logged In Successfully.");
           setTimeout(() => {

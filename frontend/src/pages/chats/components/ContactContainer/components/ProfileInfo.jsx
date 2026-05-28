@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Preferences } from "@capacitor/preferences";
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
 import useAppStore from "@/store";
 import { HOST, LOGOUT_ROUTE } from "@/utils/constants";
@@ -29,6 +30,7 @@ const ProfileInfo = () => {
       );
 
       if (response.status === 200) {
+        await Preferences.remove({ key: "auth_token" });
         toast.success("Logged out successfully");
         setUser(null);
         navigate("/auth");
