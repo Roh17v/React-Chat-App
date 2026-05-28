@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { Preferences } from "@capacitor/preferences";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -56,6 +57,9 @@ const VerifyEmail = () => {
       );
 
       if (response.status === 200) {
+        if (response.data.token) {
+          await Preferences.set({ key: "auth_token", value: response.data.token });
+        }
         setUser(response.data);
         toast.success("Email verified successfully!");
         setTimeout(() => {
