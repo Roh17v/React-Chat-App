@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bubbleGrad" x1="96" y1="64" x2="416" y2="448" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5EEAD4"/>
+      <stop offset="55%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="256" y1="64" x2="256" y2="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10"/>
+      <feOffset dy="6"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.25"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Chat bubble (squircle) with tail -->
+  <g filter="url(#softShadow)">
+    <path d="M160 64 H352
+             C411 64 448 101 448 160
+             V304
+             C448 363 411 400 352 400
+             H236
+             L168 452
+             C158 459 145 452 145 440
+             L145 398
+             C100 388 64 350 64 304
+             V160
+             C64 101 101 64 160 64 Z"
+          fill="url(#bubbleGrad)"/>
+    <!-- Top sheen -->
+    <path d="M160 64 H352
+             C411 64 448 101 448 160
+             V230
+             C360 270 200 270 64 230
+             V160
+             C64 101 101 64 160 64 Z"
+          fill="url(#sheen)"/>
+  </g>
+
+  <!-- Flow wave lines -->
+  <g stroke="#ffffff" stroke-linecap="round" fill="none">
+    <path d="M138 196 C188 168 232 224 282 196 S376 168 374 196"
+          stroke-width="22" opacity="0.95"/>
+    <path d="M138 270 C188 242 232 298 282 270 S376 242 374 270"
+          stroke-width="22" opacity="0.78"/>
+  </g>
+</svg>

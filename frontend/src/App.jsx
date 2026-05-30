@@ -13,6 +13,7 @@ import axios from "axios";
 import { HOST } from "./utils/constants";
 import { AUTH_ROUTES } from "./utils/constants";
 import Loader from "./components/Loader";
+import AuthSplash from "./components/AuthSplash";
 import { initializePushNotifications } from "./utils/pushNotifications";
 import { useSocket } from "./context/SocketContext";
 import { App as CapacitorApp } from "@capacitor/app";
@@ -28,8 +29,12 @@ const ForgotPassword = lazy(() => import("./pages/auth/ForgotPassword"));
 function App() {
   const checkAuth = useAppStore((state) => state.checkAuth);
   const [isLoading, setIsLoading] = useState(true);
+  // showSplash keeps the overlay mounted until its exit animation completes
+  const [showSplash, setShowSplash] = useState(true);
   const setUser = useAppStore((state) => state.setUser);
   const user = useAppStore((state) => state.user);
+  const authInitialized = useAppStore((state) => state.authInitialized);
+  const setAuthInitialized = useAppStore((state) => state.setAuthInitialized);
   const directMessagesContacts = useAppStore(
     (state) => state.directMessagesContacts,
   );
@@ -137,32 +142,51 @@ function App() {
     };
   }, []);
 
+  // Initialize auth on app mount - check persisted token before rendering any routes
   useEffect(() => {
-    const checkAuth = async () => {
-      setIsLoading(true);
+    const initializeAuth = async () => {
       try {
-        const response = await axios.get(`${HOST}${AUTH_ROUTES}/me`, {
-          withCredentials: true,
+        // Check if token exists in Capacitor storage (fast, synchronous-like check)
+        const { value: persistedToken } = await Preferences.get({
+          key: "auth_token",
         });
 
-        if (response.status === 200 && response.data) {
-          setUser(response.data);
+        // If token exists, verify it with backend; otherwise, user is not authenticated
+        if (persistedToken) {
+          try {
+            const response = await axios.get(`${HOST}${AUTH_ROUTES}/me`, {
+              withCredentials: true,
+              timeout: 8000, // 8 second timeout for auth check
+            });
+
+            if (response.status === 200 && response.data) {
+              setUser(response.data);
+            } else {
+              // Invalid response, clear token
+              await Preferences.remove({ key: "auth_token" }).catch(() => {});
+              setUser(null);
+            }
+          } catch (error) {
+            // Token verification failed, clear it
+            console.log("Token verification failed:", error);
+            await Preferences.remove({ key: "auth_token" }).catch(() => {});
+            setUser(null);
+          }
         } else {
+          // No persisted token, user is not logged in
           setUser(null);
-          await Preferences.remove({ key: "auth_token" }).catch(() => {});
         }
       } catch (error) {
-        console.log("Error checking user!", error);
+        console.error("Error during auth initialization:", error);
         setUser(null);
-        await Preferences.remove({ key: "auth_token" }).catch(() => {});
       } finally {
-        setIsLoading(false);
-        console.log(useAppStore.getState().user);
+        // Mark auth as initialized - now it's safe to render routes
+        setAuthInitialized(true);
       }
     };
 
-    checkAuth();
-  }, []);
+    initializeAuth();
+  }, [setUser, setAuthInitialized]);
 
   const handleNotificationQuery = useCallback(
     (search) => {
@@ -424,35 +448,45 @@ function App() {
     setActiveCall,
   ]);
 
-  if (isLoading) return <Loader />;
 
   return (
-    <Suspense fallback={<Loader />}>
-      <Routes>
-        <Route path="/auth" element={<Auth />} />
-        <Route path="/verify-email" element={<VerifyEmail />} />
-        <Route path="/forgot-password" element={<ForgotPassword />} />
+    <>
+      {/* Routes render immediately underneath — no flash possible */}
+      <Suspense fallback={<Loader />}>
+        <Routes>
+          <Route path="/auth" element={<Auth />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
 
-        <Route
-          path="/profile"
-          element={
-            <ProtectedRoute requireProfileSetup={false}>
-              <Profile />
-            </ProtectedRoute>
-          }
+          <Route
+            path="/profile"
+            element={
+              <ProtectedRoute requireProfileSetup={false}>
+                <Profile />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/chats"
+            element={
+              <ProtectedRoute requireProfileSetup={true}>
+                <Chats />
+              </ProtectedRoute>
+            }
+          ></Route>
+
+          <Route path="*" element={<Navigate to={user ? "/chats" : "/auth"} />} />
+        </Routes>
+      </Suspense>
+
+      {/* Splash overlay sits on top at z-[9999], fades out once auth resolves */}
+      {showSplash && (
+        <AuthSplash
+          authReady={authInitialized}
+          onDone={() => setShowSplash(false)}
         />
-        <Route
-          path="/chats"
-          element={
-            <ProtectedRoute requireProfileSetup={true}>
-              <Chats />
-            </ProtectedRoute>
-          }
-        ></Route>
-
-        <Route path="*" element={<Navigate to="/auth" />} />
-      </Routes>
-    </Suspense>
+      )}
+    </>
   );
 }
 
