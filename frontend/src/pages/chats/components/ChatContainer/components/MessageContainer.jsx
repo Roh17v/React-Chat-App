@@ -511,12 +511,23 @@ const MessageContainer = () => {
     if (isDesktop && anchorEl) {
       const rect = anchorEl.closest('.message-bubble')?.getBoundingClientRect() || anchorEl.getBoundingClientRect();
       const viewportHeight = window.innerHeight;
+      const viewportWidth = window.innerWidth;
       const spaceBelow = viewportHeight - rect.bottom;
       const direction = spaceBelow >= 160 ? 'below' : 'above';
 
+      // Align menu to the right (under the right arrow) for all messages
+      let left = rect.right - 180;
+
+      // Keep menu within viewport boundaries with a 10px margin
+      if (left < 10) {
+        left = 10;
+      } else if (left + 180 > viewportWidth - 10) {
+        left = viewportWidth - 180 - 10;
+      }
+
       setMenuPosition({
         top: direction === 'below' ? rect.bottom + 4 : rect.top - 4,
-        left: isSent ? rect.right - 180 : rect.left,
+        left,
         direction,
       });
     } else {
