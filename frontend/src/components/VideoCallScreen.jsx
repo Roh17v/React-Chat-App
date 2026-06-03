@@ -336,9 +336,28 @@ const VideoCallScreen = () => {
   ]);
 
   // Apply bitrate cap on the video sender
+  const getVideoSender = useCallback(() => {
+    if (!pc.current) return null;
+
+    const directVideoSender = pc.current
+      .getSenders()
+      .find((sender) => sender.track?.kind === "video");
+    if (directVideoSender) return directVideoSender;
+
+    const transceiverVideoSender = pc.current
+      .getTransceivers?.()
+      ?.find((transceiver) => {
+        const senderTrackKind = transceiver?.sender?.track?.kind;
+        const receiverTrackKind = transceiver?.receiver?.track?.kind;
+        return senderTrackKind === "video" || receiverTrackKind === "video";
+      })?.sender;
+
+    return transceiverVideoSender || null;
+  }, []);
+
   const applyBitrateCap = useCallback(async () => {
     if (!pc.current) return;
-    const sender = pc.current.getSenders().find((s) => s.track?.kind === "video");
+    const sender = getVideoSender();
     if (!sender) return;
     try {
       const params = sender.getParameters();
@@ -351,21 +370,19 @@ const VideoCallScreen = () => {
     } catch (err) {
       // Bitrate cap is best-effort
     }
-  }, []);
+  }, [getVideoSender]);
 
   const replaceOutgoingVideoTrack = useCallback(
     async (nextTrack) => {
       if (!pc.current) return;
-      const sender = pc.current
-        .getSenders()
-        .find((currentSender) => currentSender.track?.kind === "video");
+      const sender = getVideoSender();
       if (!sender) return;
       await sender.replaceTrack(nextTrack ?? null);
       if (nextTrack) {
         await applyBitrateCap();
       }
     },
-    [applyBitrateCap],
+    [applyBitrateCap, getVideoSender],
   );
 
   const stopScreenShareTracks = useCallback(() => {
@@ -758,8 +775,7 @@ const VideoCallScreen = () => {
       updateVisibleLocalVideo(newStream);
 
       if (pc.current) {
-        const senders = pc.current.getSenders();
-        const videoSender = senders.find((s) => s.track?.kind === "video");
+        const videoSender = getVideoSender();
         if (videoSender && newVideoTrack) {
           await videoSender.replaceTrack(newVideoTrack);
           applyBitrateCap();
@@ -795,7 +811,10 @@ const VideoCallScreen = () => {
       if (pc.current) {
         const senders = pc.current.getSenders();
         newStream.getTracks().forEach((newTrack) => {
-          const sender = senders.find((s) => s.track?.kind === newTrack.kind);
+          const sender =
+            newTrack.kind === "video"
+              ? getVideoSender()
+              : senders.find((s) => s.track?.kind === newTrack.kind);
           if (!sender) return;
           if (newTrack.kind === "video" && isSharingScreen) return;
           sender.replaceTrack(newTrack);
@@ -1316,6 +1335,36 @@ const VideoCallScreen = () => {
 
     stopScreenShareTracks();
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    // Drop the stream reference. After this, the camera tracks are stopped, but
+    // the <video> elements below still hold srcObject -> stream, which on Chrome
+    // (and some Firefox versions) keeps the in-use indicator (camera/mic light)
+    // lit until the references are cleared. Setting srcObject = null releases
+    // those references and turns the light off promptly.
+    localStreamRef.current = null;
+    remoteStreamRef.current = null;
+
+    [
+      pipLocalVideoRef.current,
+      pipRemoteVideoRef.current,
+      fullscreenLocalVideoRef.current,
+      fullscreenRemoteVideoRef.current,
+    ].forEach((video) => {
+      if (!video) return;
+      try {
+        // Pause first so the browser stops driving the (now ended) stream into
+        // the element, then drop the reference. Pause alone is not enough; the
+        // light only goes off when no element references the camera stream.
+        video.pause();
+      } catch {
+        // best effort
+      }
+      try {
+        video.srcObject = null;
+      } catch {
+        // best effort
+      }
+    });
+
     pc.current?.close();
     pc.current = null;
     if (connectionTimeout.current) clearTimeout(connectionTimeout.current);
@@ -1412,14 +1461,39 @@ const VideoCallScreen = () => {
     }
   };
 
-  const toggleVideo = () => {
+  const toggleVideo = async () => {
     if (isScreenSharing) return;
     const t = localStreamRef.current?.getVideoTracks()[0];
     if (t) {
-      t.enabled = !t.enabled;
-      const nextVideoOff = !t.enabled;
+      // nextVideoOff = the videoOff state AFTER this toggle. If the track is
+      // currently enabled (camera on), flipping it means video will be off.
+      const nextVideoOff = t.enabled;
+      t.enabled = !nextVideoOff;
+
+      // Match the sender state to the new videoOff state:
+      //  - turning OFF → detach the track from the sender (send no frames)
+      //  - turning ON  → reattach the track so the remote peer receives video
+      // The previous version had these branches swapped, which left the sender
+      // with a null track after a turn-on, so the remote peer never saw the
+      // camera come back. Local preview worked because the local stream
+      // reference still had an enabled track, masking the bug as "turn on
+      // doesn't work" from the other side's perspective.
+      if (nextVideoOff) {
+        await replaceOutgoingVideoTrack(null);
+      } else {
+        await replaceOutgoingVideoTrack(t);
+      }
+
       const nextMediaState = applyLocalMediaState({
         videoOff: nextVideoOff,
+        // Always pin the source to "camera" alongside the videoOff toggle.
+        // normalizeCallMediaState treats videoSource as authoritative: once it
+        // becomes "off" (set when we turn video off), passing only
+        // `{ videoOff: false }` on the next click merges over the prior state,
+        // sees videoSource=="off", and snaps videoOff back to true. The result
+        // is the icon never updates even though the track was re-enabled and
+        // re-attached. Passing videoSource explicitly here breaks that loop.
+        videoSource: CALL_VIDEO_SOURCE_CAMERA,
       });
       emitLocalVideoState(nextMediaState);
       sendVideoStateViaControlChannel(nextMediaState);

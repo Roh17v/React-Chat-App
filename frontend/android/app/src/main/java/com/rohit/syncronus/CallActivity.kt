@@ -27,9 +27,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.updatePadding
+import io.getstream.webrtc.android.ui.VideoTextureViewRenderer
 import org.webrtc.EglBase
 import org.webrtc.RendererCommon
-import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 import org.webrtc.VideoTrack
@@ -39,10 +39,9 @@ import android.media.projection.MediaProjectionConfig
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.ActivityResultLauncher
 import android.widget.Toast
-import android.view.ScaleGestureDetector
-import android.view.GestureDetector
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.constraintlayout.widget.ConstraintSet
 
 class CallActivity : AppCompatActivity() {
 
@@ -51,8 +50,8 @@ class CallActivity : AppCompatActivity() {
     }
 
     // Views
-    internal lateinit var remoteVideoView: SurfaceViewRenderer
-    internal lateinit var localVideoView: SurfaceViewRenderer
+    internal lateinit var remoteVideoView: VideoTextureViewRenderer
+    internal lateinit var localVideoView: VideoTextureViewRenderer
     private lateinit var btnMute: ImageButton
     private lateinit var btnVideo: ImageButton
     private lateinit var btnFlipPip: ImageButton
@@ -94,22 +93,11 @@ class CallActivity : AppCompatActivity() {
     private var controlsVisible = true
     private var isConnected = false
     private var isLocalLarge = false
+    private var isLocalScreenSharing = false
     private var isRemoteScreenSharing = false
-    private var remoteScalingManualFit = false
-    private var remoteContentSuggestsFit = false
     private var remoteFrameWidth = 0
     private var remoteFrameHeight = 0
     private var remoteFrameRotation = 0
-
-    // Zoom/Pan state
-    private var mScaleFactor = 1.0f
-    private var mPosX = 0f
-    private var mPosY = 0f
-    private var mLastTouchX = 0f
-    private var mLastTouchY = 0f
-    private var mActivePointerId = -1
-    private lateinit var mScaleDetector: ScaleGestureDetector
-    private lateinit var mGestureDetector: GestureDetector
 
     private var screenSharePermissionRequestInFlight = false
     private var enteringPipTransition = false
@@ -175,8 +163,22 @@ class CallActivity : AppCompatActivity() {
     private fun updateVideoSinkTargets() {
         if (!areRenderersReady()) return
         val isFrontCamera = NativeWebRTCPlugin.instance?.isFrontFacingCamera() ?: true
-        val remoteScaling = if (shouldUseRemoteFitScaling()) RendererCommon.ScalingType.SCALE_ASPECT_FIT else RendererCommon.ScalingType.SCALE_ASPECT_FILL
-        remoteVideoView.setScalingType(remoteScaling)
+        val useFit = shouldUseRemoteFitScaling()
+        val remoteScaling = if (useFit) RendererCommon.ScalingType.SCALE_ASPECT_FIT else RendererCommon.ScalingType.SCALE_ASPECT_FILL
+
+        // Use the same fullscreen/PiP scaling rule:
+        //   - Wide camera feed (laptop webcam, etc.) or screen share → FIT (preserve
+        //     content; thin black bars are acceptable because the content matters).
+        //   - Portrait phone camera → FILL (a phone-to-phone PiP should look like
+        //     WhatsApp: filled rectangle with subtle side crop, not bars).
+        // The previous code forced FIT in PiP, which produced top/bottom bars on
+        // app-to-app PiP whenever the timing happened to land after the first
+        // resolution callback. Falling through to `remoteScaling` makes the
+        // behavior deterministic and matches WhatsApp.
+        val remoteScalingType = if (isLocalLarge)
+            RendererCommon.ScalingType.SCALE_ASPECT_FILL
+        else remoteScaling
+        remoteVideoView.setScalingType(remoteScalingType)
         localVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
 
         if (isLocalLarge) {
@@ -257,8 +259,11 @@ class CallActivity : AppCompatActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
     private fun enterPipSafely(): Boolean {
         // Ensure local track is attached before the PiP snapshot path runs.
+        // Use the preview-specific accessor: even if a screen share is in progress,
+        // the small local card must show the camera, never the screen capture itself
+        // (which would otherwise cause an infinity-mirror recursion).
         if (localTrack == null) {
-            NativeWebRTCPlugin.instance?.getLocalVideoTrack()?.let { setLocalVideoTrack(it) }
+            NativeWebRTCPlugin.instance?.getLocalPreviewTrack()?.let { setLocalVideoTrack(it) }
         }
         // Hide local preview BEFORE entering PiP so the PiP snapshot
         // contains only the currently large video surface.
@@ -267,12 +272,10 @@ class CallActivity : AppCompatActivity() {
             localVideoContainer.alpha = 0f
         }
         enteringPipTransition = true
-        // Do NOT call applyRemoteVideoFitLayout(false) here.
-        // The OS captures the current view state at the moment enterPictureInPictureMode()
-        // is called to start the shrink animation. Resetting the layout here causes a jarring
-        // full-screen flash just before the animation — like WhatsApp, we let the OS
-        // animate from the current correct state. setSourceRectHint already tells Android
-        // exactly which rectangle to animate from.
+        // The remote video container is always MATCH_CONSTRAINT (fullscreen). Letterboxing
+        // happens at the renderer (via SCALE_ASPECT_FIT) rather than by resizing the container,
+        // so there is nothing to reset before entering PiP. setSourceRectHint already tells
+        // Android exactly which rectangle to animate from.
         val entered = enterPictureInPictureMode(getPictureInPictureParams())
         if (!entered) {
             enteringPipTransition = false
@@ -318,90 +321,260 @@ class CallActivity : AppCompatActivity() {
         screenSharePermissionRequestInFlight = false
         if (result.resultCode == RESULT_OK && result.data != null) {
             NativeWebRTCPlugin.instance?.startScreenShareNative(result.resultCode, result.data!!)
-            updateScreenShareUiState()
+            updateScreenShareUiState(animated = true)
         } else {
             Toast.makeText(this, "Screen share permission denied", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun applyZoomTransformations() {
-        if (!::remoteVideoContainer.isInitialized) return
-        val w = remoteVideoContainer.width.toFloat()
-        val h = remoteVideoContainer.height.toFloat()
-        if (w <= 0 || h <= 0) return
-        val maxDX = (w * mScaleFactor - w) / 2f
-        val maxDY = (h * mScaleFactor - h) / 2f
-        mPosX = mPosX.coerceIn(-maxDX, maxDX)
-        mPosY = mPosY.coerceIn(-maxDY, maxDY)
-        remoteVideoContainer.scaleX = mScaleFactor
-        remoteVideoContainer.scaleY = mScaleFactor
-        remoteVideoContainer.translationX = mPosX
-        remoteVideoContainer.translationY = mPosY
+    private fun createSnapshotOverlay(
+        renderer: VideoTextureViewRenderer,
+        scaleType: ImageView.ScaleType,
+    ): ImageView? {
+        val bitmap = try { renderer.bitmap } catch (_: Exception) { null } ?: return null
+        return ImageView(this).apply {
+            setImageBitmap(bitmap)
+            this.scaleType = scaleType
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
+        }
     }
 
-    private fun resetZoom() {
-        mScaleFactor = 1.0f
-        mPosX = 0f
-        mPosY = 0f
-        applyZoomTransformations()
+    private fun fadeOutSnapshotOverlay(
+        container: ViewGroup?,
+        overlay: ImageView?,
+        durationMs: Long = 250L,
+    ) {
+        if (container == null || overlay == null) return
+        overlay.animate().alpha(0f).setDuration(durationMs).withEndAction {
+            container.removeView(overlay)
+        }.start()
     }
 
-    private fun applyRemoteVideoFitLayout(screenShare: Boolean) {
-        if (!::remoteVideoContainer.isInitialized) return
-        val root = findViewById<ConstraintLayout>(R.id.call_root_layout) ?: return
-        val set = ConstraintSet()
-        set.clone(root)
+    private fun captureRemoteSnapshotOverlay(): Pair<ViewGroup?, ImageView?> {
+        val remoteContainer = remoteVideoContainer as? ViewGroup
+        val remoteOverlay = if (!areRenderersReady()) {
+            null
+        } else {
+            createSnapshotOverlay(
+                remoteVideoView,
+                if (!isLocalLarge && shouldUseRemoteFitScaling()) {
+                    ImageView.ScaleType.FIT_CENTER
+                } else {
+                    ImageView.ScaleType.CENTER_CROP
+                },
+            )
+        }
+        if (remoteOverlay != null && remoteContainer != null) {
+            remoteContainer.addView(remoteOverlay)
+        }
+        return remoteContainer to remoteOverlay
+    }
 
-        var appliedFit = false
-        if (screenShare && shouldUseRemoteFitScaling() && !isLocalLarge) {
-            val displayMetrics = resources.displayMetrics
-            val screenW = displayMetrics.widthPixels
-            val screenH = displayMetrics.heightPixels
-            val frameW = if (remoteFrameRotation % 180 == 0) remoteFrameWidth else remoteFrameHeight
-            val frameH = if (remoteFrameRotation % 180 == 0) remoteFrameHeight else remoteFrameWidth
-
-            if (frameW > 0 && frameH > 0) {
-                val scale = Math.min(screenW.toFloat() / frameW, screenH.toFloat() / frameH)
-                val targetW = (frameW * scale).toInt()
-                val targetH = (frameH * scale).toInt()
-                set.constrainWidth(R.id.remote_video_container, targetW)
-                set.constrainHeight(R.id.remote_video_container, targetH)
-                appliedFit = true
-            }
+    private fun performTransitionWithSnapshots(transitionBlock: () -> Unit) {
+        if (!areRenderersReady()) {
+            transitionBlock()
+            return
         }
 
-        if (!appliedFit) {
-            set.constrainWidth(R.id.remote_video_container, ConstraintSet.MATCH_CONSTRAINT)
-            set.constrainHeight(R.id.remote_video_container, ConstraintSet.MATCH_CONSTRAINT)
+        val remoteContainer = remoteVideoContainer as? ViewGroup
+        val localContainer = localVideoContainer as? ViewGroup
+
+        val remoteOverlay = createSnapshotOverlay(
+            remoteVideoView,
+            if (!isLocalLarge && shouldUseRemoteFitScaling()) {
+                ImageView.ScaleType.FIT_CENTER
+            } else {
+                ImageView.ScaleType.CENTER_CROP
+            },
+        )
+
+        val localOverlay = createSnapshotOverlay(
+            localVideoView,
+            ImageView.ScaleType.CENTER_CROP,
+        )
+
+        if (remoteOverlay != null && remoteContainer != null) {
+            remoteContainer.addView(remoteOverlay)
+        }
+        if (localOverlay != null && localContainer != null) {
+            localContainer.addView(localOverlay)
         }
 
-        set.applyTo(root)
+        // Run the actual changes
+        transitionBlock()
+
+        // Smoothly fade out the snapshot overlays
+        fadeOutSnapshotOverlay(remoteContainer, remoteOverlay)
+        fadeOutSnapshotOverlay(localContainer, localOverlay)
     }
 
     private fun updateRemoteContentFitHint(w: Int, h: Int, rot: Int) {
         remoteFrameWidth = w
         remoteFrameHeight = h
         remoteFrameRotation = rot
-        val isLandscape = if (rot % 180 == 0) w > h else h > w
-        // Do NOT update remoteContentSuggestsFit while in PiP — WebRTC may send lower-res
-        // or portrait-aspect frames for the tiny PiP window. If we update the flag here,
-        // it corrupts the scaling state so the video appears zoomed after returning to
-        // full screen. We preserve the pre-PiP value and only update in full-screen mode.
-        if (!lastKnownPipMode) {
-            remoteContentSuggestsFit = isLandscape
-        }
+
         runOnUiThread {
             if (!lastKnownPipMode) {
                 updateVideoSinkTargets()
-                if (shouldUseRemoteFitScaling()) {
-                    applyRemoteVideoFitLayout(true)
-                }
+                applyRendererLetterboxLayout()
             }
         }
     }
 
+    /**
+     * Resizes the remote renderer (not the container) to the video's aspect ratio when
+     * we want to letterbox a landscape feed. Otherwise the renderer fills the entire
+     * fullscreen container. The container itself is never resized — that keeps PiP
+     * shrink/grow animations smooth and prevents the renderer from measuring to 0×0
+     * during transitions.
+     */
+    private fun applyRendererLetterboxLayout() {
+        if (!::remoteVideoView.isInitialized) return
+
+        // Letterbox decision: do we need to size the renderer to the video's aspect
+        // ratio so SCALE_ASPECT_FIT is honored? Stream's VideoTextureViewRenderer only
+        // respects FIT scaling when the renderer's measure spec lets it shrink. With
+        // match_parent, the renderer is forced to fill its parent — effectively FILL
+        // — and any aspect mismatch results in cropping.
+        //
+        // We size the renderer to the video's aspect ratio only when we want FIT
+        // scaling. Stream's VideoTextureViewRenderer ignores SCALE_ASPECT_FIT when
+        // laid out as match_parent — sizing the LayoutParams is what actually
+        // produces the FIT effect. Conversely, when we want FILL (portrait phone
+        // camera feed in either fullscreen or PiP), match_parent gives us FILL.
+        //
+        // Same rule for fullscreen and PiP:
+        //   - shouldUseRemoteFitScaling() == true (wide webcam, screen share) → size
+        //     to video aspect → black bars where needed, content fully visible.
+        //   - shouldUseRemoteFitScaling() == false (portrait phone camera) →
+        //     match_parent → FILL behavior, side crop, no bars (WhatsApp behavior).
+        val haveValidFrame = remoteFrameWidth > 0 && remoteFrameHeight > 0
+        val shouldFit = !isLocalLarge && haveValidFrame && shouldUseRemoteFitScaling()
+
+        val params = remoteVideoView.layoutParams as? FrameLayout.LayoutParams ?: return
+
+        var targetW = FrameLayout.LayoutParams.MATCH_PARENT
+        var targetH = FrameLayout.LayoutParams.MATCH_PARENT
+
+        if (shouldFit) {
+            // Bounding box: what we need to fit inside.
+            //  - In PIP: the PiP window itself = the renderer's parent = remote_video_container.
+            //    Display metrics in PiP can return the full screen size on some Android
+            //    versions, so they are unreliable inside PiP.
+            //  - In FULLSCREEN: display metrics, because the container can briefly
+            //    report stale dimensions during transitions (banner-tap return,
+            //    rapid PiP toggle).
+            //
+            // If the parent isn't measured yet (width or height == 0), we skip sizing
+            // here. The OnLayoutChangeListener attached to remoteVideoContainer will
+            // call this function again as soon as the measure pass completes, so we
+            // never end up with a stale size — we just defer for one frame.
+            val displayMetrics = resources.displayMetrics
+            val parent = remoteVideoView.parent as? View
+            val parentW = parent?.width ?: 0
+            val parentH = parent?.height ?: 0
+
+            val (boundW, boundH) = if (lastKnownPipMode) {
+                if (parentW > 0 && parentH > 0) {
+                    parentW to parentH
+                } else {
+                    // Parent not measured yet — skip. The OnLayoutChangeListener on
+                    // remoteVideoContainer will call this function again once the
+                    // PiP window finishes measuring.
+                    return
+                }
+            } else {
+                displayMetrics.widthPixels to displayMetrics.heightPixels
+            }
+
+            val frameAspect = remoteFrameWidth.toFloat() / remoteFrameHeight.toFloat()
+            val boundAspect = boundW.toFloat() / boundH.toFloat()
+            if (frameAspect > boundAspect) {
+                // Frame is wider than its box → letterbox top/bottom.
+                targetW = boundW
+                targetH = (boundW / frameAspect).toInt().coerceAtLeast(1)
+            } else {
+                // Frame is taller than its box → pillarbox left/right.
+                targetH = boundH
+                targetW = (boundH * frameAspect).toInt().coerceAtLeast(1)
+            }
+        }
+
+        val changed = params.width != targetW || params.height != targetH ||
+            params.gravity != android.view.Gravity.CENTER
+        if (changed) {
+            params.width = targetW
+            params.height = targetH
+            params.gravity = android.view.Gravity.CENTER
+            remoteVideoView.layoutParams = params
+        }
+    }
+
     private fun shouldUseRemoteFitScaling(): Boolean =
-        isRemoteScreenSharing || remoteScalingManualFit || remoteContentSuggestsFit
+        isRemoteScreenSharing || isWideRemoteCameraFeed()
+
+    private fun isWideRemoteCameraFeed(): Boolean {
+        if (isRemoteScreenSharing) return false
+
+        // Stream's VideoTextureViewRenderer reports already-rotated dimensions in
+        // onFrameResolutionChanged (frame.rotatedWidth / frame.rotatedHeight), so
+        // remoteFrameWidth/Height are correct as-is — no rotation flip needed.
+        val frameW = remoteFrameWidth
+        val frameH = remoteFrameHeight
+        if (frameW <= 0 || frameH <= 0) return false
+
+        val aspectRatio = frameW.toFloat() / frameH.toFloat()
+        val isWide = aspectRatio >= 1.25f
+        // Portrait mobile camera feeds stay fullscreen/fill.
+        // Genuinely wide feeds like desktop webcams (16:9, 4:3 landscape) auto-fit.
+        return isWide
+    }
+
+    private fun syncVideoLayoutForCurrentMediaState(localScreenShareActive: Boolean) {
+        if ((localScreenShareActive || isRemoteScreenSharing) && isLocalLarge) {
+            isLocalLarge = false
+        }
+
+        btnScreenShare.setImageResource(R.drawable.ic_screen_share)
+        btnScreenShare.alpha = if (localScreenShareActive) 1.0f else 0.85f
+
+        btnFlipPip.isEnabled = !localScreenShareActive
+        btnFlipPip.alpha = if (localScreenShareActive) 0.5f else 1.0f
+        btnVideo.isEnabled = !localScreenShareActive
+        btnVideo.alpha = if (localScreenShareActive) 0.5f else 1.0f
+
+        screenShareIndicator.visibility = if (localScreenShareActive) View.VISIBLE else View.GONE
+
+        updateVideoSinkTargets()
+        updateLocalCameraOffState()
+        applyRendererLetterboxLayout()
+    }
+
+    private fun updateScreenShareUiState(animated: Boolean = false) {
+        if (!::btnScreenShare.isInitialized || !::screenShareIndicator.isInitialized) return
+
+        val isLocalActive = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
+        val localShareChanged = isLocalScreenSharing != isLocalActive
+        isLocalScreenSharing = isLocalActive
+
+        if (
+            animated &&
+            localShareChanged &&
+            areRenderersReady() &&
+            !lastKnownPipMode &&
+            !enteringPipTransition
+        ) {
+            performTransitionWithSnapshots {
+                syncVideoLayoutForCurrentMediaState(isLocalActive)
+            }
+            return
+        }
+
+        syncVideoLayoutForCurrentMediaState(isLocalActive)
+    }
 
     private fun buildScreenCaptureIntent(projectionManager: MediaProjectionManager): Intent {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -427,10 +600,14 @@ class CallActivity : AppCompatActivity() {
         runOnUiThread {
             Log.d("CallActivity", "setRemoteScreenShareState: $screenShareActive")
             if (isRemoteScreenSharing == screenShareActive) return@runOnUiThread
-            isRemoteScreenSharing = screenShareActive
-            updateScreenShareUiState()
-            updateVideoSinkTargets()
-            applyRemoteVideoFitLayout(screenShareActive)
+
+            val localScreenShareActive =
+                NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
+            isLocalScreenSharing = localScreenShareActive
+            performTransitionWithSnapshots {
+                isRemoteScreenSharing = screenShareActive
+                syncVideoLayoutForCurrentMediaState(localScreenShareActive)
+            }
         }
     }
 
@@ -481,18 +658,63 @@ class CallActivity : AppCompatActivity() {
         // Load other user's profile picture async (no third-party lib needed)
         val otherUserImage = intent.getStringExtra("otherUserImage") ?: ""
         if (otherUserImage.isNotEmpty()) {
+            // Target dimensions: the larger of the two avatar slots (112dp main avatar)
+            // converted to pixels at the device's density. Decoding to ~3x that size
+            // gives crisp display without allocating a multi-megabyte bitmap on top
+            // of WebRTC factory + EGL + camera setup, which on mid-range phones can
+            // push the process over the OOM ceiling on the first call.
+            val targetPx = (112f * resources.displayMetrics.density * 3f).toInt()
+                .coerceAtLeast(256)
             Thread {
                 try {
                     val url = java.net.URL(otherUserImage)
-                    val conn = url.openConnection() as java.net.HttpURLConnection
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-                    conn.doInput = true
-                    conn.connect()
-                    val rawBitmap = BitmapFactory.decodeStream(conn.inputStream)
-                    conn.disconnect()
+                    // First pass: decode bounds only (no pixel allocation) to learn
+                    // the source dimensions, then compute inSampleSize so the second
+                    // pass produces a small bitmap.
+                    val boundsConn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        doInput = true
+                        connect()
+                    }
+                    val boundsOptions = BitmapFactory.Options().apply {
+                        inJustDecodeBounds = true
+                    }
+                    boundsConn.inputStream.use { stream ->
+                        BitmapFactory.decodeStream(stream, null, boundsOptions)
+                    }
+                    boundsConn.disconnect()
+
+                    val srcW = boundsOptions.outWidth
+                    val srcH = boundsOptions.outHeight
+                    val sampleSize = computeAvatarSampleSize(srcW, srcH, targetPx)
+
+                    val pixelConn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        doInput = true
+                        connect()
+                    }
+                    val rawBitmap = pixelConn.inputStream.use { stream ->
+                        BitmapFactory.decodeStream(
+                            stream,
+                            null,
+                            BitmapFactory.Options().apply {
+                                inSampleSize = sampleSize
+                                inPreferredConfig = Bitmap.Config.RGB_565
+                            },
+                        )
+                    }
+                    pixelConn.disconnect()
+
                     if (rawBitmap != null) {
                         val circular = makeCircularBitmap(rawBitmap)
+                        if (circular !== rawBitmap) {
+                            // Free the intermediate bitmap as soon as the cropped
+                            // version is ready. Avoids holding two bitmaps in
+                            // memory across the runOnUiThread hop.
+                            rawBitmap.recycle()
+                        }
                         runOnUiThread {
                             imgAvatar.setImageBitmap(circular)
                             imgAvatar.visibility = View.VISIBLE
@@ -565,8 +787,11 @@ class CallActivity : AppCompatActivity() {
                 txtTopName.visibility = View.VISIBLE
             }
 
-            // Attach local video track to this Activity's fresh renderer
-            NativeWebRTCPlugin.instance?.getLocalVideoTrack()?.let { setLocalVideoTrack(it) }
+            // Attach local video track to this Activity's fresh renderer.
+            // Use the preview-specific accessor so the small local card always shows
+            // the camera (or nothing), never the screen-share capture — otherwise the
+            // capturer records its own preview and produces an infinity-mirror image.
+            NativeWebRTCPlugin.instance?.getLocalPreviewTrack()?.let { setLocalVideoTrack(it) }
 
             // Attach remote video track. Then schedule retry passes so a first-frame
             // failure (race between SurfaceHolder creation and track attachment)
@@ -612,6 +837,17 @@ class CallActivity : AppCompatActivity() {
         if (isCurrentCallActivityInstance()) {
             lastKnownPipMode = false
             NativeWebRTCPlugin.instance?.notifyCallUiVisibility(true)
+            // Recompute renderer layout. When the activity returns from background
+            // via a notification banner tap (not via onPictureInPictureModeChanged),
+            // the renderer's LayoutParams may be stale from the PiP / pre-foreground
+            // state, leaving the video as a small letterboxed square. Defer one frame
+            // so display metrics reflect the post-resume window size.
+            window.decorView.post {
+                if (!isFinishing && !isDestroyed) {
+                    updateVideoSinkTargets()
+                    applyRendererLetterboxLayout()
+                }
+            }
             if (pausedForMs >= 1200L) {
                 NativeWebRTCPlugin.instance?.recoverVideoAfterUiResume(pausedForMs)
             }
@@ -655,6 +891,23 @@ class CallActivity : AppCompatActivity() {
         localVideoContainer = findViewById(R.id.local_video_container)
         remoteVideoContainer = findViewById(R.id.remote_video_container)
         remoteVideoContainer.isClickable = true
+        // Re-apply renderer sizing whenever the container's measured size changes.
+        // The PiP transition resizes the container in stages: onPictureInPictureModeChanged
+        // fires before Android has re-measured the window, so reading parent.width inside
+        // that callback returns stale (often fullscreen) dimensions. The result is a
+        // renderer sized for fullscreen but rendered into a PiP window — Android crops
+        // to the center, which is the "zoomed face" symptom.
+        //
+        // OnLayoutChangeListener fires AFTER each measure pass, so we always see the
+        // real current size and can size the renderer correctly. It also covers fullscreen
+        // resize on PiP exit, banner-tap resume, rotation, etc., without us having to
+        // identify every code path that ends in a layout pass.
+        remoteVideoContainer.addOnLayoutChangeListener { _, left, top, right, bottom,
+                                                          oldLeft, oldTop, oldRight, oldBottom ->
+            val sizeChanged = (right - left) != (oldRight - oldLeft) ||
+                (bottom - top) != (oldBottom - oldTop)
+            if (sizeChanged) applyRendererLetterboxLayout()
+        }
         gradientTop = findViewById(R.id.gradient_top)
         gradientBottom = findViewById(R.id.gradient_bottom)
 
@@ -683,10 +936,9 @@ class CallActivity : AppCompatActivity() {
                     lastRemoteFrameAtMs = SystemClock.elapsedRealtime()
                     refreshPipPreconnectHeader()
                 }
-                Log.d("CallActivity", "Remote video SurfaceView first frame rendered.")
+
             }
             override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) {
-                Log.d("CallActivity", "Remote video surface ready: ${videoWidth}x${videoHeight} — rotation: $rotation")
                 updateRemoteContentFitHint(videoWidth, videoHeight, rotation)
                 
                 // Refresh scaling type when resolution changes (e.g. after returning from PiP)
@@ -701,7 +953,6 @@ class CallActivity : AppCompatActivity() {
             }
         })
         remoteVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-        remoteVideoView.setEnableHardwareScaler(false) // Disable asynchronous hardware scaling to fix swap flashes
 
         localVideoView.init(rendererEglBase.eglBaseContext, object : RendererCommon.RendererEvents {
             override fun onFirstFrameRendered() {
@@ -721,64 +972,7 @@ class CallActivity : AppCompatActivity() {
             }
         })
         localVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-        localVideoView.setEnableHardwareScaler(false)
-        localVideoView.setZOrderMediaOverlay(true) // CRITICAL: forces PiP SurfaceView to render ON TOP of remote video
         localVideoView.setMirror(true)
-
-        mGestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                if (mScaleFactor != 1.0f) {
-                    resetZoom()
-                    return true
-                }
-                remoteScalingManualFit = !remoteScalingManualFit
-                updateVideoSinkTargets()
-                applyRemoteVideoFitLayout(isRemoteScreenSharing && !isLocalLarge)
-                return true
-            }
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                // Toggle controls logic already exists in the original file, 
-                // but let's see if we should trigger it here or use the existing listener.
-                // The original file has remoteVideoView.setOnClickListener.
-                return false 
-            }
-        })
-
-        mScaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScale(detector: ScaleGestureDetector): Boolean {
-                mScaleFactor *= detector.scaleFactor
-                mScaleFactor = mScaleFactor.coerceIn(1.0f, 5.0f)
-                applyZoomTransformations()
-                return true
-            }
-        })
-
-        remoteVideoContainer.setOnTouchListener { _, event ->
-            mScaleDetector.onTouchEvent(event)
-            mGestureDetector.onTouchEvent(event)
-            val action = event.actionMasked
-            if (action == MotionEvent.ACTION_DOWN) {
-                mLastTouchX = event.x
-                mLastTouchY = event.y
-                mActivePointerId = event.getPointerId(0)
-            } else if (action == MotionEvent.ACTION_MOVE) {
-                val pointerIndex = event.findPointerIndex(mActivePointerId)
-                if (pointerIndex != -1) {
-                    val x = event.getX(pointerIndex)
-                    val y = event.getY(pointerIndex)
-                    if (mScaleFactor > 1.0f && !mScaleDetector.isInProgress) {
-                        mPosX += x - mLastTouchX
-                        mPosY += y - mLastTouchY
-                        applyZoomTransformations()
-                    }
-                    mLastTouchX = x
-                    mLastTouchY = y
-                }
-            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                mActivePointerId = -1
-            }
-            true
-        }
 
         updateVideoSinkTargets()
     }
@@ -863,13 +1057,16 @@ class CallActivity : AppCompatActivity() {
         btnScreenShare.setOnClickListener {
             if (NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true) {
                 NativeWebRTCPlugin.instance?.stopScreenShareNative()
-                updateScreenShareUiState()
+                updateScreenShareUiState(animated = true)
             } else {
                 launchScreenSharePermission()
             }
         }
 
-        remoteVideoView.setOnClickListener {
+        // Tap to toggle controls. Listener is on remoteVideoContainer (full-screen
+        // parent) rather than remoteVideoView, so taps in the black-bar regions
+        // outside the video rectangle (when FIT-scaled) still toggle controls.
+        remoteVideoContainer.setOnClickListener {
             controlsVisible = !controlsVisible
             if (controlsVisible) {
                 // Make views visible BEFORE animating in so they become interactive immediately.
@@ -880,11 +1077,10 @@ class CallActivity : AppCompatActivity() {
                 // NOTE: localVideoContainer MUST NOT be set to GONE/INVISIBLE — it contains a
                 // SurfaceViewRenderer, and changing its parent visibility destroys the EGL
                 // surface causing crashes on subsequent track attachment.
-                // Restore interactivity and alpha instead.
+                // Restore interactivity (alpha is left at 1.0 throughout — see else branch).
                 localVideoContainer.isClickable = true
                 localVideoContainer.isFocusable = true
-                localVideoContainer.animate().alpha(1f).setDuration(200).start()
-                
+
                 btnFlipPip.visibility = View.VISIBLE
                 val isScreenSharing = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
                 val targetAlpha = if (isScreenSharing) 0.5f else 1.0f
@@ -899,9 +1095,11 @@ class CallActivity : AppCompatActivity() {
                     .withEndAction { controlsContainer.visibility = View.GONE }.start()
                 topBar.animate().alpha(0f).setDuration(200)
                     .withEndAction { topBar.visibility = View.GONE }.start()
-                
-                // Keep localVideoContainer visible and interactive for dragging even when buttons are gone.
-                localVideoContainer.animate().alpha(0.85f).setDuration(200).start()
+
+                // Keep localVideoContainer fully opaque even when the rest of the
+                // controls are hidden — matches WhatsApp, where the local preview tile
+                // is part of the call content (always visible at full opacity), not part
+                // of the chrome that fades with the buttons.
                 btnFlipPip.animate().alpha(0f).setDuration(200)
                     .withEndAction { btnFlipPip.visibility = View.GONE }.start()
             }
@@ -1177,13 +1375,14 @@ class CallActivity : AppCompatActivity() {
         swapInProgress = true
 
         try {
-            isLocalLarge = !isLocalLarge
+            performTransitionWithSnapshots {
+                isLocalLarge = !isLocalLarge
 
-            resetZoom()
-            // Swap only by retargeting proxy sinks; avoid detach/attach churn on live tracks.
-            updateVideoSinkTargets()
-            updateLocalCameraOffState()
-            applyRemoteVideoFitLayout((isRemoteScreenSharing || remoteContentSuggestsFit) && !isLocalLarge)
+                // Swap only by retargeting proxy sinks; avoid detach/attach churn on live tracks.
+                updateVideoSinkTargets()
+                updateLocalCameraOffState()
+                applyRendererLetterboxLayout()
+            }
             lastSwapAtMs = SystemClock.elapsedRealtime()
         } catch (e: Exception) {
             Log.e("CallActivity", "swapVideoTracksSync failed", e)
@@ -1224,7 +1423,6 @@ class CallActivity : AppCompatActivity() {
         val isRemoteVideoOff = isRemoteVideoOffSignaled || isRemoteVideoOffHeuristic
         val isSmallFeedVideoOff = if (isLocalLarge) isRemoteVideoOff else isVideoOff
         if (isSmallFeedVideoOff) {
-            try { localVideoView.clearImage() } catch (_: Exception) {}
             localCameraOffOverlay.visibility = View.VISIBLE
         } else {
             localCameraOffOverlay.visibility = View.GONE
@@ -1232,7 +1430,6 @@ class CallActivity : AppCompatActivity() {
 
         val isLargeFeedVideoOff = if (isLocalLarge) isVideoOff else isRemoteVideoOff
         if (isLargeFeedVideoOff) {
-            try { remoteVideoView.clearImage() } catch (_: Exception) {}
             remoteCameraOffOverlay.visibility = View.VISIBLE
         } else {
             remoteCameraOffOverlay.visibility = View.GONE
@@ -1268,6 +1465,28 @@ class CallActivity : AppCompatActivity() {
         val top = ((src.height - size) / 2).toFloat()
         canvas.drawBitmap(src, -left, -top, paint)
         return output
+    }
+
+    /**
+     * Compute the largest power-of-two inSampleSize that keeps the decoded bitmap
+     * at least [targetPx] on its longer edge. Mirrors the standard Android pattern
+     * from BitmapFactory documentation.
+     *
+     * Avatars on the call screen are at most 112dp; on a 3x device that's 336px.
+     * Source images are typically several MP, so without sampling we'd allocate
+     * 8-16 MB just for the avatar — on top of WebRTC factory + EGL + camera setup
+     * during the heaviest moment of a first call. A hard upper bound from sampling
+     * keeps memory predictable regardless of what the server returns.
+     */
+    private fun computeAvatarSampleSize(srcW: Int, srcH: Int, targetPx: Int): Int {
+        if (srcW <= 0 || srcH <= 0 || targetPx <= 0) return 1
+        var sampleSize = 1
+        var halfW = srcW / 2
+        var halfH = srcH / 2
+        while (halfW / sampleSize >= targetPx && halfH / sampleSize >= targetPx) {
+            sampleSize *= 2
+        }
+        return sampleSize
     }
 
     fun setLocalVideoTrack(track: VideoTrack) {
@@ -1430,23 +1649,25 @@ class CallActivity : AppCompatActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         enteringPipTransition = false
-        lastKnownPipMode = isInPictureInPictureMode
 
         NativeWebRTCPlugin.instance?.notifyPipModeChange(isInPictureInPictureMode)
         
         if (isInPictureInPictureMode) {
+            lastKnownPipMode = true
             // Hide controls in PiP mode
             controlsContainer.visibility = View.GONE
             gradientTop.visibility = View.GONE
             gradientBottom.visibility = View.GONE
             connectingOverlay.visibility = View.GONE
 
-            // CRITICAL: Reset the remoteVideoContainer back to MATCH_CONSTRAINT so it fills
-            // the PiP window naturally. Without this, any fixed pixel dimensions set by
-            // applyRemoteVideoFitLayout() (sized for the fullscreen display) persist into
-            // PiP, causing the video to appear zoomed/cropped because the container is
-            // still sized as if it were 1080×2400 but displayed in a tiny ~400×225 window.
-            applyRemoteVideoFitLayout(false)
+            // Force the renderer back to match_parent for PiP. Letterbox sizing is only
+            // for fullscreen — in PiP, Android sizes the window to our requested aspect
+            // ratio (see getPictureInPictureParams) and the renderer must fill that window.
+            applyRendererLetterboxLayout()
+            // Switch the remote scaling to FIT so the entire frame is visible inside the
+            // tall PiP window. updateVideoSinkTargets reads lastKnownPipMode to decide,
+            // and lastKnownPipMode was just set to true a few lines above.
+            updateVideoSinkTargets()
 
             // Keep PiP strictly single-video: never render the local mini preview there.
             // For pre-connect/minimize-before-first-frame, show only the remote user name.
@@ -1505,6 +1726,19 @@ class CallActivity : AppCompatActivity() {
             topBar.alpha = 1f
             controlsVisible = true
 
+            val (remoteSnapshotContainer, remoteSnapshotOverlay) =
+                captureRemoteSnapshotOverlay()
+
+            // Reset PiP flag NOW so updateVideoSinkTargets below picks the correct
+            // fullscreen scaling (FILL for portrait camera feeds, FIT for letterboxed
+            // wide feeds) instead of the in-PiP FIT setting.
+            lastKnownPipMode = false
+
+            // Apply scaling immediately using the clean pre-PiP state so the renderer
+            // is prepared with the correct scaling type before the expansion animation starts.
+            updateVideoSinkTargets()
+            applyRendererLetterboxLayout()
+
             // Force a fresh layout pass. When the Activity resizes from the tiny PiP
             // window back to full-screen, ConstraintLayout can retain stale measure
             // results from the PiP dimensions, leaving the UI broken or clipped.
@@ -1515,12 +1749,12 @@ class CallActivity : AppCompatActivity() {
             // correct fullscreen-measured position, never at stale PiP coordinates.
             window.decorView.post {
                 if (!isFinishing && !isDestroyed) {
-                    resetZoom()
-                    // Re-apply scaling type now that lastKnownPipMode=false and
-                    // remoteContentSuggestsFit reflects the correct pre-PiP state.
+                    // Refresh scaling to match the final fullscreen resolution
                     updateVideoSinkTargets()
-                    applyRemoteVideoFitLayout((isRemoteScreenSharing || remoteContentSuggestsFit) && !isLocalLarge)
+                    applyRendererLetterboxLayout()
+                    
                     localVideoContainer.animate().alpha(1f).setDuration(250).start()
+                    fadeOutSnapshotOverlay(remoteSnapshotContainer, remoteSnapshotOverlay, 220L)
                 }
             }
         }
@@ -1581,8 +1815,6 @@ class CallActivity : AppCompatActivity() {
                 remoteTrack?.removeSink(remoteProxySink)
                 localProxySink.setTarget(null)
                 remoteProxySink.setTarget(null)
-                localVideoView.release()
-                remoteVideoView.release()
             }
             remoteFirstFrameRendered = false
             swapInProgress = false
@@ -1604,56 +1836,66 @@ class CallActivity : AppCompatActivity() {
     private fun getPictureInPictureParams(): PictureInPictureParams {
         val builder = PictureInPictureParams.Builder()
 
-        // Use the actual remote stream aspect ratio so the PiP window is sized correctly
-        // for both portrait camera feeds (9:16) and landscape screen shares (e.g. 16:9).
-        // Without this, a landscape screen share would be letterboxed inside a portrait
-        // PiP window, wasting space and looking wrong.
-        val pipRatio: Rational = if (remoteFrameWidth > 0 && remoteFrameHeight > 0) {
-            val frameW = if (remoteFrameRotation % 180 == 0) remoteFrameWidth else remoteFrameHeight
-            val frameH = if (remoteFrameRotation % 180 == 0) remoteFrameHeight else remoteFrameWidth
-            // Android requires the ratio to be between 1:2.39 and 2.39:1.
-            // Clamp to safe landscape bounds when the stream is wider than it is tall.
-            val clampedW = frameW.coerceAtMost(frameH * 239 / 100)
-            val clampedH = frameH.coerceAtMost(frameW * 239 / 100)
-            Rational(clampedW.coerceAtLeast(1), clampedH.coerceAtLeast(1))
-        } else {
-            Rational(9, 16) // Default: portrait camera call
-        }
+        // PiP is always a fixed 9:16 portrait window, regardless of what's playing
+        // inside it (camera call, screen share, swap state). Reasons:
+        //
+        //  1. Consistency. Every transition from fullscreen produces the same shape.
+        //     Users learn one mental model.
+        //  2. WhatsApp parity. WhatsApp does the same thing for camera calls and
+        //     never reshapes for screen share.
+        //  3. No mid-PiP reshape jolt. If a screen share starts/stops while the user
+        //     is in PiP, the window doesn't suddenly change aspect.
+        //
+        // The remote renderer uses SCALE_ASPECT_FIT in PiP and is sized to its video
+        // aspect ratio inside this 9:16 window (see applyRendererLetterboxLayout),
+        // so the entire frame is visible with thin pillarbox or letterbox bars where
+        // the source aspect doesn't match 9:16. No cropping, no zoom.
+        val pipRatio = Rational(9, 16)
         builder.setAspectRatio(pipRatio)
 
+        // Source rect hint: the rectangle Android animates FROM when shrinking into
+        // PiP. If we hand it the renderer's current visible rect (which in fullscreen
+        // is sized to the video's aspect, e.g. 1080x810 for a 4:3 webcam letterboxed
+        // top/bottom), it doesn't match the destination 9:16 aspect and Android plays
+        // a two-stage transition: first squish the 4:3 rect, then re-lay out as 9:16.
+        // The user sees the video shrink to mid-height and then expand into the
+        // portrait PiP — the symptom you'd describe as "shrinks first, then expands".
+        //
+        // To get a single clean shrink, we hand Android a 9:16-shaped rect centered
+        // inside the screen. Android then has only one transformation to do: scale
+        // that rect down to PiP size. WhatsApp uses the same trick.
         val sourceRectHint = android.graphics.Rect()
-        remoteVideoView.getGlobalVisibleRect(sourceRectHint)
+        val displayMetrics = resources.displayMetrics
+        val screenW = displayMetrics.widthPixels
+        val screenH = displayMetrics.heightPixels
+        if (screenW > 0 && screenH > 0) {
+            val targetAspect = pipRatio.toFloat() // 9/16 = 0.5625
+            // Largest 9:16 rectangle that fits inside the screen.
+            val rectH: Int
+            val rectW: Int
+            if (screenW.toFloat() / screenH.toFloat() > targetAspect) {
+                // Screen is wider than 9:16 (rare in portrait phones, but covers
+                // landscape orientation). Cap by height.
+                rectH = screenH
+                rectW = (screenH * targetAspect).toInt().coerceAtLeast(1)
+            } else {
+                // Screen is taller than 9:16 (typical portrait phone aspect ~9:19+).
+                // Cap by width.
+                rectW = screenW
+                rectH = (screenW / targetAspect).toInt().coerceAtLeast(1)
+            }
+            val left = (screenW - rectW) / 2
+            val top = (screenH - rectH) / 2
+            sourceRectHint.set(left, top, left + rectW, top + rectH)
+        } else {
+            // Fallback to the renderer's visible rect on the off chance display
+            // metrics aren't available yet. Worse animation but still functional.
+            remoteVideoView.getGlobalVisibleRect(sourceRectHint)
+        }
         builder.setSourceRectHint(sourceRectHint)
 
         return builder.build()
     }
-    private fun updateScreenShareUiState() {
-        if (!::btnScreenShare.isInitialized || !::screenShareIndicator.isInitialized) return
-        
-        val isLocalActive = NativeWebRTCPlugin.instance?.isScreenShareActiveNative() == true
-        Log.d("CallActivity", "updateScreenShareUiState: localActive=$isLocalActive, remoteActive=$isRemoteScreenSharing")
-        
-        // Force swap back to normal (local small, remote large) when starting any screen share.
-        if ((isLocalActive || isRemoteScreenSharing) && isLocalLarge) {
-            swapVideoTracks()
-        }
-        
-        btnScreenShare.setImageResource(R.drawable.ic_screen_share)
-        btnScreenShare.alpha = if (isLocalActive) 1.0f else 0.85f
-        
-        // Disable camera flip and video toggle during local screen share to prevent state conflicts
-        btnFlipPip.isEnabled = !isLocalActive
-        btnFlipPip.alpha = if (isLocalActive) 0.5f else 1.0f
-        btnVideo.isEnabled = !isLocalActive
-        btnVideo.alpha = if (isLocalActive) 0.5f else 1.0f
-
-        // Show indicator if LOCAL sharing is active.
-        screenShareIndicator.visibility = if (isLocalActive) View.VISIBLE else View.GONE
-        
-        // Update Video Sink Targets to ensure scaling is correct
-        updateVideoSinkTargets()
-    }
-
     fun syncRemoteMediaUiState() {
         runOnUiThread { updateLocalCameraOffState() }
     }
@@ -1662,7 +1904,7 @@ class CallActivity : AppCompatActivity() {
         runOnUiThread {
             isVideoOff = NativeWebRTCPlugin.instance?.isVideoOffState() == true
             updateLocalCameraOffState()
-            updateScreenShareUiState()
+            updateScreenShareUiState(animated = true)
         }
     }
 

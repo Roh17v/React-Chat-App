@@ -8,7 +8,10 @@
     android:background="#0F0F14">
 
     <!-- Remote Video (fullscreen background) -->
-    <!-- Remote Video Container (to support zoom/pan transformations) -->
+    <!-- Remote Video Container is always fullscreen. The renderer inside is normally
+         match_parent and switches to a sized layout (computed in code) only when the
+         feed is genuinely landscape, producing WhatsApp-style letterboxing via the
+         container background showing through above and below the renderer. -->
     <FrameLayout
         android:id="@+id/remote_video_container"
         android:layout_width="0dp"
@@ -18,10 +21,11 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <org.webrtc.SurfaceViewRenderer
+        <io.getstream.webrtc.android.ui.VideoTextureViewRenderer
             android:id="@+id/remote_video"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_height="match_parent"
+            android:layout_gravity="center" />
             
     </FrameLayout>
 
@@ -302,7 +306,7 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
         
-        <org.webrtc.SurfaceViewRenderer
+        <io.getstream.webrtc.android.ui.VideoTextureViewRenderer
             android:id="@+id/local_video"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
