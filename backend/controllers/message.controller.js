@@ -4,47 +4,81 @@ import { Channel } from "../models/channel.model.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
 import { io, userSocketMap } from "../socket.js";
 
+// Limits for paginated message reads (Req 13.4). When `since` is supplied the
+// client paginates by advancing the cursor and we cap the page size at 200; when
+// `since` is omitted we preserve the legacy page+limit behavior.
+const DEFAULT_MESSAGES_LIMIT = 50;
+const MAX_MESSAGES_LIMIT = 200;
+
+const sanitizeDeleted = (msg) => {
+  if (msg.deletedForEveryone) {
+    return {
+      ...msg,
+      content: null,
+      fileUrl: null,
+      fileName: null,
+      messageType: msg.messageType,
+    };
+  }
+  return msg;
+};
+
+const parseLimit = (raw) => {
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MESSAGES_LIMIT;
+  return Math.min(parsed, MAX_MESSAGES_LIMIT);
+};
+
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
   const userId = req.user._id;
-  let { page = 1, limit = 20 } = req.query;
+  let { page = 1, limit, since } = req.query;
 
   if (!contactId || !userId)
     return next(createError(400, "ContactId and userId is required."));
 
   try {
-    page = parseInt(page);
-    limit = parseInt(limit);
+    page = parseInt(page, 10);
+    if (!Number.isFinite(page) || page <= 0) page = 1;
+    limit = parseLimit(limit);
 
-    const messages = await Message.find({
+    const baseQuery = {
       $or: [
         { sender: userId, receiver: contactId },
         { sender: contactId, receiver: userId },
       ],
       deletedFor: { $ne: userId },
-    })
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+    };
 
-    // Sanitize deleted-for-everyone messages
-    const sanitized = messages.map((msg) => {
-      if (msg.deletedForEveryone) {
-        return {
-          ...msg,
-          content: null,
-          fileUrl: null,
-          fileName: null,
-          messageType: msg.messageType,
-        };
+    let messages;
+    if (since !== undefined && since !== "") {
+      const sinceDate = new Date(since);
+      if (Number.isNaN(sinceDate.getTime())) {
+        return next(createError(400, "Invalid `since` timestamp."));
       }
-      return msg;
-    });
+      // Incremental-sync path: ascending by createdAt, no skip/page semantics
+      // (the client paginates by advancing `since`). Req 13.1, 13.3, 13.4.
+      messages = await Message.find({
+        ...baseQuery,
+        createdAt: { $gt: sinceDate },
+      })
+        .sort({ createdAt: 1 })
+        .limit(limit)
+        .lean();
+    } else {
+      // Legacy path preserved for existing clients (Req 13.4).
+      messages = await Message.find(baseQuery)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean();
+    }
 
-    const responseData = sanitized.reverse();
+    // Sanitize deleted-for-everyone messages. `updatedAt` is included via
+    // `{ timestamps: true }` on the schema and survives `.lean()` (Req 13.5).
+    const sanitized = messages.map(sanitizeDeleted);
 
-
+    const responseData = since ? sanitized : sanitized.reverse();
 
     res.status(200).json(responseData);
   } catch (error) {
@@ -76,34 +110,50 @@ export const getChannelMessages = async (req, res, next) => {
   try {
     const { channelId } = req.params;
     const userId = req.user._id;
-    const { page = 1, limit = 20 } = req.query;
+    let { page = 1, limit, since } = req.query;
 
     if (!channelId) return next(createError(400, "Channel ID is required"));
 
-    const messages = await Message.find({
+    page = parseInt(page, 10);
+    if (!Number.isFinite(page) || page <= 0) page = 1;
+    limit = parseLimit(limit);
+
+    const baseQuery = {
       channelId,
       deletedFor: { $ne: userId },
-    })
-      .sort({ createdAt: -1 })
-      .populate("sender", "_id email color firstName lastName")
-      .skip((page - 1) * limit)
-      .limit(parseInt(limit))
-      .lean();
+    };
 
-    const sanitized = messages.map((msg) => {
-      if (msg.deletedForEveryone) {
-        return {
-          ...msg,
-          content: null,
-          fileUrl: null,
-          fileName: null,
-          messageType: msg.messageType,
-        };
+    let messages;
+    if (since !== undefined && since !== "") {
+      const sinceDate = new Date(since);
+      if (Number.isNaN(sinceDate.getTime())) {
+        return next(createError(400, "Invalid `since` timestamp."));
       }
-      return msg;
-    });
+      // Incremental-sync path: ascending by createdAt (Req 13.2, 13.3, 13.4).
+      messages = await Message.find({
+        ...baseQuery,
+        createdAt: { $gt: sinceDate },
+      })
+        .sort({ createdAt: 1 })
+        .populate("sender", "_id email color firstName lastName")
+        .limit(limit)
+        .lean();
+    } else {
+      // Legacy path preserved for existing clients (Req 13.4).
+      messages = await Message.find(baseQuery)
+        .sort({ createdAt: -1 })
+        .populate("sender", "_id email color firstName lastName")
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean();
+    }
 
-    res.status(200).json(sanitized.reverse());
+    // `updatedAt` is included via `{ timestamps: true }` on the schema (Req 13.5).
+    const sanitized = messages.map(sanitizeDeleted);
+
+    const responseData = since ? sanitized : sanitized.reverse();
+
+    res.status(200).json(responseData);
   } catch (error) {
     next(error);
   }

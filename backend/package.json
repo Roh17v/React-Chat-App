@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest --run",
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
@@ -30,6 +30,9 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "fast-check": "^3.23.2",
+    "mongodb-memory-server": "^10.1.4",
+    "nodemon": "^3.1.9",
+    "vitest": "^3.0.5"
   }
 }
