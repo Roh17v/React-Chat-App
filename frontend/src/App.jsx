@@ -19,6 +19,7 @@ import { useSocket } from "./context/SocketContext";
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { Preferences } from "@capacitor/preferences";
+import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 
 const Auth = lazy(() => import("./pages/auth/Auth"));
 const Chats = lazy(() => import("./pages/chats"));
@@ -247,6 +248,40 @@ function App() {
     }
 
     return () => cleanup();
+  }, [user]);
+
+  // Pre-warm the native WebRTC engine so the FIRST call doesn't pay the full
+  // factory + EGL + encoder/decoder allocation cost at the same instant the
+  // user taps "Answer". On mid-range Android devices, doing all of that during
+  // an FCM-delivered ringtone + screen wake + activity start is the most
+  // reliable way to push the process over the OOM ceiling, which is what the
+  // "AuthSplash → home → contacts" cold-boot symptom indicates.
+  //
+  // The native plugin's initialize() is idempotent (guarded by
+  // `if (peerConnectionFactory != null && eglBase != null) return`), so a
+  // later call from NativeCallHandler is a no-op and never re-runs the heavy
+  // path. We delay 4 seconds to avoid contending with cold-start work, and
+  // only run on Android where the native plugin exists.
+  useEffect(() => {
+    if (!user) return;
+    if (!Capacitor.isNativePlatform()) return;
+    if (Capacitor.getPlatform() !== "android") return;
+
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      if (cancelled) return;
+      NativeCallPlugin.initialize().catch((error) => {
+        // Pre-warm is best-effort. A failure here only reverts behavior to the
+        // current state (initialize on first call). Surfacing the error helps
+        // distinguish device-specific WebRTC init failures from runtime ones.
+        console.warn("[NativeWebRTC prewarm] initialize failed:", error);
+      });
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
   }, [user]);
 
   useEffect(() => {

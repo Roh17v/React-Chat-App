@@ -2955,6 +2955,24 @@ class NativeWebRTCPlugin : Plugin() {
     fun getLocalCameraTrack(): VideoTrack? = localVideoTrack
 
     fun getLocalScreenTrack(): VideoTrack? = screenVideoTrack
+
+    /**
+     * Track to bind to the local preview tile (the small "you" card on screen).
+     *
+     * Always prefers the camera track, even while a screen share is active. Otherwise the
+     * screen capturer ends up rendering itself in the preview, producing an infinity-mirror
+     * recursion (the preview shows the screen, which contains the preview, ...).
+     *
+     * Falls back to the screen track only if the camera track is unavailable (e.g. permission
+     * denied, hardware failure, or audio-only call promoted to video). Callers in [CallActivity]
+     * MUST use this instead of [getLocalVideoTrack] when wiring the preview renderer.
+     */
+    fun getLocalPreviewTrack(): VideoTrack? {
+        val camera = localVideoTrack
+        val screen = screenVideoTrack
+        val chosen = camera ?: screen
+        return chosen
+    }
     fun getRemoteVideoTrack(): VideoTrack? = remoteVideoTrack
     fun isPeerConnected(): Boolean = peerConnection?.iceConnectionState() == PeerConnection.IceConnectionState.CONNECTED || peerConnection?.iceConnectionState() == PeerConnection.IceConnectionState.COMPLETED
     fun getCallStartTime(): Long = callStartTime
