@@ -762,8 +762,18 @@ const setupSocket = (server) => {
 
   const updateMessageStatusToRead = async ({ userId, senderId }) => {
     try {
+      // Flip every unread message from `sender` to `receiver` to `read`.
+      // Previously we only matched `status: 'delivered'`, which left
+      // messages stuck at `sent` forever when the recipient was offline
+      // at the time of original delivery (the `delivered` bump never
+      // happened). The result on the sender's UI was a partial flip:
+      // only the messages that briefly hit `delivered` ever turned blue.
       const updatedMessages = await Message.updateMany(
-        { receiver: userId, sender: senderId, status: "delivered" },
+        {
+          receiver: userId,
+          sender: senderId,
+          status: { $in: ["sent", "delivered"] },
+        },
         { $set: { status: "read" } },
       );
       if (updatedMessages.modifiedCount > 0) {
