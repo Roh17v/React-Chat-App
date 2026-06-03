@@ -3,6 +3,8 @@ import { Preferences } from "@capacitor/preferences";
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
 import useAppStore from "@/store";
 import { HOST, LOGOUT_ROUTE } from "@/utils/constants";
+import { getRepository } from "@/offline";
+import { getEncryptionLayer } from "@/offline";
 import {
   Tooltip,
   TooltipContent,
@@ -31,6 +33,23 @@ const ProfileInfo = () => {
 
       if (response.status === 200) {
         await Preferences.remove({ key: "auth_token" });
+        // Req 1.6 / 10.6 — wipe offline store, then destroy encryption key,
+        // before clearing the React user state. Errors are swallowed so a
+        // failing offline layer never blocks the user from logging out.
+        try {
+          const repo = getRepository();
+          if (repo.isReady()) {
+            await repo.wipe();
+          }
+        } catch (e) {
+          console.warn("[logout] offlineStore.wipe() failed:", e);
+        }
+        try {
+          const enc = getEncryptionLayer();
+          await enc.destroy();
+        } catch (e) {
+          console.warn("[logout] Encryption.destroy() failed:", e);
+        }
         toast.success("Logged out successfully");
         setUser(null);
         navigate("/auth");

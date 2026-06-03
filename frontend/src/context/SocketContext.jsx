@@ -7,6 +7,21 @@ import useMediaStream from "@/hooks/useMediaStream";
 import { Capacitor } from "@capacitor/core";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import { toast } from "sonner";
+import { getSyncEngine } from "@/offline/sync/SyncEngine";
+
+/**
+ * Returns true when the SyncEngine singleton exists and has been started
+ * (phase !== "idle"). Safe to call even before OfflineProvider wires the
+ * singleton — the thrown error is caught and treated as "not ready".
+ */
+function isSyncEngineReady() {
+  try {
+    const engine = getSyncEngine();
+    return engine.getStatus().phase !== "idle";
+  } catch {
+    return false;
+  }
+}
 
 const SocketContext = createContext(null);
 
@@ -269,7 +284,14 @@ export const SocketProvider = ({ children }) => {
 
       socket.current.on("message-status-update", ({ receiverId, status }) => {
         console.log("Message Status Update!", ` status: ${status}`);
-        updatedMessageStatus(receiverId, status);
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "message-status-update",
+            payload: { receiverId, status },
+          });
+        } else {
+          updatedMessageStatus(receiverId, status);
+        }
       });
 
       socket.current.on("new-channel-contact", (channel) => {
@@ -540,8 +562,15 @@ export const SocketProvider = ({ children }) => {
       });
 
       socket.current.on("message-deleted", ({ messageId }) => {
-        if (messageId) {
-          replaceWithDeletedPlaceholder(messageId);
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "message-deleted",
+            payload: { messageId },
+          });
+        } else {
+          if (messageId) {
+            replaceWithDeletedPlaceholder(messageId);
+          }
         }
       });
 
@@ -601,6 +630,7 @@ export const SocketProvider = ({ children }) => {
       const isChatOpen =
         selectedChatType === "contact" && selectedChatId === senderId;
 
+      // --- UI concern: emit confirm-read regardless of platform ---
       if (
         selectedChatData &&
         selectedChatType !== undefined &&
@@ -613,13 +643,28 @@ export const SocketProvider = ({ children }) => {
           });
         }
 
-        if (message.clientTempId) {
-          confirmMessage(message.clientTempId, message);
+        // --- Message-store mutation: native uses SyncEngine, web uses store directly ---
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "receiveMessage",
+            payload: message,
+          });
         } else {
-          addMessage(message);
+          if (message.clientTempId) {
+            confirmMessage(message.clientTempId, message);
+          } else {
+            addMessage(message);
+          }
         }
+      } else if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+        // Still persist background messages on native even when the chat isn't open
+        getSyncEngine().applyLiveEvent({
+          kind: "receiveMessage",
+          payload: message,
+        });
       }
 
+      // --- UI concern: contact-list update regardless of platform ---
       if (Array.isArray(directMessagesContacts) && contactId) {
         const updatedContacts = [...directMessagesContacts];
         const contactIndex = updatedContacts.findIndex(
@@ -660,14 +705,28 @@ export const SocketProvider = ({ children }) => {
     };
 
     const handleMessageSendFailed = ({ clientTempId }) => {
-      if (clientTempId) {
-        failMessage(clientTempId);
+      if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+        getSyncEngine().applyLiveEvent({
+          kind: "messageSendFailed",
+          payload: { clientTempId },
+        });
+      } else {
+        if (clientTempId) {
+          failMessage(clientTempId);
+        }
       }
     };
 
     const handleChannelReceiveMessage = (message) => {
-      if (selectedChatData && selectedChatType !== undefined) {
-        addMessage(message);
+      if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+        getSyncEngine().applyLiveEvent({
+          kind: "receive-channel-message",
+          payload: message,
+        });
+      } else {
+        if (selectedChatData && selectedChatType !== undefined) {
+          addMessage(message);
+        }
       }
       console.log("Channel Message Recieved: ", message);
     };

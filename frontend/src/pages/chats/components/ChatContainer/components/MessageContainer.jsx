@@ -21,6 +21,7 @@ import { useSocket } from "@/context/SocketContext";
 import { analyzeEmoji } from "@/utils/emojiUtils";
 import { Capacitor } from "@capacitor/core";
 import { toast } from "sonner";
+import { getRepository } from "@/offline";
 
 const URL_REGEX = /\b((?:https?:\/\/|www\.)[^\s<]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<]*)?)/gi;
 
@@ -73,6 +74,7 @@ const MessageContainer = () => {
     setShowImage,
     imageURL,
     setImageURL,
+    connectivity,
   } = useAppStore();
   const { socket } = useSocket();
 
@@ -130,6 +132,35 @@ const MessageContainer = () => {
 
     setLoading(true);
     try {
+      // Native path: try the local repository first (Req 1.2, 5.5).
+      // Only attempt the repo on page 1; subsequent pages fall through to
+      // axios so scroll-to-load-more keeps working via the existing API.
+      if (pageNumber === 1 && Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          const localMessages = await repo.getMessages({
+            conversationId: selectedChatId,
+            conversationType: "dm",
+            limit: 20,
+          });
+          if (localMessages.length > 0) {
+            setSelectedChatMessages(localMessages, false);
+            isInitialLoad.current = true;
+            setPage(1);
+            // Fewer than requested means we may be at the start; still allow
+            // network to top-up if the local store is sparse.
+            if (localMessages.length < 20) {
+              setHasMore(false);
+            }
+            setLoading(false);
+            return;
+          }
+          // Local store has no rows for this conversation — fall through to
+          // the network fetch (repo fallback when local rows are missing, Req 1.2).
+        }
+      }
+
+      // Web path or repo not ready or local store empty: fetch from network.
       const response = await axios.get(
         `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${pageNumber}&limit=20`,
         {
@@ -158,6 +189,31 @@ const MessageContainer = () => {
     setLoading(true);
 
     try {
+      // Native path: try the local repository first (Req 1.2, 5.5).
+      // Only attempt the repo on page 1; subsequent pages fall through to
+      // axios so scroll-to-load-more keeps working via the existing API.
+      if (pageNumber === 1 && Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          const localMessages = await repo.getMessages({
+            conversationId: selectedChatId,
+            conversationType: "channel",
+            limit: 20,
+          });
+          if (localMessages.length > 0) {
+            setSelectedChatMessages(localMessages, false);
+            isInitialLoad.current = true;
+            setPage(1);
+            if (localMessages.length < 20) {
+              setHasMore(false);
+            }
+            setLoading(false);
+            return;
+          }
+          // Local store empty — fall through to network.
+        }
+      }
+
       const response = await axios.get(
         `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${pageNumber}&limit=20`,
         {
@@ -210,6 +266,23 @@ const MessageContainer = () => {
     user?.id,
     resetUnreadCount,
   ]);
+
+  // Subscribe to live repository updates for the current conversation (Req 1.2, 5.5).
+  // Fires whenever the SyncEngine or OutboundQueue commits a write to the
+  // messages table, keeping the UI in sync without a separate poll.
+  useEffect(() => {
+    if (!selectedChatId || !Capacitor.isNativePlatform()) return;
+    const repo = getRepository();
+    if (!repo.isReady()) return;
+
+    const unsubscribe = repo.subscribeMessages(selectedChatId, (messages) => {
+      setSelectedChatMessages(messages, true);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [selectedChatId, setSelectedChatMessages]);
 
   // Clear typing indicators when leaving chat
   useEffect(() => {
@@ -823,6 +896,15 @@ const MessageContainer = () => {
                 </span>
                 {isSent && <MessageStatus status={message.status} isSent={isSent} />}
               </div>
+              {/* Still sending indicator — Req 11.4 */}
+              {isSent &&
+                connectivity === "online" &&
+                (message.status === "pending" || message.status === "sending") &&
+                Date.now() - new Date(message.createdAt).getTime() > 10_000 && (
+                  <span className="mt-0.5 self-end text-[10px] font-medium text-amber-500">
+                    Still sending…
+                  </span>
+              )}
             </div>
           )}
 
@@ -895,6 +977,15 @@ const MessageContainer = () => {
                 </span>
                 {isSent && <MessageStatus status={message.status} isSent={isSent} />}
               </div>
+              {/* Still sending indicator — Req 11.4 */}
+              {isSent &&
+                connectivity === "online" &&
+                (message.status === "pending" || message.status === "sending") &&
+                Date.now() - new Date(message.createdAt).getTime() > 10_000 && (
+                  <span className="mt-0.5 self-end text-[10px] font-medium text-amber-500">
+                    Still sending…
+                  </span>
+              )}
             </div>
           )}
         </div>

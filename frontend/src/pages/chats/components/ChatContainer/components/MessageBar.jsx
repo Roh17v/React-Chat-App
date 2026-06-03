@@ -9,6 +9,7 @@ import axios from "axios";
 import { UPLOAD_FILE_ROUTE } from "@/utils/constants";
 import { cn } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
+import { getRepository } from "@/offline";
 
 const MessageBar = () => {
   const [message, setMessage] = useState("");
@@ -43,55 +44,124 @@ const MessageBar = () => {
     const sanitizedMessage = message.trim();
     if (sanitizedMessage === "") return;
 
-    // Generate a unique temp ID for this optimistic message.
-    const tempId = `temp_${crypto.randomUUID()}`;
-    const now = new Date().toISOString();
-
     if (selectedChatType === "contact") {
       const replyTo = buildReplyPayload(replyToMessage);
 
-      // Instantly add placeholder to the UI with status 'sending'.
-      addOptimisticMessage({
-        _id: tempId,
-        sender: user.id,
-        receiver: selectedChatData._id,
-        content: sanitizedMessage,
-        messageType: "text",
-        fileUrl: null,
-        replyTo: replyTo || null,
-        status: "sending",
-        createdAt: now,
-        isOptimistic: true,
-      });
-
-      // Clear the input immediately
+      // Clear the input immediately (before async work).
       setMessage("");
       if (inputRef.current) inputRef.current.style.height = "auto";
       clearReplyToMessage();
       keepInputFocused();
 
-      // Send to server in background with the temp ID attached.
-      socket.emit("sendMessage", {
-        sender: user.id,
-        content: sanitizedMessage,
-        receiver: selectedChatData._id,
-        messageType: "text",
-        fileUrl: undefined,
-        replyTo: replyTo || undefined,
-        clientTempId: tempId,
-      });
+      if (Capacitor.isNativePlatform()) {
+        // --- Native path: enqueue through the offline repository -----------
+        const repo = getRepository();
+        if (repo.isReady()) {
+          await repo.enqueueOutbound({
+            kind: "send_text",
+            conversationId: selectedChatData._id,
+            conversationType: "dm",
+            payload: {
+              sender: user.id,
+              content: sanitizedMessage,
+              receiver: selectedChatData._id,
+              messageType: "text",
+              replyTo: replyTo || undefined,
+            },
+          });
+          // No addOptimisticMessage: enqueueOutbound inserts the pending row
+          // and the repository subscription fires, updating the UI.
+        } else {
+          // Repository not ready — fall through to socket path.
+          const tempId = `temp_${crypto.randomUUID()}`;
+          const now = new Date().toISOString();
+          addOptimisticMessage({
+            _id: tempId,
+            sender: user.id,
+            receiver: selectedChatData._id,
+            content: sanitizedMessage,
+            messageType: "text",
+            fileUrl: null,
+            replyTo: replyTo || null,
+            status: "sending",
+            createdAt: now,
+            isOptimistic: true,
+          });
+          socket.emit("sendMessage", {
+            sender: user.id,
+            content: sanitizedMessage,
+            receiver: selectedChatData._id,
+            messageType: "text",
+            fileUrl: undefined,
+            replyTo: replyTo || undefined,
+            clientTempId: tempId,
+          });
+        }
+      } else {
+        // --- Web path: existing socket emit --------------------------------
+        const tempId = `temp_${crypto.randomUUID()}`;
+        const now = new Date().toISOString();
+        addOptimisticMessage({
+          _id: tempId,
+          sender: user.id,
+          receiver: selectedChatData._id,
+          content: sanitizedMessage,
+          messageType: "text",
+          fileUrl: null,
+          replyTo: replyTo || null,
+          status: "sending",
+          createdAt: now,
+          isOptimistic: true,
+        });
+        socket.emit("sendMessage", {
+          sender: user.id,
+          content: sanitizedMessage,
+          receiver: selectedChatData._id,
+          messageType: "text",
+          fileUrl: undefined,
+          replyTo: replyTo || undefined,
+          clientTempId: tempId,
+        });
+      }
     } else if (selectedChatType === "channel") {
-      socket.emit("send-channel-message", {
-        sender: user.id,
-        content: sanitizedMessage,
-        messageType: "text",
-        fileUrl: undefined,
-        channelId: selectedChatData._id,
-      });
+      // Clear the input immediately.
       setMessage("");
       if (inputRef.current) inputRef.current.style.height = "auto";
       clearReplyToMessage();
       keepInputFocused();
+
+      if (Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          await repo.enqueueOutbound({
+            kind: "send_text",
+            conversationId: selectedChatData._id,
+            conversationType: "channel",
+            payload: {
+              sender: user.id,
+              content: sanitizedMessage,
+              channelId: selectedChatData._id,
+              messageType: "text",
+            },
+          });
+        } else {
+          socket.emit("send-channel-message", {
+            sender: user.id,
+            content: sanitizedMessage,
+            messageType: "text",
+            fileUrl: undefined,
+            channelId: selectedChatData._id,
+          });
+        }
+      } else {
+        socket.emit("send-channel-message", {
+          sender: user.id,
+          content: sanitizedMessage,
+          messageType: "text",
+          fileUrl: undefined,
+          channelId: selectedChatData._id,
+        });
+      }
     }
 
     if (isTypingRef.current) {
@@ -151,26 +221,87 @@ const MessageBar = () => {
           setIsUploading(false);
           if (selectedChatType === "contact") {
             const replyTo = buildReplyPayload(replyToMessage);
-            socket.emit("sendMessage", {
-              sender: user.id,
-              content: undefined,
-              receiver: selectedChatData._id,
-              messageType: "file",
-              fileUrl: response.data.fileUrl,
-              fileName: file.name,
-              fileMetadata,
-              replyTo: replyTo || undefined,
-            });
+
+            if (Capacitor.isNativePlatform()) {
+              const repo = getRepository();
+              if (repo.isReady()) {
+                await repo.enqueueOutbound({
+                  kind: "send_file",
+                  conversationId: selectedChatData._id,
+                  conversationType: "dm",
+                  payload: {
+                    sender: user.id,
+                    receiver: selectedChatData._id,
+                    messageType: "file",
+                    fileUrl: response.data.fileUrl,
+                    fileName: file.name,
+                    fileMetadata,
+                    replyTo: replyTo || undefined,
+                  },
+                });
+              } else {
+                socket.emit("sendMessage", {
+                  sender: user.id,
+                  content: undefined,
+                  receiver: selectedChatData._id,
+                  messageType: "file",
+                  fileUrl: response.data.fileUrl,
+                  fileName: file.name,
+                  fileMetadata,
+                  replyTo: replyTo || undefined,
+                });
+              }
+            } else {
+              socket.emit("sendMessage", {
+                sender: user.id,
+                content: undefined,
+                receiver: selectedChatData._id,
+                messageType: "file",
+                fileUrl: response.data.fileUrl,
+                fileName: file.name,
+                fileMetadata,
+                replyTo: replyTo || undefined,
+              });
+            }
           } else if (selectedChatType === "channel") {
-            socket.emit("send-channel-message", {
-              sender: user.id,
-              content: message,
-              messageType: "file",
-              fileUrl: response.data.fileUrl,
-              fileName: file.name,
-              fileMetadata,
-              channelId: selectedChatData._id,
-            });
+            if (Capacitor.isNativePlatform()) {
+              const repo = getRepository();
+              if (repo.isReady()) {
+                await repo.enqueueOutbound({
+                  kind: "send_file",
+                  conversationId: selectedChatData._id,
+                  conversationType: "channel",
+                  payload: {
+                    sender: user.id,
+                    channelId: selectedChatData._id,
+                    messageType: "file",
+                    fileUrl: response.data.fileUrl,
+                    fileName: file.name,
+                    fileMetadata,
+                  },
+                });
+              } else {
+                socket.emit("send-channel-message", {
+                  sender: user.id,
+                  content: message,
+                  messageType: "file",
+                  fileUrl: response.data.fileUrl,
+                  fileName: file.name,
+                  fileMetadata,
+                  channelId: selectedChatData._id,
+                });
+              }
+            } else {
+              socket.emit("send-channel-message", {
+                sender: user.id,
+                content: message,
+                messageType: "file",
+                fileUrl: response.data.fileUrl,
+                fileName: file.name,
+                fileMetadata,
+                channelId: selectedChatData._id,
+              });
+            }
           }
           clearReplyToMessage();
         }

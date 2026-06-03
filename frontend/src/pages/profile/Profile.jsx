@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import useAppStore from "@/store";
 import { useState } from "react";
-import { FiArrowLeft, FiCamera, FiTrash2, FiCheck } from "react-icons/fi";
+import { FiArrowLeft, FiCamera, FiTrash2, FiCheck, FiActivity } from "react-icons/fi";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -9,8 +9,10 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import axios from "axios";
 import { USER_ROUTES, HOST } from "@/utils/constants";
+import DiagnosticsPanel from "./components/DiagnosticsPanel";
 const Profile = () => {
   const navigate = useNavigate();
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [image, setImage] = useState(null);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -112,6 +114,12 @@ const Profile = () => {
   };
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-background p-4">
+      {/* Show Diagnostics panel if toggled */}
+      {showDiagnostics && (
+        <DiagnosticsPanel onBack={() => setShowDiagnostics(false)} />
+      )}
+      {!showDiagnostics && (
+        <>
       {/* Ambient background effects */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/4 -left-32 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
@@ -289,6 +297,20 @@ const Profile = () => {
                 "Save Changes"
               )}
             </Button>
+
+            {/* Diagnostics entry row */}
+            <button
+              onClick={() => setShowDiagnostics(true)}
+              className="mt-4 w-full flex items-center justify-between px-4 py-3 rounded-xl bg-background-tertiary/50 border border-border-subtle hover:bg-background-tertiary transition-colors group"
+            >
+              <div className="flex items-center gap-3">
+                <FiActivity className="w-5 h-5 text-foreground-muted group-hover:text-primary transition-colors" />
+                <span className="text-sm font-medium text-foreground-secondary group-hover:text-foreground transition-colors">
+                  Diagnostics
+                </span>
+              </div>
+              <FiArrowLeft className="w-4 h-4 text-foreground-muted rotate-180 group-hover:translate-x-0.5 transition-transform" />
+            </button>
           </div>
         </div>
         {/* Setup Notice */}
@@ -300,6 +322,8 @@ const Profile = () => {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 };
