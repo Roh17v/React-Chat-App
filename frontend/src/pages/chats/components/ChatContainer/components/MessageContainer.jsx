@@ -169,6 +169,7 @@ const MessageContainer = () => {
     imageURL,
     setImageURL,
     connectivity,
+    isInitialized,
   } = useAppStore();
   const { socket } = useSocket();
 
@@ -603,6 +604,21 @@ const MessageContainer = () => {
             senderId: selectedChatId,
           });
         }
+        if (Capacitor.isNativePlatform()) {
+          const repo = getRepository();
+          if (repo.isReady()) {
+            if (typeof repo.resetUnreadCount === "function") {
+              repo.resetUnreadCount(selectedChatId).catch(() => {});
+            }
+            if (typeof repo.applyStatusUpdate === "function") {
+              repo.applyStatusUpdate({
+                conversationId: selectedChatId,
+                fromUserId: selectedChatId,
+                status: "read",
+              }).catch(() => {});
+            }
+          }
+        }
         resetUnreadCount(selectedChatId);
       }
       if (selectedChatType === "channel") {
@@ -632,6 +648,7 @@ const MessageContainer = () => {
     socket,
     user?.id,
     resetUnreadCount,
+    isInitialized,
   ]);
 
   // Subscribe to live repository updates for the current conversation (Req 1.2, 5.5).
@@ -652,7 +669,7 @@ const MessageContainer = () => {
     return () => {
       unsubscribe();
     };
-  }, [selectedChatId, setSelectedChatMessages]);
+  }, [selectedChatId, setSelectedChatMessages, isInitialized]);
 
   // Clear typing indicators when leaving chat
   useEffect(() => {

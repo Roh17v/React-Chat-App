@@ -877,10 +877,24 @@ export function createSyncEngine(options) {
     //     time the sidebar shows unread badges (driven by subscribeContacts
     //     firing after the SQLite write), the messages are already there.
     if (lastIncrementalSyncAt != null) {
-      // Step 1: refresh contacts + channels so the sidebar stays in sync.
-      // We do this BEFORE the message fetch so that new conversations
-      // (a brand-new DM partner) are already known when we apply their
-      // messages below.
+      // Step 1: unified message fetch — one call for everything.
+      // We do this BEFORE the contacts/channels fetch so that all new messages
+      // are written to SQLite before the sidebar updates its unread counts.
+      // That way, if the user immediately opens a chat, the messages are already there.
+      const result = await runUnifiedIncremental({
+        repository,
+        apiClient,
+        diagnostics,
+        buildUrl,
+        lastSyncAt: lastIncrementalSyncAt,
+        userId,
+        setLastIncrementalSyncAt,
+        pageLimit,
+        incrementalPageCap,
+        now,
+      });
+
+      // Step 2: refresh contacts + channels so the sidebar stays in sync.
       try {
         const lists = await fetchConversationList();
         if (typeof repository.applyContacts === "function") {
@@ -935,20 +949,6 @@ export function createSyncEngine(options) {
           meta: { reason: describeError(err) },
         });
       }
-
-      // Step 2: unified message fetch — one call for everything.
-      const result = await runUnifiedIncremental({
-        repository,
-        apiClient,
-        diagnostics,
-        buildUrl,
-        lastSyncAt: lastIncrementalSyncAt,
-        userId,
-        setLastIncrementalSyncAt,
-        pageLimit,
-        incrementalPageCap,
-        now,
-      });
 
       phase = "ready";
       return {

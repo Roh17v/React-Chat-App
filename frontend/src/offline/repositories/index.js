@@ -1482,6 +1482,27 @@ export function createRepository(options = {}) {
   }
 
   /**
+   * Reset the unread count of a contact to 0 in the local database.
+   * Emits the updated contact list to subscribers.
+   *
+   * @param {string} contactId
+   * @returns {Promise<void>}
+   */
+  async function resetUnreadCountLocked(contactId) {
+    requireReady("resetUnreadCount");
+    if (typeof contactId !== "string" || contactId.length === 0) return;
+    await driver.run(
+      "UPDATE contacts SET unread_count = 0 WHERE user_id = ?",
+      [contactId]
+    );
+    await emitContacts();
+  }
+
+  async function resetUnreadCount(contactId) {
+    return mutex.withLock(GLOBAL_MUTEX_KEY, () => resetUnreadCountLocked(contactId));
+  }
+
+  /**
    * Upsert the channel list returned by `GET /api/channels`. Members are
    * stored both as a JSON blob on the channel row (for fast read) and as
    * individual rows in `channel_members` (for member lookups). Members
@@ -2951,6 +2972,7 @@ export function createRepository(options = {}) {
     applyStatusUpdate,
     applyContacts,
     applyChannels,
+    resetUnreadCount,
 
     // outbound queue (task 10.1)
     enqueueOutbound,

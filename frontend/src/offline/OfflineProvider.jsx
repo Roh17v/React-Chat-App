@@ -142,6 +142,7 @@ export function OfflineProvider({ children }) {
     (s) => s.setDirectMessagesContacts,
   );
   const setChannels = useAppStore((s) => s.setChannels);
+  const setIsInitialized = useAppStore((s) => s.setIsInitialized);
   const resetOfflineSlice = useAppStore((s) => s.resetOfflineSlice);
 
   // SocketContext.Provider value: `{ socket, onlineUsers }`. `socket` is
@@ -371,6 +372,12 @@ export function OfflineProvider({ children }) {
         outcome: "warn",
         meta: { reason: describeError(err) },
       });
+    }
+
+    try {
+      setIsInitialized(true);
+    } catch {
+      // Swallow.
     }
 
     // 4. MediaCache singleton. Construction needs the repo on the very

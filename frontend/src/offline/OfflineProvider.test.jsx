@@ -155,6 +155,7 @@ function buildRepoStub({ initResult = { ok: true }, contacts = [], channels = []
     getMessageById: vi.fn(async () => null),
     getOutboundQueue: vi.fn(async () => queue),
     getCachedMediaPath: vi.fn(async () => null),
+    resetUnreadCount: vi.fn(async () => undefined),
     applyServerMessages: vi.fn(async () => ({ inserted: 0, updated: 0, ignored: 0 })),
     applyLiveMessage: vi.fn(async () => undefined),
     applyDeletion: vi.fn(async () => undefined),
@@ -419,6 +420,7 @@ describe("OfflineProvider — boot success path", () => {
     expect(state.channels).toEqual(channels);
     expect(state.offlineMode).toBe("available");
     expect(state.localEncryption).toBe("secure");
+    expect(state.isInitialized).toBe(true);
 
     // SyncEngine.start called with userId.
     expect(syncEngineStub.start).toHaveBeenCalledWith({ userId: "u1" });
@@ -444,6 +446,8 @@ describe("OfflineProvider — boot success path", () => {
     expect(queueOpts.connectivity).toBe(connectivityStub);
 
     handle.unmount();
+    await flush();
+    expect(useAppStore.getState().isInitialized).toBe(false);
   });
 
   it("sets localEncryption to 'none' when the secure store is unavailable", async () => {

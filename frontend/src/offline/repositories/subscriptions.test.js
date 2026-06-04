@@ -375,6 +375,44 @@ describe("repository.subscribeContacts", () => {
   });
 });
 
+describe("repository.resetUnreadCount", () => {
+  it("resets unread_count to 0 and notifies contacts subscribers", async () => {
+    const ctx = await makeRepository();
+
+    const driver = ctx.driver;
+    await driver.run(
+      "INSERT INTO users (user_id, first_name, last_name, email, username, image, color_json, last_seen, updated_at) " +
+        "VALUES ('user-1', 'Alice', 'Smith', 'alice@test.com', 'alice', null, null, null, ?)",
+      [new Date().toISOString()]
+    );
+    await driver.run(
+      "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
+        "VALUES ('user-1', 'hey', '2024-01-01T00:00:00.000Z', 5, 'ready', ?)",
+      [new Date().toISOString()]
+    );
+
+    const contactsBefore = await ctx.repository.getContacts();
+    const contactBefore = contactsBefore.find((c) => c._id === "user-1");
+    expect(contactBefore?.unreadCount).toBe(5);
+
+    /** @type {any[][]} */
+    const calls = [];
+    ctx.repository.subscribeContacts((contacts) => {
+      calls.push(contacts);
+    });
+
+    await ctx.repository.resetUnreadCount("user-1");
+
+    const contactsAfter = await ctx.repository.getContacts();
+    const contactAfter = contactsAfter.find((c) => c._id === "user-1");
+    expect(contactAfter?.unreadCount).toBe(0);
+
+    expect(calls).toHaveLength(1);
+    const notifiedContact = calls[0].find((c) => c._id === "user-1");
+    expect(notifiedContact?.unreadCount).toBe(0);
+  });
+});
+
 describe("repository.subscribeChannels", () => {
   it("fires after applyServerMessages on a channel", async () => {
     const ctx = await makeRepository();

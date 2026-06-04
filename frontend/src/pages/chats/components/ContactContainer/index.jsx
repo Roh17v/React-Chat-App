@@ -28,6 +28,8 @@ const ContactContainer = () => {
     selectedChatType,
     connectivity,
     bootstrapStatus,
+    isInitialized,
+    offlineMode,
   } = useAppStore();
   const isNative = Capacitor.isNativePlatform();
   const showNativeCallBanner =
@@ -51,7 +53,7 @@ const ContactContainer = () => {
     const repo = getRepository();
     const isNative = Capacitor.isNativePlatform();
 
-    if (isNative && repo.isReady()) {
+    if (isNative && isInitialized && repo.isReady()) {
       // ── Native path: read from repository, then subscribe for live updates ──
       // The OfflineProvider has already bootstrapped / synced the data
       // (Requirements 1.1, 1.2, 1.4, 1.5). Axios is not needed here —
@@ -82,34 +84,41 @@ const ContactContainer = () => {
       };
     }
 
-    // ── Web path (or native when repo not yet ready): keep existing axios fetch ──
-    const fetchDMContacts = async () => {
-      try {
-        const response = await axios.get(`${HOST}${DM_CONTACTS_ROUTE}`, {
-          withCredentials: true,
-        });
-        setDirectMessagesContacts(response.data);
-      } catch (error) {
-        console.log(error);
-      }
-    };
-
-    const userChannels = async () => {
-      try {
-        const response = await axios.get(GET_USER_CHANNELS_ROUTE, {
-          withCredentials: true,
-        });
-        if (response.status === 200) {
-          setChannels(response.data);
+    if (!isNative || offlineMode === "unavailable") {
+      // ── Web path (or native when repo failed to init): keep existing axios fetch ──
+      const fetchDMContacts = async () => {
+        try {
+          const response = await axios.get(`${HOST}${DM_CONTACTS_ROUTE}`, {
+            withCredentials: true,
+          });
+          setDirectMessagesContacts(response.data);
+        } catch (error) {
+          console.log(error);
         }
-      } catch (error) {
-        console.log(error);
-      }
-    };
+      };
 
-    userChannels();
-    fetchDMContacts();
-  }, [setChannels, setDirectMessagesContacts]);
+      const userChannels = async () => {
+        try {
+          const response = await axios.get(GET_USER_CHANNELS_ROUTE, {
+            withCredentials: true,
+          });
+          if (response.status === 200) {
+            setChannels(response.data);
+          }
+        } catch (error) {
+          console.log(error);
+        }
+      };
+
+      userChannels();
+      fetchDMContacts();
+    }
+  }, [
+    setChannels,
+    setDirectMessagesContacts,
+    isInitialized,
+    offlineMode,
+  ]);
 
   return (
     <div className="relative w-full md:w-[320px] lg:w-[360px] h-full bg-sidebar border-r border-sidebar-border flex flex-col safe-area-top">

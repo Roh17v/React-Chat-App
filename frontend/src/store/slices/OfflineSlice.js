@@ -34,6 +34,7 @@ export const OFFLINE_SLICE_DEFAULTS = Object.freeze({
   offlineMode: "available",
   localEncryption: "secure",
   lastIncrementalSyncAt: null,
+  isInitialized: false,
 });
 
 /**
@@ -142,6 +143,16 @@ export const createOfflineSlice = (set) => ({
     }
     if (typeof iso !== "string" || iso.length === 0) return;
     set({ lastIncrementalSyncAt: iso });
+  },
+
+  /**
+   * Set whether the repository has finished its asynchronous initialization boot.
+   *
+   * @param {boolean} val
+   */
+  setIsInitialized: (val) => {
+    if (typeof val !== "boolean") return;
+    set({ isInitialized: val });
   },
 
   /**

@@ -36,6 +36,7 @@ describe("OfflineSlice — defaults", () => {
     expect(slice.offlineMode).toBe("available");
     expect(slice.localEncryption).toBe("secure");
     expect(slice.lastIncrementalSyncAt).toBeNull();
+    expect(slice.isInitialized).toBe(false);
   });
 
   it("OFFLINE_SLICE_DEFAULTS is frozen and exported", () => {
@@ -167,6 +168,25 @@ describe("OfflineSlice — setLastIncrementalSyncAt", () => {
   });
 });
 
+describe("OfflineSlice — setIsInitialized", () => {
+  it("accepts boolean values", () => {
+    const h = makeHarness();
+    h.slice.setIsInitialized(true);
+    expect(h.get().isInitialized).toBe(true);
+    h.slice.setIsInitialized(false);
+    expect(h.get().isInitialized).toBe(false);
+  });
+
+  it("ignores non-boolean values", () => {
+    const h = makeHarness();
+    h.slice.setIsInitialized(true);
+    h.slice.setIsInitialized("false");
+    h.slice.setIsInitialized(null);
+    h.slice.setIsInitialized(1);
+    expect(h.get().isInitialized).toBe(true);
+  });
+});
+
 describe("OfflineSlice — applyDiagnosticsSnapshot (Req 14.2)", () => {
   it("copies the overlapping fields from a Diagnostics.snapshot() payload", () => {
     const h = makeHarness();
@@ -232,6 +252,7 @@ describe("OfflineSlice — resetOfflineSlice", () => {
     expect(s.offlineMode).toBe(OFFLINE_SLICE_DEFAULTS.offlineMode);
     expect(s.localEncryption).toBe(OFFLINE_SLICE_DEFAULTS.localEncryption);
     expect(s.lastIncrementalSyncAt).toBe(OFFLINE_SLICE_DEFAULTS.lastIncrementalSyncAt);
+    expect(s.isInitialized).toBe(OFFLINE_SLICE_DEFAULTS.isInitialized);
   });
 });
 
@@ -248,7 +269,9 @@ describe("OfflineSlice — wired into useAppStore", () => {
     expect(s.offlineMode).toBe("available");
     expect(s.localEncryption).toBe("secure");
     expect(s.lastIncrementalSyncAt).toBeNull();
+    expect(s.isInitialized).toBe(false);
     expect(typeof s.setConnectivity).toBe("function");
+    expect(typeof s.setIsInitialized).toBe("function");
     expect(typeof s.applyDiagnosticsSnapshot).toBe("function");
     expect(typeof s.resetOfflineSlice).toBe("function");
   });
