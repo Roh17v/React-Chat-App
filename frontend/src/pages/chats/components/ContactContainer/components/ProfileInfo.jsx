@@ -33,6 +33,7 @@ const ProfileInfo = () => {
 
       if (response.status === 200) {
         await Preferences.remove({ key: "auth_token" });
+        await Preferences.remove({ key: "auth_user" }).catch(() => {});
         // Req 1.6 / 10.6 — wipe offline store, then destroy encryption key,
         // before clearing the React user state. Errors are swallowed so a
         // failing offline layer never blocks the user from logging out.

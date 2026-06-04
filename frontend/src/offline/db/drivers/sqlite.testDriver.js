@@ -197,6 +197,10 @@ export function createTestSqliteDriver(options = {}) {
     query,
     withTransaction,
     raw: () => db,
+    // Marker used by the Migrator to detect the synchronous better-sqlite3
+    // driver and use the transactional migration path (vs. the statement-by-
+    // statement auto-commit path needed for the Capacitor native driver).
+    _isSyncDriver: true,
   };
 
   return tx;

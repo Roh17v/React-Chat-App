@@ -78,6 +78,8 @@ export const INCREMENTAL_PAGE_CAP = 50;
 /**
  * @typedef {Object} IncrementalRepository
  * @property {(args: { conversationId: string, conversationType: "dm"|"channel", messages: unknown[], sourceCursor?: object }) => Promise<{ inserted: number, updated: number, ignored: number }>} applyServerMessages
+ * @property {(contacts: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyContacts]
+ * @property {(channels: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyChannels]
  */
 
 /**
@@ -417,6 +419,54 @@ export async function runIncremental(options) {
     const lists = await fetchConversationList({ apiClient, buildUrl, diagnostics });
     for (const conv of lists.conversations) {
       if (!conversations.has(conv.id)) conversations.set(conv.id, conv.type);
+    }
+    // Refresh contacts + channels from the same payload so the local
+    // sidebar tables stay in sync with the server (Req 1.1, Req 4.3).
+    // Failures here are warn-level: incremental scan still runs against
+    // whatever cursors / lists we already have.
+    if (typeof repository.applyContacts === "function") {
+      try {
+        const r = await repository.applyContacts(lists.contactsRaw);
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_CONTACTS_APPLIED",
+          outcome: "ok",
+          meta: {
+            received: lists.contactsRaw.length,
+            upserted: r.upserted,
+            ignored: r.ignored,
+          },
+        });
+      } catch (err) {
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_CONTACTS_APPLY_FAILED",
+          outcome: "warn",
+          meta: { reason: describeError(err) },
+        });
+      }
+    }
+    if (typeof repository.applyChannels === "function") {
+      try {
+        const r = await repository.applyChannels(lists.channelsRaw);
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_CHANNELS_APPLIED",
+          outcome: "ok",
+          meta: {
+            received: lists.channelsRaw.length,
+            upserted: r.upserted,
+            ignored: r.ignored,
+          },
+        });
+      } catch (err) {
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_CHANNELS_APPLY_FAILED",
+          outcome: "warn",
+          meta: { reason: describeError(err) },
+        });
+      }
     }
   } catch (err) {
     diagnostics.log({

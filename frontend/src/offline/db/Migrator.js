@@ -50,6 +50,8 @@ import { getDiagnostics } from "../utils/Diagnostics.js";
 // rest of this module assumes.
 // @ts-ignore -- vite ?raw import has no ambient type declaration in this project
 import init001Sql from "./migrations/001__init.sql?raw";
+// @ts-ignore
+import init002Sql from "./migrations/002__ensure_schema.sql?raw";
 
 /**
  * @typedef {Object} Migration
@@ -76,6 +78,7 @@ import init001Sql from "./migrations/001__init.sql?raw";
  */
 export const MIGRATIONS = Object.freeze([
   Object.freeze({ version: 1, name: "init", sql: init001Sql }),
+  Object.freeze({ version: 2, name: "ensure_schema", sql: init002Sql }),
 ]);
 
 /**
@@ -334,22 +337,55 @@ export function createMigrator(options = {}) {
   async function runOneMigration(driver, migration) {
     const startedAt = now();
     try {
-      await runInTransaction(driver, async (tx) => {
-        // 1. Apply schema changes. May contain multiple statements; the
-        //    driver passes the string straight to SQLite.
-        await tx.exec(migration.sql);
-        // 2. Advance `meta.schema_version`. We INSERT-or-REPLACE rather than
-        //    plain UPDATE so the very first migration (which creates the
-        //    meta table) does not depend on the SQL itself remembering to
-        //    seed the row. Migration 001 already inserts schema_version=1
-        //    for backwards-compat with any tooling that inspects the table
-        //    directly; the upsert is harmless in that case.
-        await tx.run(
+      // Strategy: use a transaction when the driver's withTransaction is
+      // available AND exec can handle multi-statement SQL atomically (the
+      // better-sqlite3 test driver). On the Capacitor native driver, wrapping
+      // CREATE TABLE / CREATE INDEX in a BEGIN block prevents subsequent
+      // statements from seeing tables created earlier in the same uncommitted
+      // transaction, so we execute each statement individually (auto-commit)
+      // and rely on IF NOT EXISTS guards in the SQL for idempotency.
+      //
+      // We distinguish the two cases by duck-typing: if the driver has a
+      // `_isSyncDriver` marker (set by createTestSqliteDriver) we use the
+      // transactional path; otherwise we use the statement-by-statement path.
+      const useTransaction =
+        typeof (/** @type {any} */ (driver)._isSyncDriver) === "boolean" &&
+        (/** @type {any} */ (driver)._isSyncDriver) === true;
+
+      if (useTransaction) {
+        // Test driver: run the full SQL in one transactional exec.
+        await runInTransaction(driver, async (tx) => {
+          await tx.exec(migration.sql);
+          await tx.run(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?) " +
+              "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [String(migration.version)],
+          );
+        });
+      } else {
+        // Native Capacitor driver: execute each statement individually so
+        // the plugin auto-commits each one, allowing CREATE INDEX to see
+        // the table created by a preceding CREATE TABLE.
+        const statements = migration.sql
+          // Strip single-line SQL comments first so they don't end up
+          // prepended to the next statement after splitting on semicolons.
+          .replace(/--[^\n]*/g, "")
+          .split(";")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+
+        for (const stmt of statements) {
+          await driver.exec(stmt);
+        }
+
+        // Update schema_version after all statements succeed.
+        await driver.run(
           "INSERT INTO meta (key, value) VALUES ('schema_version', ?) " +
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
           [String(migration.version)],
         );
-      });
+      }
+
       diagnostics.log({
         category: "migration",
         code: "MIGRATION_APPLIED",

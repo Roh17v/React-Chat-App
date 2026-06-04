@@ -118,6 +118,8 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  * @property {(serverMessage: unknown) => Promise<void>} applyLiveMessage
  * @property {(args: { serverId: string, deletedForEveryone: boolean }) => Promise<void>} applyDeletion
  * @property {(args: { conversationId: string, fromUserId: string, status: string }) => Promise<void>} applyStatusUpdate
+ * @property {(contacts: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyContacts]
+ * @property {(channels: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyChannels]
  * @property {() => unknown} getDriver
  * @property {{ withLock: <T>(key: string, work: () => Promise<T> | T) => Promise<T> } | (() => { withLock: <T>(key: string, work: () => Promise<T> | T) => Promise<T> })} [getMutex]
  *   Optional accessor exposing the repository's `PerConversationMutex` so
@@ -558,9 +560,13 @@ export function createSyncEngine(options) {
       });
 
       let conversations = [];
+      let contactsRaw = [];
+      let channelsRaw = [];
       try {
         const lists = await fetchConversationList();
         conversations = lists.conversations;
+        contactsRaw = lists.contactsRaw;
+        channelsRaw = lists.channelsRaw;
       } catch (err) {
         phase = "degraded";
         bootstrapStatus = "partial";
@@ -579,6 +585,55 @@ export function createSyncEngine(options) {
           partialConversationIds: [],
           durationMs: now() - startedAt,
         };
+      }
+
+      // Persist the contact + channel lists so the UI's `getContacts()` /
+      // `getChannels()` reads survive an offline restart (Req 1.1, 4.3).
+      // Failures here are non-fatal: per-conversation message fetches
+      // still proceed and the next incremental pass will retry the upsert.
+      if (typeof repository.applyContacts === "function") {
+        try {
+          const r = await repository.applyContacts(contactsRaw);
+          diagnostics.log({
+            category: "bootstrap",
+            code: "BOOTSTRAP_CONTACTS_APPLIED",
+            outcome: "ok",
+            meta: {
+              received: contactsRaw.length,
+              upserted: r.upserted,
+              ignored: r.ignored,
+            },
+          });
+        } catch (err) {
+          diagnostics.log({
+            category: "bootstrap",
+            code: "BOOTSTRAP_CONTACTS_APPLY_FAILED",
+            outcome: "warn",
+            meta: { reason: describeError(err) },
+          });
+        }
+      }
+      if (typeof repository.applyChannels === "function") {
+        try {
+          const r = await repository.applyChannels(channelsRaw);
+          diagnostics.log({
+            category: "bootstrap",
+            code: "BOOTSTRAP_CHANNELS_APPLIED",
+            outcome: "ok",
+            meta: {
+              received: channelsRaw.length,
+              upserted: r.upserted,
+              ignored: r.ignored,
+            },
+          });
+        } catch (err) {
+          diagnostics.log({
+            category: "bootstrap",
+            code: "BOOTSTRAP_CHANNELS_APPLY_FAILED",
+            outcome: "warn",
+            meta: { reason: describeError(err) },
+          });
+        }
       }
 
       let okCount = 0;
@@ -601,6 +656,33 @@ export function createSyncEngine(options) {
       phase = "ready";
       bootstrapStatus = partialCount === 0 ? "ok" : "partial";
       const durationMs = now() - startedAt;
+
+      // Persist `meta.bootstrap_completed_at` once at least one
+      // conversation succeeds. `shouldBootstrap()` reads this on
+      // subsequent boots to differentiate "never bootstrapped" from
+      // "bootstrap finished, just resume incremental".
+      if (okCount > 0) {
+        try {
+          const drv = /** @type {{ run: (sql: string, values?: unknown[]) => Promise<unknown> }} */ (
+            repository.getDriver()
+          );
+          if (drv != null && typeof drv.run === "function") {
+            await drv.run(
+              "INSERT INTO meta (key, value) VALUES ('bootstrap_completed_at', ?) " +
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+              [new Date(now()).toISOString()],
+            );
+          }
+        } catch (err) {
+          diagnostics.log({
+            category: "bootstrap",
+            code: "BOOTSTRAP_META_WRITE_FAILED",
+            outcome: "warn",
+            meta: { reason: describeError(err) },
+          });
+        }
+      }
+
       diagnostics.log({
         category: "bootstrap",
         code: "BOOTSTRAP_COMPLETE",
@@ -795,6 +877,52 @@ export function createSyncEngine(options) {
       const lists = await fetchConversationList();
       for (const conv of lists.conversations) {
         if (!conversations.has(conv.id)) conversations.set(conv.id, conv.type);
+      }
+      // Refresh contacts + channels from the same payload so the local
+      // sidebar tables stay in sync with the server (Req 1.1, 4.3).
+      if (typeof repository.applyContacts === "function") {
+        try {
+          const r = await repository.applyContacts(lists.contactsRaw);
+          diagnostics.log({
+            category: "incremental",
+            code: "INCREMENTAL_CONTACTS_APPLIED",
+            outcome: "ok",
+            meta: {
+              received: lists.contactsRaw.length,
+              upserted: r.upserted,
+              ignored: r.ignored,
+            },
+          });
+        } catch (err) {
+          diagnostics.log({
+            category: "incremental",
+            code: "INCREMENTAL_CONTACTS_APPLY_FAILED",
+            outcome: "warn",
+            meta: { reason: describeError(err) },
+          });
+        }
+      }
+      if (typeof repository.applyChannels === "function") {
+        try {
+          const r = await repository.applyChannels(lists.channelsRaw);
+          diagnostics.log({
+            category: "incremental",
+            code: "INCREMENTAL_CHANNELS_APPLIED",
+            outcome: "ok",
+            meta: {
+              received: lists.channelsRaw.length,
+              upserted: r.upserted,
+              ignored: r.ignored,
+            },
+          });
+        } catch (err) {
+          diagnostics.log({
+            category: "incremental",
+            code: "INCREMENTAL_CHANNELS_APPLY_FAILED",
+            outcome: "warn",
+            meta: { reason: describeError(err) },
+          });
+        }
       }
     } catch (err) {
       diagnostics.log({
@@ -1077,17 +1205,43 @@ export function createSyncEngine(options) {
 
   /**
    * Decide whether the engine needs to bootstrap (first run for this
-   * user) or just incremental-sync (we already have data). The cursor
-   * count is a cheap proxy: an empty `sync_cursors` table means the
-   * repository has not yet recorded any per-conversation watermark,
-   * which only happens on a fresh user / wipe.
+   * user) or just incremental-sync (we already have data).
+   *
+   * Two signals — both must say "we are caught up" for us to skip the
+   * bootstrap path:
+   *
+   *   1. `meta.bootstrap_completed_at` is set. The bootstrap helper writes
+   *      this on a successful pass. Its absence means we have never
+   *      finished a bootstrap for this user, even if some incidental
+   *      cursor rows exist (e.g. from a previous partial run, or from
+   *      messages that arrived live before the bootstrap had a chance
+   *      to run).
+   *   2. `sync_cursors` is non-empty. Defensive against a
+   *      `bootstrap_completed_at` row that survived a `meta`-only
+   *      cleanup.
+   *
+   * Either signal missing → re-bootstrap. This is the fix for the
+   * "stuck partial state" bug: previously, any cursor row at all caused
+   * us to skip bootstrap, so the contacts / channels tables stayed
+   * empty forever after a single partial run.
    *
    * @returns {Promise<boolean>}
    */
   async function shouldBootstrap() {
     try {
       const cursors = await readCursors();
-      return cursors.size === 0;
+      if (cursors.size === 0) return true;
+
+      const driver = /** @type {{ query: (sql: string, values?: unknown[]) => Promise<{ value?: unknown }[]> }} */ (
+        repository.getDriver()
+      );
+      const rows = await driver.query(
+        "SELECT value FROM meta WHERE key = 'bootstrap_completed_at' LIMIT 1",
+      );
+      if (!Array.isArray(rows) || rows.length === 0) return true;
+      const v = rows[0]?.value;
+      if (v == null || String(v).length === 0) return true;
+      return false;
     } catch {
       // If the read fails we err on the side of bootstrap — better to
       // re-fetch than to silently skip the initial pass.
@@ -1225,6 +1379,50 @@ export function createSyncEngine(options) {
     applyLiveEvent,
     onConnectivityChange,
     getStatus,
+    /**
+     * Run an incremental sync for a single conversation. Used by the
+     * UI on chat-open to top up the local cache with anything newer
+     * than the cursor, so the user doesn't see a stale-then-fresh
+     * flash when they were offline and now have unread messages.
+     * Falls through to a no-op when the engine is idle / offline /
+     * the repository isn't ready.
+     *
+     * @param {{ conversationId: string, conversationType: "dm"|"channel" }} args
+     * @returns {Promise<{ ok: boolean, batchesApplied: number, messagesApplied: number }>}
+     */
+    refreshConversation: async (args) => {
+      if (
+        args == null ||
+        typeof args.conversationId !== "string" ||
+        args.conversationId.length === 0 ||
+        (args.conversationType !== "dm" && args.conversationType !== "channel")
+      ) {
+        return { ok: false, batchesApplied: 0, messagesApplied: 0 };
+      }
+      if (!repository.isReady()) {
+        return { ok: false, batchesApplied: 0, messagesApplied: 0 };
+      }
+      if (connectivity === "offline") {
+        return { ok: false, batchesApplied: 0, messagesApplied: 0 };
+      }
+      try {
+        return await incrementalConversation({
+          id: args.conversationId,
+          type: args.conversationType,
+        });
+      } catch (err) {
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_REFRESH_FAILED",
+          outcome: "warn",
+          meta: {
+            conversationId: args.conversationId,
+            reason: describeError(err),
+          },
+        });
+        return { ok: false, batchesApplied: 0, messagesApplied: 0 };
+      }
+    },
   };
 }
 

@@ -22,8 +22,102 @@ import { analyzeEmoji } from "@/utils/emojiUtils";
 import { Capacitor } from "@capacitor/core";
 import { toast } from "sonner";
 import { getRepository } from "@/offline";
+import { getSyncEngine } from "@/offline/sync/SyncEngine.js";
+
+/**
+ * Defensive accessor for the SyncEngine singleton. The factory throws when
+ * called before `OfflineProvider` has wired the engine — that's the case
+ * during the first paint on cold-start. We swallow the error and return
+ * `null` so callers can branch instead of crash-rendering.
+ */
+const tryGetSyncEngine = () => {
+  try {
+    const engine = getSyncEngine();
+    return engine != null ? engine : null;
+  } catch {
+    return null;
+  }
+};
 
 const URL_REGEX = /\b((?:https?:\/\/|www\.)[^\s<]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<]*)?)/gi;
+
+/**
+ * Convert a `LocalMessage` row produced by the offline repository into the
+ * server-shape this file (and the rest of the chat UI) expects.
+ *
+ * The repository's `getMessages` / `subscribeMessages` returns rows in
+ * camelCase local-DB shape (`senderId`, `serverId`, `replyToJson`, …).
+ * The UI was originally built around the server REST response (`_id`,
+ * `sender`, `replyTo`, `fileMetadata`, …). Without conversion the store's
+ * dedup-by-`_id` collapses every row into a single entry — which is the
+ * "one message per chat" symptom we are fixing here.
+ *
+ * Tolerates an already-converted server-shape row by passing it through
+ * unchanged (the live `addMessage` / `confirmMessage` flows still feed
+ * the store with raw socket payloads, and the union of both paths is
+ * present in `selectedChatMessages` during normal operation).
+ *
+ * @param {Record<string, any>} m
+ * @returns {Record<string, any>}
+ */
+const toUiMessage = (m) => {
+  if (m == null || typeof m !== "object") return m;
+  // Already in server shape — repository rows always carry `senderId`,
+  // server payloads use `sender`.
+  if (m.sender !== undefined && m._id !== undefined) return m;
+
+  const _id =
+    typeof m._id === "string" && m._id.length > 0
+      ? m._id
+      : typeof m.serverId === "string" && m.serverId.length > 0
+        ? m.serverId
+        : typeof m.clientTempId === "string" && m.clientTempId.length > 0
+          ? m.clientTempId
+          : typeof m.id === "string"
+            ? m.id
+            : undefined;
+
+  let fileMetadata = undefined;
+  if (typeof m.fileMetadataJson === "string" && m.fileMetadataJson.length > 0) {
+    try {
+      fileMetadata = JSON.parse(m.fileMetadataJson);
+    } catch {
+      fileMetadata = {};
+    }
+  } else if (m.fileMetadata !== undefined) {
+    fileMetadata = m.fileMetadata;
+  }
+
+  let replyTo = null;
+  if (typeof m.replyToJson === "string" && m.replyToJson.length > 0) {
+    try {
+      replyTo = JSON.parse(m.replyToJson);
+    } catch {
+      replyTo = null;
+    }
+  } else if (m.replyTo !== undefined) {
+    replyTo = m.replyTo;
+  }
+
+  return {
+    ...m,
+    _id,
+    sender: m.sender !== undefined ? m.sender : m.senderId,
+    receiver: m.receiver !== undefined ? m.receiver : m.receiverId,
+    channelId: m.channelId !== undefined ? m.channelId : null,
+    fileMetadata,
+    replyTo,
+    deletedForEveryone:
+      typeof m.deletedForEveryone === "boolean"
+        ? m.deletedForEveryone
+        : Boolean(m.deletedForEveryone),
+    // Keep clientTempId visible to the dedup / confirm flows.
+    clientTempId:
+      m.clientTempId !== undefined && m.clientTempId !== null
+        ? m.clientTempId
+        : null,
+  };
+};
 
 const trimTrailingPunctuation = (value) => {
   let url = value;
@@ -86,6 +180,13 @@ const MessageContainer = () => {
   const newMessageRef = useRef(null);
   const isInitialLoad = useRef(true);
   const lastMessageCountRef = useRef(0);
+  // The id of the most recent message we've already reacted to. Used to
+  // detect "a NEW message landed at the tail" reliably even when the
+  // array is reset to a smaller window (e.g. when `subscribeMessages`
+  // emits the latest 50 rows after a write that pruned older ones).
+  // Counting alone misses these cases — the count can stay flat or
+  // shrink while the tail still moved forward.
+  const lastTailIdRef = useRef(null);
   const wasNearBottomRef = useRef(true);
   const longPressTimerRef = useRef(null);
   const menuRef = useRef(null);
@@ -104,6 +205,12 @@ const MessageContainer = () => {
     active: false,
   });
   const [swipeState, setSwipeState] = useState({ id: null, offset: 0 });
+  // Tracks the highest server-side page number we've already fetched from
+  // the backend for the current conversation. Local-only pagination doesn't
+  // touch this — it only advances when we actually issue an axios call.
+  // Keeping a ref (not state) so successive `getMessages(page+1)` reads
+  // see the latest value without a re-render race.
+  const lastServerPageRef = useRef(0);
 
   // Typing indicator state
   const typingUsers = selectedChatId
@@ -117,14 +224,25 @@ const MessageContainer = () => {
     return scrollHeight - scrollTop - clientHeight < 150;
   }, []);
 
-  // Smooth scroll to bottom function
+  // Smooth scroll to bottom function. Schedules two rAF passes — the
+  // first lets React commit, the second runs after layout has flushed
+  // so `scrollHeight` reflects the freshly added message bubble. Without
+  // the double-rAF, scrolling a tall message into view sometimes lands
+  // a few pixels short of the bottom on Android WebView.
   const scrollToBottom = useCallback((smooth = true) => {
-    if (containerRef.current) {
+    const container = containerRef.current;
+    if (!container) return;
+    const doScroll = () => {
+      if (!containerRef.current) return;
       containerRef.current.scrollTo({
         top: containerRef.current.scrollHeight,
         behavior: smooth ? "smooth" : "auto",
       });
-    }
+    };
+    requestAnimationFrame(() => {
+      doScroll();
+      requestAnimationFrame(doScroll);
+    });
   }, []);
 
   const getMessages = async (pageNumber = 1) => {
@@ -132,43 +250,170 @@ const MessageContainer = () => {
 
     setLoading(true);
     try {
-      // Native path: try the local repository first (Req 1.2, 5.5).
-      // Only attempt the repo on page 1; subsequent pages fall through to
-      // axios so scroll-to-load-more keeps working via the existing API.
-      if (pageNumber === 1 && Capacitor.isNativePlatform()) {
+      // Native path: try the local repository on every page (Req 1.2, 5.5).
+      // Page 1 grabs the most recent `limit` messages; subsequent pages
+      // use a `before` cursor (the oldest message currently in the store)
+      // to walk older history. Only when the repo has no more rows do we
+      // fall through to axios so older history can still be paged in
+      // when the local cache hasn't been warmed.
+      let localExhausted = false;
+      if (Capacitor.isNativePlatform()) {
         const repo = getRepository();
         if (repo.isReady()) {
-          const localMessages = await repo.getMessages({
+          /** @type {{ conversationId: string, conversationType: "dm", limit: number, before?: string }} */
+          const args = {
             conversationId: selectedChatId,
             conversationType: "dm",
             limit: 20,
-          });
-          if (localMessages.length > 0) {
-            setSelectedChatMessages(localMessages, false);
-            isInitialLoad.current = true;
-            setPage(1);
-            // Fewer than requested means we may be at the start; still allow
-            // network to top-up if the local store is sparse.
-            if (localMessages.length < 20) {
-              setHasMore(false);
-            }
-            setLoading(false);
-            return;
+          };
+          if (pageNumber > 1) {
+            // The store already holds the messages we've shown so far —
+            // pick the oldest `createdAt` as the `before` cursor.
+            const oldest = selectedChatMessages.reduce((acc, m) => {
+              if (!m || typeof m.createdAt !== "string") return acc;
+              if (acc == null) return m.createdAt;
+              return m.createdAt < acc ? m.createdAt : acc;
+            }, null);
+            if (oldest != null) args.before = oldest;
           }
-          // Local store has no rows for this conversation — fall through to
-          // the network fetch (repo fallback when local rows are missing, Req 1.2).
+          const localMessages = await repo.getMessages(args);
+          if (localMessages.length > 0) {
+            // Repository returns rows in descending `created_at` order
+            // (newest first). The chat UI renders top-to-bottom and
+            // expects ascending order (newest at the bottom). Reverse
+            // before mapping to mirror the network path which already
+            // reverses the backend's descending response.
+            const uiMessages = localMessages
+              .slice()
+              .reverse()
+              .map(toUiMessage);
+            // Detect "all rows we got back are already in the store" —
+            // this happens when the local cache boundary is straddled
+            // by messages with identical `created_at`s, since the
+            // `before` cursor is a strict `<` and skips ties. In that
+            // case treat the local cache as exhausted and let the
+            // network path fill in older history.
+            const known = new Set(
+              selectedChatMessages
+                .map((m) => (m && typeof m._id === "string" ? m._id : null))
+                .filter(Boolean),
+            );
+            const newCount = uiMessages.reduce(
+              (acc, m) =>
+                m && typeof m._id === "string" && !known.has(m._id)
+                  ? acc + 1
+                  : acc,
+              0,
+            );
+            if (newCount > 0 || pageNumber === 1) {
+              setSelectedChatMessages(uiMessages, false);
+              if (pageNumber === 1) {
+                isInitialLoad.current = true;
+              }
+              setPage(pageNumber);
+              setLoading(false);
+              return;
+            }
+            // No new rows — the store already has every id the local
+            // repo handed us. Mark exhausted and continue to the
+            // network path below.
+            console.log(
+              `[MessageContainer] DM local page ${pageNumber} returned ${localMessages.length} rows but all duplicates (cache boundary tie); falling through to network`,
+            );
+            localExhausted = true;
+          } else {
+            // Repository ran out of local rows for this page — mark it
+            // exhausted so the network fetch below uses a server-side
+            // page number derived from the store size, not our local
+            // page counter (the two only match if the local cache is
+            // an exact multiple of 20).
+            localExhausted = true;
+          }
         }
       }
 
-      // Web path or repo not ready or local store empty: fetch from network.
+      // Web path or repo exhausted: fetch from network. We track the
+      // highest server-side page we've already fetched in
+      // `lastServerPageRef` and increment it for each new network call.
+      // A naïve `Math.floor(store.length / 20) + 1` would loop on the
+      // same page whenever a server response overlaps with the local
+      // cache (the dedup absorbs the overlap, store size grows by less
+      // than 20, the formula recomputes to the same page).
+      let serverPage;
+      if (lastServerPageRef.current === 0) {
+        // First network call for this conversation. Seed from the
+        // current store size so we resume just before the oldest local
+        // message we already have.
+        serverPage = Math.max(
+          1,
+          Math.floor(selectedChatMessages.length / 20) + 1,
+        );
+      } else {
+        serverPage = lastServerPageRef.current + 1;
+      }
+
+      // Skip the network fetch entirely when offline. Without this the
+      // axios call would either hang on the OS-level timeout or fail
+      // after a long delay, leaving the loading dots spinning forever.
+      // We also stop further pagination attempts so the spinner clears.
+      if (Capacitor.isNativePlatform() && connectivity === "offline") {
+        setHasMore(false);
+        setLoading(false);
+        return;
+      }
+
       const response = await axios.get(
-        `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${pageNumber}&limit=20`,
+        `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
         {
           withCredentials: true,
+          // Hard timeout so a slow / dropping network can't keep the
+          // pagination spinner up indefinitely.
+          timeout: 15_000,
         }
       );
 
-      if (response.data.length === 0) setHasMore(false);
+      lastServerPageRef.current = serverPage;
+      const sizeBefore = selectedChatMessages.length;
+
+      console.log(
+        `[MessageContainer] DM network page ${serverPage} returned ${response.data?.length ?? 0} rows for ${selectedChatId} (localExhausted=${localExhausted}, store size=${sizeBefore})`,
+      );
+
+      if (response.data.length === 0) {
+        setHasMore(false);
+        setLoading(false);
+        return;
+      }
+
+      // If every row in the response is already in the store the
+      // dedup will absorb everything and the user sees no progress.
+      // Detect that and either advance to a further server page on
+      // the next scroll or stop if we've clearly walked off the end.
+      const known = new Set(
+        selectedChatMessages
+          .map((m) => (m && typeof m._id === "string" ? m._id : null))
+          .filter(Boolean),
+      );
+      const newCount = response.data.reduce(
+        (acc, m) =>
+          m && typeof m._id === "string" && !known.has(m._id) ? acc + 1 : acc,
+        0,
+      );
+      if (newCount === 0) {
+        // The page we just fetched is fully overlapping with what
+        // we already showed (cache boundary). Try the next page on
+        // the next scroll. If multiple consecutive pages return
+        // overlap-only, the recursion below will eventually return
+        // an empty page and `hasMore` will flip to false.
+        console.log(
+          `[MessageContainer] DM page ${serverPage} fully overlapped; advancing to page ${serverPage + 1}`,
+        );
+        setLoading(false);
+        // Recurse synchronously so the user sees no extra spinner
+        // round-trips. `lastServerPageRef.current` was just updated
+        // so the next call uses page+1.
+        return getMessages(pageNumber);
+      }
 
       setSelectedChatMessages(response.data, false);
 
@@ -189,38 +434,120 @@ const MessageContainer = () => {
     setLoading(true);
 
     try {
-      // Native path: try the local repository first (Req 1.2, 5.5).
-      // Only attempt the repo on page 1; subsequent pages fall through to
-      // axios so scroll-to-load-more keeps working via the existing API.
-      if (pageNumber === 1 && Capacitor.isNativePlatform()) {
+      // Native path: try the local repository on every page (Req 1.2, 5.5).
+      // See `getMessages` above for the pagination cursor rationale.
+      let localExhausted = false;
+      if (Capacitor.isNativePlatform()) {
         const repo = getRepository();
         if (repo.isReady()) {
-          const localMessages = await repo.getMessages({
+          /** @type {{ conversationId: string, conversationType: "channel", limit: number, before?: string }} */
+          const args = {
             conversationId: selectedChatId,
             conversationType: "channel",
             limit: 20,
-          });
-          if (localMessages.length > 0) {
-            setSelectedChatMessages(localMessages, false);
-            isInitialLoad.current = true;
-            setPage(1);
-            if (localMessages.length < 20) {
-              setHasMore(false);
-            }
-            setLoading(false);
-            return;
+          };
+          if (pageNumber > 1) {
+            const oldest = selectedChatMessages.reduce((acc, m) => {
+              if (!m || typeof m.createdAt !== "string") return acc;
+              if (acc == null) return m.createdAt;
+              return m.createdAt < acc ? m.createdAt : acc;
+            }, null);
+            if (oldest != null) args.before = oldest;
           }
-          // Local store empty — fall through to network.
+          const localMessages = await repo.getMessages(args);
+          if (localMessages.length > 0) {
+            const uiMessages = localMessages
+              .slice()
+              .reverse()
+              .map(toUiMessage);
+            // See `getMessages` above for the duplicate-detection
+            // rationale.
+            const known = new Set(
+              selectedChatMessages
+                .map((m) => (m && typeof m._id === "string" ? m._id : null))
+                .filter(Boolean),
+            );
+            const newCount = uiMessages.reduce(
+              (acc, m) =>
+                m && typeof m._id === "string" && !known.has(m._id)
+                  ? acc + 1
+                  : acc,
+              0,
+            );
+            if (newCount > 0 || pageNumber === 1) {
+              setSelectedChatMessages(uiMessages, false);
+              if (pageNumber === 1) {
+                isInitialLoad.current = true;
+              }
+              setPage(pageNumber);
+              setLoading(false);
+              return;
+            }
+            console.log(
+              `[MessageContainer] Channel local page ${pageNumber} returned ${localMessages.length} rows but all duplicates (cache boundary tie); falling through to network`,
+            );
+            localExhausted = true;
+          } else {
+            localExhausted = true;
+          }
         }
       }
 
+      let serverPage;
+      if (lastServerPageRef.current === 0) {
+        serverPage = Math.max(
+          1,
+          Math.floor(selectedChatMessages.length / 20) + 1,
+        );
+      } else {
+        serverPage = lastServerPageRef.current + 1;
+      }
+
+      // Skip the network fetch when offline (see DM path comment).
+      if (Capacitor.isNativePlatform() && connectivity === "offline") {
+        setHasMore(false);
+        setLoading(false);
+        return;
+      }
+
       const response = await axios.get(
-        `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${pageNumber}&limit=20`,
+        `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
         {
           withCredentials: true,
+          timeout: 15_000,
         }
       );
-      if (response.data.length === 0) setHasMore(false);
+
+      lastServerPageRef.current = serverPage;
+      const sizeBefore = selectedChatMessages.length;
+
+      console.log(
+        `[MessageContainer] Channel network page ${serverPage} returned ${response.data?.length ?? 0} rows for ${selectedChatId} (localExhausted=${localExhausted}, store size=${sizeBefore})`,
+      );
+
+      if (response.data.length === 0) {
+        setHasMore(false);
+        setLoading(false);
+        return;
+      }
+
+      const known = new Set(
+        selectedChatMessages
+          .map((m) => (m && typeof m._id === "string" ? m._id : null))
+          .filter(Boolean),
+      );
+      const newCount = response.data.reduce(
+        (acc, m) =>
+          m && typeof m._id === "string" && !known.has(m._id) ? acc + 1 : acc,
+        0,
+      );
+      if (newCount === 0) {
+        console.log(
+          `[MessageContainer] Channel page ${serverPage} fully overlapped; advancing to page ${serverPage + 1}`,
+        );
+        setLoading(false);
+        return getChannelMessages(pageNumber);
+      }
 
       setSelectedChatMessages(response.data, false);
 
@@ -238,11 +565,38 @@ const MessageContainer = () => {
 
   useEffect(() => {
     if (selectedChatId) {
+      // Reset the network pagination cursor — each conversation has its
+      // own server-side page sequence.
+      lastServerPageRef.current = 0;
+      // Reset the tail-id tracker so the next first message in this
+      // conversation is treated as "new" and triggers the initial-load
+      // scroll-to-bottom branch.
+      lastTailIdRef.current = null;
       if (selectedChatType === "contact") {
         setPage(1);
         setHasMore(true);
         setSelectedChatMessages([], true);
         getMessages(1);
+        // Kick a parallel incremental refresh on native — pulls anything
+        // newer than the cursor so the user doesn't see "old window for a
+        // moment, then new messages flash in" when they were offline and
+        // had pending unreads. The repository's `subscribeMessages`
+        // listener (registered above) will fire as soon as the new rows
+        // commit, so the UI updates without a separate refetch loop.
+        if (Capacitor.isNativePlatform()) {
+          const engine = tryGetSyncEngine();
+          if (engine && typeof engine.refreshConversation === "function") {
+            engine
+              .refreshConversation({
+                conversationId: selectedChatId,
+                conversationType: "dm",
+              })
+              .catch(() => {
+                // Silently ignore — the periodic incremental pass and
+                // live socket events will catch up regardless.
+              });
+          }
+        }
         if (socket && user?.id) {
           socket.emit("confirm-read", {
             userId: user.id,
@@ -256,6 +610,19 @@ const MessageContainer = () => {
         setHasMore(true);
         setSelectedChatMessages([], true);
         getChannelMessages(1);
+        if (Capacitor.isNativePlatform()) {
+          const engine = tryGetSyncEngine();
+          if (engine && typeof engine.refreshConversation === "function") {
+            engine
+              .refreshConversation({
+                conversationId: selectedChatId,
+                conversationType: "channel",
+              })
+              .catch(() => {
+                // Silently ignore.
+              });
+          }
+        }
       }
     }
   }, [
@@ -276,7 +643,10 @@ const MessageContainer = () => {
     if (!repo.isReady()) return;
 
     const unsubscribe = repo.subscribeMessages(selectedChatId, (messages) => {
-      setSelectedChatMessages(messages, true);
+      const uiMessages = Array.isArray(messages)
+        ? messages.slice().reverse().map(toUiMessage)
+        : [];
+      setSelectedChatMessages(uiMessages, true);
     });
 
     return () => {
@@ -467,7 +837,7 @@ const MessageContainer = () => {
   // Message status indicator component - bright sky-blue for read visibility
   const MessageStatus = ({ status }) => (
     <span className="inline-flex items-center ml-1.5">
-      {status === "sending" && (
+      {(status === "sending" || status === "pending") && (
         <svg className="w-3.5 h-3.5 text-white/50 animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <circle cx="12" cy="12" r="10" />
           <polyline points="12 6 12 12 16 14" />
@@ -1215,34 +1585,44 @@ const MessageContainer = () => {
 
     const currentMessageCount = selectedChatMessages.length;
     const lastMessage = selectedChatMessages[selectedChatMessages.length - 1];
-    const isOwnMessage = lastMessage?.sender === user?.id || lastMessage?.sender?._id === user?.id;
+    const lastMessageId = lastMessage?._id ?? null;
+    const isOwnMessage =
+      lastMessage?.sender === user?.id ||
+      lastMessage?.sender?._id === user?.id;
 
     // Initial load - instant scroll to bottom
     if (isInitialLoad.current) {
-      requestAnimationFrame(() => {
-        scrollToBottom(false);
-        setTimeout(() => {
-          isInitialLoad.current = false;
-          lastMessageCountRef.current = currentMessageCount;
-          wasNearBottomRef.current = true;
-        }, 100);
-      });
+      scrollToBottom(false);
+      setTimeout(() => {
+        isInitialLoad.current = false;
+        lastMessageCountRef.current = currentMessageCount;
+        lastTailIdRef.current = lastMessageId;
+        wasNearBottomRef.current = true;
+      }, 100);
       return;
     }
 
-    // New message arrived (not from pagination)
-    if (currentMessageCount > lastMessageCountRef.current) {
+    // A new message arrived at the tail. We detect this by comparing
+    // the id of the last array entry against the previously recorded
+    // tail id. This catches both the "array grew" case (live socket
+    // append) and the "array reset to a fresh window" case (the offline
+    // repository's `subscribeMessages` fires with a fresh ordered slice
+    // after each write — the count can stay flat or shrink while the
+    // tail still moved forward).
+    const tailChanged =
+      lastMessageId != null && lastMessageId !== lastTailIdRef.current;
+
+    if (tailChanged) {
       const wasAtBottom = wasNearBottomRef.current;
-      
-      // Always scroll for own messages, or if user was near bottom for received messages
+      // Always scroll for own messages, or if user was near bottom for
+      // received messages.
       if (isOwnMessage || wasAtBottom) {
-        requestAnimationFrame(() => {
-          scrollToBottom(true);
-        });
+        scrollToBottom(true);
       }
     }
 
     lastMessageCountRef.current = currentMessageCount;
+    lastTailIdRef.current = lastMessageId;
   }, [selectedChatMessages, scrollToBottom, user?.id]);
 
   // Track scroll position continuously
@@ -1266,9 +1646,7 @@ const MessageContainer = () => {
     // Typing indicator just appeared
     if (typingUsersLength > 0 && prevLength === 0) {
       if (wasNearBottomRef.current) {
-        requestAnimationFrame(() => {
-          scrollToBottom(true);
-        });
+        scrollToBottom(true);
       }
     }
 

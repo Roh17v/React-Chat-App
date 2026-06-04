@@ -387,9 +387,9 @@ export function createSqliteDriver(options = {}) {
   /** @type {SqliteDriver["exec"]} */
   async function exec(sql) {
     const handle = ensureOpen();
-    // `transaction=false` so the plugin does not auto-wrap the statement(s)
-    // in BEGIN/COMMIT — `withTransaction` is the only path that should issue
-    // those, otherwise nested-transaction errors are easy to trip.
+    // `transaction=false` so the plugin does not auto-wrap in BEGIN/COMMIT.
+    // The Migrator splits multi-statement SQL itself and calls exec() once
+    // per statement, so this path always receives a single statement.
     await handle.execute(sql, /* transaction */ false);
   }
 

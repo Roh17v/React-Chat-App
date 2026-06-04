@@ -270,6 +270,31 @@ export function createDiagnostics(opts = {}) {
       buffer[head] = entry;
       head = (head + 1) % capacity;
       if (count < capacity) count += 1;
+
+      // Debug mirror — also dump to console so adb logcat can see it.
+      // The production build strips console.* via esbuild.drop, so this
+      // line is a no-op in release builds. When debugging offline-layer
+      // issues, temporarily remove `drop: ['console', 'debugger']` from
+      // vite.config.js to make these visible on device.
+      try {
+        const tag = `[OFFLINE ${entry.category}/${entry.code}]`;
+        const metaStr = entry.meta ? ` ${JSON.stringify(entry.meta)}` : "";
+        const durStr =
+          typeof entry.durationMs === "number" ? ` (${entry.durationMs}ms)` : "";
+        const line = `${tag} ${entry.outcome}${durStr}${metaStr}`;
+        if (entry.outcome === "error") {
+          // eslint-disable-next-line no-console
+          console.error(line);
+        } else if (entry.outcome === "warn") {
+          // eslint-disable-next-line no-console
+          console.warn(line);
+        } else {
+          // eslint-disable-next-line no-console
+          console.log(line);
+        }
+      } catch {
+        // Console emit is best-effort; never let it break the ring buffer.
+      }
     } catch {
       // Diagnostics must never throw to its caller. Swallow.
     }

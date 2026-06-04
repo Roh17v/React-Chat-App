@@ -10,6 +10,26 @@ import { UPLOAD_FILE_ROUTE } from "@/utils/constants";
 import { cn } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
 import { getRepository } from "@/offline";
+import { getOutboundQueue } from "@/offline/sync/OutboundQueue.js";
+
+/**
+ * Best-effort `triggerDrain()` on the singleton outbound queue. Called
+ * right after `repo.enqueueOutbound` so the queue starts working on the
+ * row instead of waiting for its periodic 60s timer to fire — that's
+ * the 10–15s "stuck pending" you'd otherwise see in the bubble.
+ *
+ * Returns silently if the queue isn't initialized yet (the OfflineProvider
+ * hasn't booted) or if the singleton's `triggerDrain` throws — the worst
+ * case is the periodic timer takes over.
+ */
+const kickOutboundDrain = () => {
+  try {
+    const q = getOutboundQueue();
+    if (q && typeof q.triggerDrain === "function") q.triggerDrain();
+  } catch {
+    // Singleton not initialized yet — periodic timer will handle it.
+  }
+};
 
 const MessageBar = () => {
   const [message, setMessage] = useState("");
@@ -71,6 +91,9 @@ const MessageBar = () => {
           });
           // No addOptimisticMessage: enqueueOutbound inserts the pending row
           // and the repository subscription fires, updating the UI.
+          // Kick the queue immediately — without this it waits up to 60s
+          // for the periodic timer.
+          kickOutboundDrain();
         } else {
           // Repository not ready — fall through to socket path.
           const tempId = `temp_${crypto.randomUUID()}`;
@@ -144,6 +167,7 @@ const MessageBar = () => {
               messageType: "text",
             },
           });
+          kickOutboundDrain();
         } else {
           socket.emit("send-channel-message", {
             sender: user.id,
@@ -239,6 +263,7 @@ const MessageBar = () => {
                     replyTo: replyTo || undefined,
                   },
                 });
+                kickOutboundDrain();
               } else {
                 socket.emit("sendMessage", {
                   sender: user.id,
@@ -280,6 +305,7 @@ const MessageBar = () => {
                     fileMetadata,
                   },
                 });
+                kickOutboundDrain();
               } else {
                 socket.emit("send-channel-message", {
                   sender: user.id,

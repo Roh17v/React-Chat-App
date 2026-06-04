@@ -32,6 +32,16 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   // showSplash keeps the overlay mounted until its exit animation completes
   const [showSplash, setShowSplash] = useState(true);
+  // splashSafetyElapsed: a 3-second hard cap so the splash never
+  // permanently traps the user even when the data layer stalls (e.g.
+  // SQLite plugin slow to come up on a cold boot, or a flaky network
+  // delaying the bootstrap fetch). Combined with `authReady && dataReady`
+  // below, the splash dismisses on whichever condition fires first.
+  const [splashSafetyElapsed, setSplashSafetyElapsed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSplashSafetyElapsed(true), 3_000);
+    return () => clearTimeout(t);
+  }, []);
   const setUser = useAppStore((state) => state.setUser);
   const user = useAppStore((state) => state.user);
   const authInitialized = useAppStore((state) => state.authInitialized);
@@ -40,6 +50,9 @@ function App() {
     (state) => state.directMessagesContacts,
   );
   const channels = useAppStore((state) => state.channels);
+  const connectivity = useAppStore((state) => state.connectivity);
+  const bootstrapStatus = useAppStore((state) => state.bootstrapStatus);
+  const offlineMode = useAppStore((state) => state.offlineMode);
   const setSelectedChatType = useAppStore((state) => state.setSelectedChatType);
   const setSelectedChatData = useAppStore((state) => state.setSelectedChatData);
   const pendingNotification = useAppStore(
@@ -162,16 +175,62 @@ function App() {
 
             if (response.status === 200 && response.data) {
               setUser(response.data);
+              // Cache the user object so we can boot offline next time.
+              try {
+                await Preferences.set({
+                  key: "auth_user",
+                  value: JSON.stringify(response.data),
+                });
+              } catch (cacheErr) {
+                console.warn("Could not cache user for offline boot:", cacheErr);
+              }
             } else {
-              // Invalid response, clear token
+              // Invalid response, clear token + cached user.
               await Preferences.remove({ key: "auth_token" }).catch(() => {});
+              await Preferences.remove({ key: "auth_user" }).catch(() => {});
               setUser(null);
             }
           } catch (error) {
-            // Token verification failed, clear it
-            console.log("Token verification failed:", error);
-            await Preferences.remove({ key: "auth_token" }).catch(() => {});
-            setUser(null);
+            // Distinguish network failure from auth rejection. A 401/403
+            // means the token is genuinely invalid → log the user out.
+            // A network error (no response, ECONNABORTED, ERR_NETWORK,
+            // timeout) means we just couldn't reach the server — keep
+            // the cached user so the app opens and shows local data.
+            const status = error?.response?.status;
+            const isAuthRejection = status === 401 || status === 403;
+            if (isAuthRejection) {
+              console.log("Token rejected by backend, clearing.");
+              await Preferences.remove({ key: "auth_token" }).catch(() => {});
+              await Preferences.remove({ key: "auth_user" }).catch(() => {});
+              setUser(null);
+            } else {
+              // Network failure path — try the cached user.
+              console.log(
+                "Auth check could not reach server, falling back to cached user.",
+                error?.message,
+              );
+              try {
+                const { value: cached } = await Preferences.get({
+                  key: "auth_user",
+                });
+                if (cached) {
+                  const parsed = JSON.parse(cached);
+                  if (parsed && typeof parsed === "object") {
+                    setUser(parsed);
+                  } else {
+                    setUser(null);
+                  }
+                } else {
+                  setUser(null);
+                }
+              } catch (cacheErr) {
+                console.warn(
+                  "Could not read cached user for offline boot:",
+                  cacheErr,
+                );
+                setUser(null);
+              }
+            }
           }
         } else {
           // No persisted token, user is not logged in
@@ -517,7 +576,26 @@ function App() {
       {/* Splash overlay sits on top at z-[9999], fades out once auth resolves */}
       {showSplash && (
         <AuthSplash
-          authReady={authInitialized}
+          authReady={
+            // Hold the splash until auth is checked AND either the data
+            // layer has finished its first sync, or contacts already
+            // exist in memory (cold-boot warm cache), or we have nothing
+            // to wait for (logged-out / offline mode unavailable on web),
+            // or the 3s safety cap has elapsed. This prevents the brief
+            // "empty home screen" flash WhatsApp avoids — the user sees
+            // the splash → fully populated home, not splash → blank →
+            // home.
+            authInitialized &&
+            (
+              !user || // logged out → straight to /auth
+              offlineMode === "unavailable" || // web build, no offline layer
+              bootstrapStatus === "ready" ||
+              bootstrapStatus === "partial" ||
+              (Array.isArray(directMessagesContacts) &&
+                directMessagesContacts.length > 0) ||
+              splashSafetyElapsed
+            )
+          }
           onDone={() => setShowSplash(false)}
         />
       )}

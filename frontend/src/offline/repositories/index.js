@@ -840,6 +840,14 @@ export function createRepository(options = {}) {
           "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       );
       await tx.run("DELETE FROM meta WHERE key = 'user_id'");
+      // bootstrap_completed_at is user-bound — clearing it forces the
+      // next init to run a fresh bootstrap pass (Req 1.6 / §Migration plan).
+      await tx.run("DELETE FROM meta WHERE key = 'bootstrap_completed_at'");
+      // last_incremental_sync_at is also user-bound; without a clear here
+      // a wipe-then-reinit could resume incremental from a stale watermark.
+      await tx.run(
+        "DELETE FROM meta WHERE key = 'last_incremental_sync_at'",
+      );
     });
 
     try {
@@ -1310,6 +1318,295 @@ export function createRepository(options = {}) {
         ? args.conversationId
         : GLOBAL_MUTEX_KEY;
     return mutex.withLock(key, () => applyServerMessagesLocked(args));
+  }
+
+  // ----- Contact / channel writes (task 7.2 follow-up) -------------------
+  //
+  // The bootstrap (§3.3) and incremental (§3.3) passes both fetch the DM
+  // contact list (`GET /api/users/dm-contacts`) and the channel list
+  // (`GET /api/channels`). The repository must persist those rows so the
+  // UI's `getContacts()` / `getChannels()` reads (and the corresponding
+  // subscriptions) survive an offline restart — Req 1.1, Req 4.3.
+  //
+  // Both writers run under the GLOBAL_MUTEX_KEY since contacts and
+  // channels are shared collections (no per-conversation key applies).
+  // Errors on a single row are swallowed and logged; a malformed payload
+  // for one contact must not stop us from upserting the rest.
+
+  /**
+   * Upsert a single user row. Used by the contact and channel writers
+   * to keep the `users` table populated with display fields the UI joins
+   * against (`getContacts()` LEFT JOINs `users`).
+   *
+   * @param {{ run: (sql: string, values?: unknown[]) => Promise<unknown> }} tx
+   * @param {Record<string, unknown>} u
+   * @param {string} updatedAt
+   * @returns {Promise<void>}
+   */
+  async function upsertUserRow(tx, u, updatedAt) {
+    const userIdRaw = extractIdLike(u);
+    if (userIdRaw == null) return;
+    const colorJson =
+      u.color == null
+        ? null
+        : (() => {
+            try {
+              return JSON.stringify(u.color);
+            } catch {
+              return null;
+            }
+          })();
+    await tx.run(
+      "INSERT INTO users (user_id, first_name, last_name, email, username, image, color_json, last_seen, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(user_id) DO UPDATE SET " +
+        "  first_name = excluded.first_name, " +
+        "  last_name  = excluded.last_name, " +
+        "  email      = excluded.email, " +
+        "  username   = excluded.username, " +
+        "  image      = excluded.image, " +
+        "  color_json = excluded.color_json, " +
+        "  last_seen  = COALESCE(excluded.last_seen, users.last_seen), " +
+        "  updated_at = excluded.updated_at",
+      [
+        userIdRaw,
+        typeof u.firstName === "string" ? u.firstName : null,
+        typeof u.lastName === "string" ? u.lastName : null,
+        typeof u.email === "string" ? u.email : null,
+        typeof u.username === "string" ? u.username : null,
+        typeof u.image === "string" ? u.image : null,
+        colorJson,
+        typeof u.lastSeen === "string" ? u.lastSeen : null,
+        updatedAt,
+      ],
+    );
+  }
+
+  /**
+   * Upsert the DM contact list returned by `GET /api/users/dm-contacts`.
+   * Each entry is the populated user doc plus message-derived fields
+   * (`unreadCount`, `lastMessage`, `lastMessageAt`).
+   *
+   * The repository owns the snake_case schema; this method is the only
+   * place in the codebase that writes the `contacts` and `users` tables
+   * for the DM list payload. Subscribers registered via
+   * {@link subscribeContacts} fire after the transaction commits.
+   *
+   * Internal — runs under the GLOBAL_MUTEX_KEY acquired by the public
+   * {@link applyContacts} wrapper.
+   *
+   * @param {unknown[]} contacts
+   * @returns {Promise<{ upserted: number, ignored: number }>}
+   */
+  async function applyContactsLocked(contacts) {
+    requireReady("applyContacts");
+    if (!Array.isArray(contacts)) {
+      return { upserted: 0, ignored: 0 };
+    }
+    const updatedAt = new Date().toISOString();
+    let upserted = 0;
+    let ignored = 0;
+    await driver.withTransaction(async (tx) => {
+      for (const raw of contacts) {
+        if (raw == null || typeof raw !== "object") {
+          ignored += 1;
+          continue;
+        }
+        const c = /** @type {Record<string, unknown>} */ (raw);
+        const userIdRaw = extractIdLike(c);
+        if (userIdRaw == null) {
+          ignored += 1;
+          continue;
+        }
+        try {
+          await upsertUserRow(tx, c, updatedAt);
+          const unread =
+            typeof c.unreadCount === "number" && Number.isFinite(c.unreadCount)
+              ? Math.max(0, Math.floor(c.unreadCount))
+              : 0;
+          const lastMessage =
+            typeof c.lastMessage === "string" ? c.lastMessage : null;
+          const lastMessageAt =
+            typeof c.lastMessageAt === "string" ? c.lastMessageAt : null;
+          await tx.run(
+            "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
+              "VALUES (?, ?, ?, ?, 'ready', ?) " +
+              "ON CONFLICT(user_id) DO UPDATE SET " +
+              "  last_message = excluded.last_message, " +
+              // Keep the larger lastMessageAt so a server payload that
+              // pre-dates a live event we already received does not roll
+              // the timestamp backwards (Property 16).
+              "  last_message_at = CASE " +
+              "     WHEN excluded.last_message_at IS NULL THEN contacts.last_message_at " +
+              "     WHEN contacts.last_message_at IS NULL THEN excluded.last_message_at " +
+              "     WHEN excluded.last_message_at > contacts.last_message_at THEN excluded.last_message_at " +
+              "     ELSE contacts.last_message_at END, " +
+              "  unread_count = excluded.unread_count, " +
+              "  bootstrap_status = 'ready', " +
+              "  updated_at = excluded.updated_at",
+            [userIdRaw, lastMessage, lastMessageAt, unread, updatedAt],
+          );
+          upserted += 1;
+        } catch (err) {
+          ignored += 1;
+          diagnostics.log({
+            category: "bootstrap",
+            code: "CONTACT_UPSERT_FAILED",
+            outcome: "warn",
+            meta: { userId: userIdRaw, reason: describeError(err) },
+          });
+        }
+      }
+    });
+    await emitContacts();
+    return { upserted, ignored };
+  }
+
+  /**
+   * Public, mutex-serialized entry point for {@link applyContactsLocked}.
+   *
+   * @param {unknown[]} contacts
+   * @returns {Promise<{ upserted: number, ignored: number }>}
+   */
+  async function applyContacts(contacts) {
+    return mutex.withLock(GLOBAL_MUTEX_KEY, () =>
+      applyContactsLocked(contacts),
+    );
+  }
+
+  /**
+   * Upsert the channel list returned by `GET /api/channels`. Members are
+   * stored both as a JSON blob on the channel row (for fast read) and as
+   * individual rows in `channel_members` (for member lookups). Members
+   * are NOT joined back to `users` here — when the membership list
+   * contains populated user docs we upsert those into `users` as well so
+   * the join in `getChannels()` keeps working without a follow-up
+   * incremental fetch.
+   *
+   * Internal — runs under the GLOBAL_MUTEX_KEY acquired by the public
+   * {@link applyChannels} wrapper.
+   *
+   * @param {unknown[]} channels
+   * @returns {Promise<{ upserted: number, ignored: number }>}
+   */
+  async function applyChannelsLocked(channels) {
+    requireReady("applyChannels");
+    if (!Array.isArray(channels)) {
+      return { upserted: 0, ignored: 0 };
+    }
+    const updatedAt = new Date().toISOString();
+    let upserted = 0;
+    let ignored = 0;
+    await driver.withTransaction(async (tx) => {
+      for (const raw of channels) {
+        if (raw == null || typeof raw !== "object") {
+          ignored += 1;
+          continue;
+        }
+        const ch = /** @type {Record<string, unknown>} */ (raw);
+        const channelId = extractIdLike(ch);
+        if (channelId == null) {
+          ignored += 1;
+          continue;
+        }
+        const channelName =
+          typeof ch.channelName === "string" && ch.channelName.length > 0
+            ? ch.channelName
+            : null;
+        const adminId = extractIdLike(ch.admin);
+        if (channelName == null || adminId == null) {
+          ignored += 1;
+          continue;
+        }
+        const membersRaw = Array.isArray(ch.members) ? ch.members : [];
+        /** @type {string[]} */
+        const memberIds = [];
+        for (const m of membersRaw) {
+          const mid = extractIdLike(m);
+          if (mid != null) memberIds.push(mid);
+        }
+        const createdAt =
+          typeof ch.createdAt === "string" ? ch.createdAt : updatedAt;
+        const channelUpdatedAt =
+          typeof ch.updatedAt === "string" ? ch.updatedAt : updatedAt;
+        try {
+          // Upsert any populated user docs we received with the channel
+          // payload — keeps the users table fresh for the member list.
+          if (
+            ch.admin !== null &&
+            typeof ch.admin === "object" &&
+            !Array.isArray(ch.admin)
+          ) {
+            await upsertUserRow(
+              tx,
+              /** @type {Record<string, unknown>} */ (ch.admin),
+              updatedAt,
+            );
+          }
+          for (const m of membersRaw) {
+            if (m !== null && typeof m === "object" && !Array.isArray(m)) {
+              await upsertUserRow(
+                tx,
+                /** @type {Record<string, unknown>} */ (m),
+                updatedAt,
+              );
+            }
+          }
+          await tx.run(
+            "INSERT INTO channels (channel_id, channel_name, admin_user_id, members_json, created_at, updated_at, bootstrap_status) " +
+              "VALUES (?, ?, ?, ?, ?, ?, 'ready') " +
+              "ON CONFLICT(channel_id) DO UPDATE SET " +
+              "  channel_name     = excluded.channel_name, " +
+              "  admin_user_id    = excluded.admin_user_id, " +
+              "  members_json     = excluded.members_json, " +
+              "  updated_at       = excluded.updated_at, " +
+              "  bootstrap_status = 'ready'",
+            [
+              channelId,
+              channelName,
+              adminId,
+              JSON.stringify(memberIds),
+              createdAt,
+              channelUpdatedAt,
+            ],
+          );
+          // Replace the channel_members rows for this channel: cheap and
+          // keeps the table honest when a member is removed server-side.
+          await tx.run("DELETE FROM channel_members WHERE channel_id = ?", [
+            channelId,
+          ]);
+          for (const mid of memberIds) {
+            await tx.run(
+              "INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?, ?)",
+              [channelId, mid],
+            );
+          }
+          upserted += 1;
+        } catch (err) {
+          ignored += 1;
+          diagnostics.log({
+            category: "bootstrap",
+            code: "CHANNEL_UPSERT_FAILED",
+            outcome: "warn",
+            meta: { channelId, reason: describeError(err) },
+          });
+        }
+      }
+    });
+    await emitChannels();
+    return { upserted, ignored };
+  }
+
+  /**
+   * Public, mutex-serialized entry point for {@link applyChannelsLocked}.
+   *
+   * @param {unknown[]} channels
+   * @returns {Promise<{ upserted: number, ignored: number }>}
+   */
+  async function applyChannels(channels) {
+    return mutex.withLock(GLOBAL_MUTEX_KEY, () =>
+      applyChannelsLocked(channels),
+    );
   }
 
   /**
@@ -2645,6 +2942,8 @@ export function createRepository(options = {}) {
     applyLiveMessage,
     applyDeletion,
     applyStatusUpdate,
+    applyContacts,
+    applyChannels,
 
     // outbound queue (task 10.1)
     enqueueOutbound,

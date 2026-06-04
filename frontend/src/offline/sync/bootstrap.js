@@ -91,6 +91,12 @@ export const BOOTSTRAP_JITTER_FRACTION = 0.25;
  *
  * @typedef {Object} BootstrapRepository
  * @property {(args: { conversationId: string, conversationType: "dm"|"channel", messages: unknown[], sourceCursor?: object }) => Promise<{ inserted: number, updated: number, ignored: number }>} applyServerMessages
+ * @property {(contacts: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyContacts]
+ * @property {(channels: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyChannels]
+ * @property {() => unknown} [getDriver]
+ *   Used to persist `meta.bootstrap_completed_at` after a successful
+ *   pass. Optional so test fakes that only stub `applyServerMessages`
+ *   keep working.
  */
 
 /**
@@ -381,9 +387,15 @@ export async function runBootstrap(options) {
 
   /** @type {ConversationRef[]} */
   let conversations = [];
+  /** @type {unknown[]} */
+  let contactsRaw = [];
+  /** @type {unknown[]} */
+  let channelsRaw = [];
   try {
     const lists = await fetchConversationList({ apiClient, buildUrl, diagnostics });
     conversations = lists.conversations;
+    contactsRaw = lists.contactsRaw;
+    channelsRaw = lists.channelsRaw;
   } catch (err) {
     if (onPhaseChange) onPhaseChange("degraded");
     if (onBootstrapStatusChange) onBootstrapStatusChange("partial");
@@ -402,6 +414,58 @@ export async function runBootstrap(options) {
       partialConversationIds: [],
       durationMs: now() - startedAt,
     };
+  }
+
+  // Persist the contact + channel lists into the repository before
+  // fanning out per-conversation message fetches. The list payload
+  // already carries the user display fields and last-message preview
+  // so the UI can render the sidebar from the local DB on next launch
+  // (Req 1.1, Req 4.3). Failures here are non-fatal: the per-conversation
+  // pass below still runs and the next incremental pass will retry the
+  // upsert.
+  if (typeof repository.applyContacts === "function") {
+    try {
+      const r = await repository.applyContacts(contactsRaw);
+      diagnostics.log({
+        category: "bootstrap",
+        code: "BOOTSTRAP_CONTACTS_APPLIED",
+        outcome: "ok",
+        meta: {
+          received: contactsRaw.length,
+          upserted: r.upserted,
+          ignored: r.ignored,
+        },
+      });
+    } catch (err) {
+      diagnostics.log({
+        category: "bootstrap",
+        code: "BOOTSTRAP_CONTACTS_APPLY_FAILED",
+        outcome: "warn",
+        meta: { reason: describeError(err) },
+      });
+    }
+  }
+  if (typeof repository.applyChannels === "function") {
+    try {
+      const r = await repository.applyChannels(channelsRaw);
+      diagnostics.log({
+        category: "bootstrap",
+        code: "BOOTSTRAP_CHANNELS_APPLIED",
+        outcome: "ok",
+        meta: {
+          received: channelsRaw.length,
+          upserted: r.upserted,
+          ignored: r.ignored,
+        },
+      });
+    } catch (err) {
+      diagnostics.log({
+        category: "bootstrap",
+        code: "BOOTSTRAP_CHANNELS_APPLY_FAILED",
+        outcome: "warn",
+        meta: { reason: describeError(err) },
+      });
+    }
   }
 
   let okCount = 0;
@@ -437,6 +501,40 @@ export async function runBootstrap(options) {
     onBootstrapStatusChange(partialCount === 0 ? "ok" : "partial");
   }
   const durationMs = now() - startedAt;
+
+  // Persist `meta.bootstrap_completed_at` so subsequent boots can tell
+  // the difference between "never bootstrapped" and "already bootstrapped
+  // at least once" without relying on `sync_cursors` row count as a
+  // proxy. The latter is unreliable: a partial pass can seed cursors
+  // for some conversations while leaving the contacts / channels tables
+  // empty (the bug this fix is targeting). We only write the meta key
+  // when at least one conversation succeeded — a wholly-failed pass is
+  // not "completed".
+  if (
+    okCount > 0 &&
+    typeof repository.getDriver === "function"
+  ) {
+    try {
+      const drv = /** @type {{ run: (sql: string, values?: unknown[]) => Promise<unknown> }} */ (
+        repository.getDriver()
+      );
+      if (drv != null && typeof drv.run === "function") {
+        await drv.run(
+          "INSERT INTO meta (key, value) VALUES ('bootstrap_completed_at', ?) " +
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          [new Date(now()).toISOString()],
+        );
+      }
+    } catch (err) {
+      diagnostics.log({
+        category: "bootstrap",
+        code: "BOOTSTRAP_META_WRITE_FAILED",
+        outcome: "warn",
+        meta: { reason: describeError(err) },
+      });
+    }
+  }
+
   diagnostics.log({
     category: "bootstrap",
     code: "BOOTSTRAP_COMPLETE",

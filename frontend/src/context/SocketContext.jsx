@@ -109,6 +109,13 @@ export const SocketProvider = ({ children }) => {
   const socket = useRef(null);
   const { user } = useAppStore();
   const [onlineUsers, setOnlineUsers] = useState([]);
+  // socketReady flips to true once `socket.current` has been assigned by
+  // the effect below. Without this flag, downstream consumers (notably
+  // OfflineProvider) read `socket.current` from context and see `null`
+  // forever offline, because refs don't trigger re-renders and no socket
+  // event fires when the device can't reach the server. Toggling state
+  // here forces a re-render that re-emits the provider value.
+  const [socketReady, setSocketReady] = useState(false);
   const {
     selectedChatData,
     selectedChatType,
@@ -151,6 +158,11 @@ export const SocketProvider = ({ children }) => {
         randomizationFactor: 0.2,
         timeout: 20000,
       });
+      // Force a re-render so the context value picks up the new
+      // `socket.current`. Without this, OfflineProvider stays parked on
+      // `socket: null` whenever the device is offline at boot — no socket
+      // event ever fires to nudge React.
+      setSocketReady(true);
 
       const onSocketConnect = () => {
         console.log("Connected to socket server");
@@ -282,12 +294,12 @@ export const SocketProvider = ({ children }) => {
         }
       });
 
-      socket.current.on("message-status-update", ({ receiverId, status }) => {
-        console.log("Message Status Update!", ` status: ${status}`);
+      socket.current.on("message-status-update", ({ senderId, receiverId, status }) => {
+        console.log("Message Status Update!", ` status: ${status} senderId=${senderId} receiverId=${receiverId}`);
         if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
           getSyncEngine().applyLiveEvent({
             kind: "message-status-update",
-            payload: { receiverId, status },
+            payload: { senderId, receiverId, status },
           });
         } else {
           updatedMessageStatus(receiverId, status);
@@ -600,6 +612,7 @@ export const SocketProvider = ({ children }) => {
 
           socket.current.disconnect();
           socket.current = null;
+          setSocketReady(false);
         }
       };
     }

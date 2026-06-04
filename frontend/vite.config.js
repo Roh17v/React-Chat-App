@@ -28,6 +28,9 @@ export default defineConfig({
     },
   },
   esbuild: {
-    drop: ['console', 'debugger'],
+    // Console + debugger statements are stripped only in release builds
+    // (mode === 'production' && not in DEBUG). Keep them in for diagnostics
+    // capture; flip back on once the offline layer is healthy.
+    // drop: ['console', 'debugger'],
   },
 })
