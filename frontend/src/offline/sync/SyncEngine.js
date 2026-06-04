@@ -62,6 +62,7 @@ import {
 } from "./bootstrap.js";
 import {
   runIncremental,
+  runUnifiedIncremental,
   INCREMENTAL_PAGE_CAP as HELPER_INCREMENTAL_PAGE_CAP,
 } from "./incremental.js";
 
@@ -105,7 +106,7 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  */
 
 /**
- * @typedef {{ id: string, type: "dm"|"channel" }} ConversationRef
+ * @typedef {{ id: string, type: "dm"|"channel", unreadCount?: number }} ConversationRef
  */
 
 /**
@@ -222,6 +223,7 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  * @property {(event: LiveEvent) => Promise<void>} applyLiveEvent
  * @property {(state: "online"|"offline"|"reconnecting") => void} onConnectivityChange
  * @property {() => SyncStatus} getStatus
+ * @property {(args: { conversationId: string, conversationType: "dm"|"channel" }) => Promise<{ ok: boolean, batchesApplied: number, messagesApplied: number }>} refreshConversation
  */
 
 // ---------------------------------------------------------------------------
@@ -416,12 +418,12 @@ export function createSyncEngine(options) {
    * as a global bootstrap failure (Req 4.3 — without contacts/channels
    * there is nothing to fetch).
    *
-   * @returns {Promise<{ conversations: ConversationRef[], contactsRaw: unknown[], channelsRaw: unknown[] }>}
+   * @returns {Promise<{ conversations: ConversationRef[], contactsRaw: any[], channelsRaw: any[] }>}
    */
   async function fetchConversationList() {
-    /** @type {unknown[]} */
+    /** @type {any[]} */
     let contactsRaw = [];
-    /** @type {unknown[]} */
+    /** @type {any[]} */
     let channelsRaw = [];
     try {
       const data = await httpGet(DM_CONTACTS_ROUTE);
@@ -452,11 +454,23 @@ export function createSyncEngine(options) {
     const conversations = [];
     for (const c of contactsRaw) {
       const id = asId(c);
-      if (id != null) conversations.push({ id, type: "dm" });
+      if (id != null) {
+        conversations.push({
+          id,
+          type: "dm",
+          unreadCount: typeof c.unreadCount === "number" ? c.unreadCount : 0,
+        });
+      }
     }
     for (const ch of channelsRaw) {
       const id = asId(ch);
-      if (id != null) conversations.push({ id, type: "channel" });
+      if (id != null) {
+        conversations.push({
+          id,
+          type: "channel",
+          unreadCount: typeof ch.unreadCount === "number" ? ch.unreadCount : 0,
+        });
+      }
     }
     return { conversations, contactsRaw, channelsRaw };
   }
@@ -565,6 +579,7 @@ export function createSyncEngine(options) {
       try {
         const lists = await fetchConversationList();
         conversations = lists.conversations;
+        conversations.sort((a, b) => (b.unreadCount || 0) - (a.unreadCount || 0));
         contactsRaw = lists.contactsRaw;
         channelsRaw = lists.channelsRaw;
       } catch (err) {
@@ -842,8 +857,115 @@ export function createSyncEngine(options) {
    * @returns {Promise<IncrementalResult>}
    */
   async function incremental() {
-    const startedAt = now();
     phase = "incremental";
+
+    // -----------------------------------------------------------------------
+    // Unified feed path (Telegram-style — one API call for all conversations)
+    // -----------------------------------------------------------------------
+    // After the first bootstrap we always have a `lastIncrementalSyncAt`
+    // cursor. When that cursor exists we use the unified endpoint:
+    //   GET /api/messages/updates?since=<cursor>
+    // which returns ALL new messages across ALL conversations in a single
+    // round trip. The per-conversation N-call path below is kept as a
+    // fallback for edge cases (no cursor, or unified endpoint unavailable).
+    //
+    // Why this fixes the chat-open UX:
+    //   N calls (old): each conversation syncs ~200ms apart — the user can
+    //     tap a chat before that conversation's call completes, sees stale
+    //     data, then sees a late scroll jank when the call finishes.
+    //   1 call (new): all conversations synced in ~200ms total — by the
+    //     time the sidebar shows unread badges (driven by subscribeContacts
+    //     firing after the SQLite write), the messages are already there.
+    if (lastIncrementalSyncAt != null) {
+      // Step 1: refresh contacts + channels so the sidebar stays in sync.
+      // We do this BEFORE the message fetch so that new conversations
+      // (a brand-new DM partner) are already known when we apply their
+      // messages below.
+      try {
+        const lists = await fetchConversationList();
+        if (typeof repository.applyContacts === "function") {
+          try {
+            const r = await repository.applyContacts(lists.contactsRaw);
+            diagnostics.log({
+              category: "incremental",
+              code: "INCREMENTAL_CONTACTS_APPLIED",
+              outcome: "ok",
+              meta: {
+                received: lists.contactsRaw.length,
+                upserted: r.upserted,
+                ignored: r.ignored,
+              },
+            });
+          } catch (err) {
+            diagnostics.log({
+              category: "incremental",
+              code: "INCREMENTAL_CONTACTS_APPLY_FAILED",
+              outcome: "warn",
+              meta: { reason: describeError(err) },
+            });
+          }
+        }
+        if (typeof repository.applyChannels === "function") {
+          try {
+            const r = await repository.applyChannels(lists.channelsRaw);
+            diagnostics.log({
+              category: "incremental",
+              code: "INCREMENTAL_CHANNELS_APPLIED",
+              outcome: "ok",
+              meta: {
+                received: lists.channelsRaw.length,
+                upserted: r.upserted,
+                ignored: r.ignored,
+              },
+            });
+          } catch (err) {
+            diagnostics.log({
+              category: "incremental",
+              code: "INCREMENTAL_CHANNELS_APPLY_FAILED",
+              outcome: "warn",
+              meta: { reason: describeError(err) },
+            });
+          }
+        }
+      } catch (err) {
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_LIST_FETCH_FAILED",
+          outcome: "warn",
+          meta: { reason: describeError(err) },
+        });
+      }
+
+      // Step 2: unified message fetch — one call for everything.
+      const result = await runUnifiedIncremental({
+        repository,
+        apiClient,
+        diagnostics,
+        buildUrl,
+        lastSyncAt: lastIncrementalSyncAt,
+        userId,
+        setLastIncrementalSyncAt,
+        pageLimit,
+        incrementalPageCap,
+        now,
+      });
+
+      phase = "ready";
+      return {
+        ok: result.ok,
+        // Shape matches the old return type so callers (tests etc.) are unaffected.
+        conversationsScanned: result.batchesApplied,
+        batchesApplied: result.batchesApplied,
+        messagesApplied: result.messagesApplied,
+        failedConversationIds: result.ok ? [] : ["unified-fetch"],
+        durationMs: result.durationMs,
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // Fallback: N-conversation loop (used on very first run, no cursor yet)
+    // -----------------------------------------------------------------------
+    const startedAt = now();
     diagnostics.log({
       category: "incremental",
       code: "INCREMENTAL_STARTED",
@@ -851,19 +973,12 @@ export function createSyncEngine(options) {
       meta: { userId },
     });
 
-    // The conversation set is the union of cursored conversations (any
-    // conversation we've seen at least one message for) and the live
-    // contact / channel lists. Cursored set alone is sufficient for the
-    // common case; pulling the lists too lets us catch up conversations
-    // that appeared while offline (e.g. a new DM partner who messaged
-    // first while we were disconnected). List fetch failures are
-    // non-fatal here — we fall back to whatever cursors we already have.
-    /** @type {Map<string, "dm"|"channel">} */
+    /** @type {Map<string, { type: "dm"|"channel", unreadCount: number }>} */
     const conversations = new Map();
     try {
       const cursors = await readCursors();
       cursors.forEach((c, id) => {
-        conversations.set(id, c.type);
+        conversations.set(id, { type: c.type, unreadCount: 0 });
       });
     } catch (err) {
       diagnostics.log({
@@ -876,10 +991,11 @@ export function createSyncEngine(options) {
     try {
       const lists = await fetchConversationList();
       for (const conv of lists.conversations) {
-        if (!conversations.has(conv.id)) conversations.set(conv.id, conv.type);
+        conversations.set(conv.id, {
+          type: conv.type,
+          unreadCount: conv.unreadCount || 0,
+        });
       }
-      // Refresh contacts + channels from the same payload so the local
-      // sidebar tables stay in sync with the server (Req 1.1, 4.3).
       if (typeof repository.applyContacts === "function") {
         try {
           const r = await repository.applyContacts(lists.contactsRaw);
@@ -938,14 +1054,16 @@ export function createSyncEngine(options) {
     let messagesApplied = 0;
     /** @type {string[]} */
     const failedIds = [];
-    /** @type {Array<[string, "dm"|"channel"]>} */
+    /** @type {Array<{ id: string, type: "dm"|"channel", unreadCount: number }>} */
     const ordered = [];
-    conversations.forEach((type, id) => {
-      ordered.push([id, type]);
+    conversations.forEach((info, id) => {
+      ordered.push({ id, type: info.type, unreadCount: info.unreadCount });
     });
+    ordered.sort((a, b) => b.unreadCount - a.unreadCount);
+
     for (const entry of ordered) {
-      const id = entry[0];
-      const type = entry[1];
+      const id = entry.id;
+      const type = entry.type;
       scanned += 1;
       const result = await incrementalConversation({ id, type });
       batchesApplied += result.batchesApplied;
@@ -955,9 +1073,6 @@ export function createSyncEngine(options) {
 
     const completedAtIso = new Date(now()).toISOString();
     if (scanned > 0 && failedIds.length < scanned) {
-      // Persist the timestamp when at least one conversation made
-      // progress. A pass where every conversation failed is still
-      // recorded as `failed` and does not advance the meta key.
       await setLastIncrementalSyncAt(completedAtIso);
     }
 

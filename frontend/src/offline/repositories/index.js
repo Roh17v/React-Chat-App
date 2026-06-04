@@ -215,6 +215,7 @@ const ACTIVE_OUTBOUND_STATUSES = ["queued", "in_flight", "failed"];
  * @property {<T = unknown>(sql: string, values?: unknown[]) => Promise<T[]>} query
  * @property {<T>(work: (tx: RepositoryDriver) => Promise<T>) => Promise<T>} withTransaction
  * @property {() => boolean} [isOpen]
+ * @property {(dbName: string) => Promise<void>} [deleteDatabase]
  */
 
 /**
@@ -882,6 +883,12 @@ export function createRepository(options = {}) {
     const startedAt = Date.now();
     try {
       await wipeInternal();
+      if (typeof driver.close === "function") {
+        await driver.close();
+      }
+      if (typeof driver.deleteDatabase === "function") {
+        await driver.deleteDatabase(DB_NAME);
+      }
       userId = null;
       ready = false;
       diagnostics.log({

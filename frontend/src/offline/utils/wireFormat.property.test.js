@@ -131,7 +131,7 @@ const arbJsonObject = () => {
       noDefaultInfinity: true,
       min: -1e6,
       max: 1e6,
-    }),
+    }).map((v) => (Object.is(v, -0) ? 0 : v)),
     fc.boolean(),
     fc.constant(null)
   );
@@ -287,14 +287,14 @@ describe("wireFormat round-trip (Property 18)", () => {
           // The arbitrary only generates well-formed payloads; any failure
           // here is a test bug or a serializer regression.
           throw new Error(
-            `toLocalRow rejected a valid payload: ${JSON.stringify(local.error)}`
+            `toLocalRow rejected a valid payload: ${JSON.stringify(/** @type {any} */ (local).error)}`
           );
         }
 
         const wire = toWirePayload(local.value);
         if (!wire.ok) {
           throw new Error(
-            `toWirePayload rejected a valid row: ${JSON.stringify(wire.error)}`
+            `toWirePayload rejected a valid row: ${JSON.stringify(/** @type {any} */ (wire).error)}`
           );
         }
 

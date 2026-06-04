@@ -24,6 +24,10 @@ export const PRIVATE_CONTACT_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/private`;
 
 export const CHANNEL_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/channel`;
 
+// Unified incremental sync feed — fetches all new messages across all
+// conversations in a single round trip (replaces N per-conversation calls).
+export const SYNC_UPDATES_ROUTE = `${MESSAGES_ROUTE}/updates`;
+
 export const DM_CONTACTS_ROUTE = `${USER_ROUTES}/dm-contacts`;
 
 export const REGISTER_PUSH_TOKEN_ROUTE = `${HOST}${USER_ROUTES}/push-token`;

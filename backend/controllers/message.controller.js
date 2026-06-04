@@ -4,6 +4,7 @@ import { Channel } from "../models/channel.model.js";
 import { uploadToStorage } from "../middlewares/upload.middleware.js";
 import { io, userSocketMap } from "../socket.js";
 
+
 // Limits for paginated message reads (Req 13.4). When `since` is supplied the
 // client paginates by advancing the cursor and we cap the page size at 200; when
 // `since` is omitted we preserve the legacy page+limit behavior.
@@ -262,3 +263,93 @@ export const deleteForEveryone = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * GET /api/messages/updates?since=<ISO_TIMESTAMP>&limit=<N>
+ *
+ * Unified incremental sync feed — returns ALL new messages for the
+ * authenticated user across every conversation (DMs + channels) in a
+ * single query. Replaces the per-conversation loop the client used to
+ * run, reducing N network round-trips to one.
+ *
+ * The client groups the flat array by conversationId and calls
+ * `repository.applyServerMessages()` per group — the repository layer
+ * (SQLite schema, conflict resolver, cursor advancement) is unchanged.
+ *
+ * Query design:
+ *   - DMs:      sender = userId  OR  receiver = userId
+ *   - Channels: channelId ∈ channels where userId is member OR admin
+ *   - Filter:   createdAt > since  AND  deletedFor ∉ userId
+ *   - Sort:     createdAt ASC  (matches what applyServerMessages expects)
+ *   - Limit:    default 500, max 1 000 — hasMore signals pagination need
+ *
+ * @param {import("express").Request} req
+ * @param {import("express").Response} res
+ * @param {import("express").NextFunction} next
+ */
+export const getUnifiedUpdates = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { since } = req.query;
+    const rawLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0
+      ? Math.min(rawLimit, 1000)
+      : 500;
+
+    // `since` is required — the client always has lastIncrementalSyncAt
+    // from a prior bootstrap or incremental pass.
+    if (!since || since === "") {
+      return next(createError(400, "`since` query parameter is required."));
+    }
+    const sinceDate = new Date(since);
+    if (Number.isNaN(sinceDate.getTime())) {
+      return next(createError(400, "Invalid `since` timestamp."));
+    }
+
+    // 1. Resolve channels the user belongs to (member or admin).
+    //    A single lightweight query — only `_id` is needed.
+    const userChannels = await Channel.find({
+      $or: [{ members: userId }, { admin: userId }],
+    })
+      .select("_id")
+      .lean();
+    const channelIds = userChannels.map((c) => c._id);
+
+    // 2. Single cross-conversation query.
+    //    MongoDB evaluates each branch of $or with its own index:
+    //    - sender branch   → { sender: 1, createdAt: -1 }  (already exists)
+    //    - receiver branch → { receiver: 1, createdAt: 1 } (added in model)
+    //    - channelId branch→ { channelId: 1, createdAt: -1 } (already exists)
+    const messages = await Message.find({
+      createdAt: { $gt: sinceDate },
+      deletedFor: { $ne: userId },
+      $or: [
+        { sender: userId },
+        { receiver: userId },
+        ...(channelIds.length > 0 ? [{ channelId: { $in: channelIds } }] : []),
+      ],
+    })
+      .sort({ createdAt: 1 })   // ascending — what applyServerMessages expects
+      .limit(limit)
+      .populate("sender", "_id email color firstName lastName image")
+      .lean();
+
+    const sanitized = messages.map(sanitizeDeleted);
+
+    // `syncedUpTo` lets the client advance `since` on the next page
+    // without re-reading its own state.
+    const syncedUpTo =
+      sanitized.length > 0
+        ? sanitized[sanitized.length - 1].createdAt
+        : since;
+
+    return res.status(200).json({
+      messages: sanitized,
+      hasMore: messages.length === limit,
+      syncedUpTo,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

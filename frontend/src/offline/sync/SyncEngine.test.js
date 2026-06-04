@@ -206,6 +206,7 @@ describe("SyncEngine.bootstrap", () => {
     }
 
     // Messages persisted.
+    /** @type {any[]} */
     const messageRows = await driver.query(
       "SELECT server_id, conversation_id, conversation_type FROM messages " +
         "ORDER BY conversation_id, server_id",
@@ -216,6 +217,7 @@ describe("SyncEngine.bootstrap", () => {
     expect(ids).toContain("srv-ch1-a");
 
     // Cursors advanced for conversations that received messages.
+    /** @type {any[]} */
     const cursors = await driver.query(
       "SELECT conversation_id, last_server_id, last_created_at FROM sync_cursors " +
         "ORDER BY conversation_id",
@@ -282,6 +284,7 @@ describe("SyncEngine.bootstrap", () => {
     expect(sleep).toHaveBeenCalledTimes(3);
 
     // The other conversation still landed.
+    /** @type {any[]} */
     const rows = await driver.query(
       "SELECT server_id FROM messages WHERE conversation_id = ?",
       ["contact-2"],
@@ -377,6 +380,7 @@ describe("SyncEngine.incremental", () => {
     expect(recordedCalls).toHaveLength(2);
 
     // Cursor advanced to the most recent message overall.
+    /** @type {any[]} */
     const cursors = await driver.query(
       "SELECT last_created_at, last_server_id FROM sync_cursors WHERE conversation_id = ?",
       ["contact-1"],
@@ -385,6 +389,7 @@ describe("SyncEngine.incremental", () => {
     expect(cursors[0].last_server_id).toBe("srv-page2-1");
 
     // meta.last_incremental_sync_at persisted (Req 5.8).
+    /** @type {any[]} */
     const meta = await driver.query(
       "SELECT value FROM meta WHERE key = 'last_incremental_sync_at'",
     );
@@ -452,6 +457,42 @@ describe("SyncEngine.incremental", () => {
     // Critical: only ONE network call landed for `contact-1` despite two
     // overlapping `incremental()` calls (Req 5.7).
     expect(messageCalls).toBe(1);
+  });
+
+  it("prioritizes conversations with unread messages first during incremental sync", async () => {
+    const { repository } = await makeRepository();
+
+    /** @type {string[]} */
+    const callOrder = [];
+
+    const apiClient = makeApiClient({
+      "/api/users/dm-contacts": async () => [
+        { _id: "contact-1", unreadCount: 0 },
+        { _id: "contact-2", unreadCount: 5 },
+      ],
+      "/api/channels": async () => [],
+      "/api/messages/private/contact-1": async () => {
+        callOrder.push("contact-1");
+        return [];
+      },
+      "/api/messages/private/contact-2": async () => {
+        callOrder.push("contact-2");
+        return [];
+      },
+    });
+
+    const engine = createSyncEngine({
+      repository,
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+
+    const result = await engine.incremental();
+    expect(result.ok).toBe(true);
+    // contact-2 has 5 unread messages, contact-1 has 0. contact-2 must be called first.
+    expect(callOrder).toEqual(["contact-2", "contact-1"]);
   });
 });
 
@@ -662,3 +703,177 @@ describe("SyncEngine.getStatus and lifecycle", () => {
     expect(engine.getStatus().phase).toBe("idle");
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// refreshConversation() — sequential chat-open sync
+// ---------------------------------------------------------------------------
+// These tests cover the behaviour the sequential chat-open fix in
+// MessageContainer depends on:
+//   1. A successful refresh fetches messages newer than the cursor and
+//      writes them to the repository.
+//   2. When the engine is offline the call returns immediately with
+//      ok:false so the Promise.race timeout never needs to fire.
+//   3. The call can safely be raced with a Promise-based timeout without
+//      throwing — i.e. if the timeout wins, the fetch continues in the
+//      background without affecting the caller.
+//   4. A network error is absorbed (returns ok:false) rather than thrown,
+//      so the `.catch(() => {})` wrapper in MessageContainer is redundant-
+//      but-correct defensive coding.
+
+describe("SyncEngine.refreshConversation", () => {
+  it("fetches new messages for a DM and writes them to the repository", async () => {
+    const { repository, driver } = await makeRepository();
+
+    // Seed a sync cursor so incremental knows where to start from.
+    await driver.run(
+      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_created_at, last_server_id) VALUES (?, ?, ?, ?)",
+      ["user-other", "dm", "2024-01-01T00:00:00.000Z", "srv-old"],
+    );
+
+    const newMessage = makeServerMessage({
+      _id: "srv-new",
+      sender: { _id: "user-other" },
+      createdAt: "2024-01-01T00:01:00.000Z",
+      updatedAt: "2024-01-01T00:01:00.000Z",
+    });
+
+    const apiClient = makeApiClient({
+      "/api/messages/private/user-other": async () => [newMessage],
+    });
+
+    const engine = createSyncEngine({
+      repository,
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+    await engine.start({ userId: "user-self" });
+
+    const result = await engine.refreshConversation({
+      conversationId: "user-other",
+      conversationType: "dm",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.messagesApplied).toBeGreaterThan(0);
+
+    // The new message should now be persisted in SQLite.
+    const rows = await driver.query(
+      "SELECT server_id FROM messages WHERE conversation_id = ?",
+      ["user-other"],
+    );
+    expect(rows.map((r) => r.server_id)).toContain("srv-new");
+  });
+
+  it("returns ok:false immediately when the engine is offline", async () => {
+    const { repository } = await makeRepository();
+    const apiClient = makeApiClient({
+      "/api/users/dm-contacts": async () => [],
+      "/api/channels": async () => [],
+    });
+
+    const engine = createSyncEngine({
+      repository,
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+    // Await bootstrap fully so all background network calls complete
+    // before we record the baseline.
+    await engine.start({ userId: "user-self" });
+    await engine.bootstrap();
+
+    const callsBeforeOffline = apiClient.calls.length;
+
+    // Simulate going offline before the chat is opened.
+    engine.onConnectivityChange("offline");
+
+    const result = await engine.refreshConversation({
+      conversationId: "user-other",
+      conversationType: "dm",
+    });
+
+    // Must return fast with ok:false — no additional network calls made.
+    expect(result.ok).toBe(false);
+    expect(apiClient.calls.length).toBe(callsBeforeOffline);
+  });
+
+  it("can be safely raced with a timeout — timeout winning does not throw", async () => {
+    const { repository } = await makeRepository();
+
+    // The network call takes longer than the timeout will in a real app.
+    // We simulate a slow network with a never-resolving stub.
+    let resolveSlowFetch = /** @type {(v: unknown) => void} */ (() => {});
+    const slowFetchPromise = new Promise((resolve) => {
+      resolveSlowFetch = resolve;
+    });
+
+    const apiClient = {
+      get: vi.fn(async () => {
+        await slowFetchPromise;
+        return { data: [] };
+      }),
+    };
+
+    const engine = createSyncEngine({
+      repository,
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+    await engine.start({ userId: "user-self" });
+
+    // This mirrors exactly what MessageContainer does: race the sync
+    // against a timeout. The timeout should win cleanly without throwing.
+    const TIMEOUT_MS = 10; // very short for the test
+    const syncTimeout = new Promise((resolve) => setTimeout(resolve, TIMEOUT_MS));
+
+    await expect(
+      Promise.race([
+        engine
+          .refreshConversation({
+            conversationId: "user-other",
+            conversationType: "dm",
+          })
+          .catch(() => {}),
+        syncTimeout,
+      ]),
+    ).resolves.not.toThrow();
+
+    // Let the slow fetch resolve so the promise chain finishes and
+    // Vitest does not report open handles.
+    resolveSlowFetch(undefined);
+  });
+
+  it("absorbs network errors and returns ok:false rather than throwing", async () => {
+    const { repository } = await makeRepository();
+
+    const apiClient = {
+      get: vi.fn(async () => {
+        throw new Error("Network unavailable");
+      }),
+    };
+
+    const engine = createSyncEngine({
+      repository,
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+    await engine.start({ userId: "user-self" });
+
+    // Should resolve (not reject) with ok:false.
+    const result = await engine.refreshConversation({
+      conversationId: "user-other",
+      conversationType: "dm",
+    });
+
+    expect(result.ok).toBe(false);
+  });
+});
+

@@ -126,6 +126,7 @@ const PLUGIN_CONNECTION_VERSION = 1;
  * @property {<T = unknown>(sql: string, values?: unknown[]) => Promise<T[]>} query
  * @property {<T>(work: (tx: SqliteDriver) => Promise<T>) => Promise<T>} withTransaction
  * @property {() => boolean} isOpen
+ * @property {(dbName: string) => Promise<void>} deleteDatabase
  */
 
 /**
@@ -139,6 +140,7 @@ const PLUGIN_CONNECTION_VERSION = 1;
  * @property {(database: string, readonly: boolean) => Promise<SqliteDbConnectionLike>} retrieveConnection
  * @property {(database: string, encrypted: boolean, mode: string, version: number, readonly: boolean) => Promise<SqliteDbConnectionLike>} createConnection
  * @property {(database: string, readonly: boolean) => Promise<unknown>} closeConnection
+ * @property {(database: string, readonly: boolean) => Promise<unknown>} deleteDatabase
  */
 
 /**
@@ -447,6 +449,32 @@ export function createSqliteDriver(options = {}) {
     return conn != null;
   }
 
+  /**
+   * Delete the database file from disk. The connection MUST be closed first.
+   *
+   * @param {string} dbName
+   * @returns {Promise<void>}
+   */
+  async function deleteDatabase(dbName) {
+    if (!isNativePlatform()) return;
+    try {
+      await sqlite.deleteDatabase(dbName, false);
+      diagnostics.log({
+        category: "boot",
+        code: "SQLITE_DELETED",
+        outcome: "ok",
+        meta: { dbName },
+      });
+    } catch (err) {
+      diagnostics.log({
+        category: "boot",
+        code: "SQLITE_DELETE_FAILED",
+        outcome: "error",
+        meta: { dbName, reason: describeError(err) },
+      });
+    }
+  }
+
   /** @type {SqliteDriver} */
   const self = {
     open,
@@ -456,6 +484,7 @@ export function createSqliteDriver(options = {}) {
     query,
     withTransaction,
     isOpen,
+    deleteDatabase,
   };
   return self;
 }

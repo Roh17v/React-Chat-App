@@ -46,6 +46,7 @@ import Database from "better-sqlite3";
  * @property {(sql: string, values?: unknown[]) => Promise<{ changes: number, lastId?: number }>} run
  * @property {<T = unknown>(sql: string, values?: unknown[]) => Promise<T[]>} query
  * @property {<T>(work: (tx: TestSqliteDriver) => Promise<T>) => Promise<T>} withTransaction
+ * @property {(dbName: string) => Promise<void>} deleteDatabase
  * @property {() => import("better-sqlite3").Database} raw Returns the underlying
  *   better-sqlite3 instance. Tests can use this for assertions / setup that go
  *   beyond the driver surface.
@@ -188,6 +189,10 @@ export function createTestSqliteDriver(options = {}) {
     }
   }
 
+  async function deleteDatabase(dbName) {
+    // No-op for the test driver since it is in-memory or file-bound.
+  }
+
   /** @type {TestSqliteDriver} */
   const tx = {
     open,
@@ -196,6 +201,7 @@ export function createTestSqliteDriver(options = {}) {
     run,
     query,
     withTransaction,
+    deleteDatabase,
     raw: () => db,
     // Marker used by the Migrator to detect the synchronous better-sqlite3
     // driver and use the transactional migration path (vs. the statement-by-

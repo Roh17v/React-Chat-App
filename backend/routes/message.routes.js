@@ -5,6 +5,7 @@ import {
   uploadFile,
   deleteForMe,
   deleteForEveryone,
+  getUnifiedUpdates,
 } from "../controllers/message.controller.js";
 import { validateToken } from "../middlewares/auth.js";
 import upload from "../middlewares/upload.middleware.js";
@@ -12,8 +13,13 @@ import { ensureUsersCanCommunicate } from "../middlewares/permission.js";
 
 const messageRouter = Router();
 
+// Unified incremental-sync feed — must be registered BEFORE the
+// parameterised `:contactId` route so Express does not swallow
+// the literal segment "updates" as a contact id.
+messageRouter.get("/updates", validateToken, getUnifiedUpdates);
 messageRouter.get("/private/:contactId", validateToken, ensureUsersCanCommunicate, getMessages);
 messageRouter.get("/channel/:channelId", validateToken, getChannelMessages);
+
 messageRouter.post(
   "/upload-file",
   validateToken,

@@ -36,6 +36,7 @@
 import {
   PRIVATE_CONTACT_MESSAGES_ROUTE,
   CHANNEL_MESSAGES_ROUTE,
+  SYNC_UPDATES_ROUTE,
 } from "../../utils/constants.js";
 
 import { describeError } from "./syncHelpers.js";
@@ -540,3 +541,272 @@ export async function runIncremental(options) {
     durationMs,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Unified incremental pass (Telegram-style single-endpoint sync)
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} UnifiedIncrementalOptions
+ * @property {IncrementalRepository} repository
+ * @property {IncrementalApiClient} apiClient
+ * @property {IncrementalDiagnostics} diagnostics
+ * @property {(pathOrUrl: string) => string} buildUrl
+ * @property {string} lastSyncAt          ISO timestamp — the `since` cursor
+ * @property {string | null} userId       Needed to derive DM conversationId
+ * @property {(isoTimestamp: string) => Promise<void>} setLastIncrementalSyncAt
+ * @property {number} [pageLimit]         Max messages per page (default 500)
+ * @property {number} [incrementalPageCap] Max pages (default 50)
+ * @property {() => number} [now]
+ */
+
+/**
+ * @typedef {Object} UnifiedIncrementalResult
+ * @property {boolean} ok
+ * @property {number} messagesApplied
+ * @property {number} batchesApplied       One batch per conversation group
+ * @property {number} pagesConsumed
+ * @property {number} durationMs
+ */
+
+/**
+ * Run a single incremental pass using the unified updates endpoint.
+ *
+ * Instead of looping through every conversation and making N API calls,
+ * this function makes ONE call to `GET /api/messages/updates?since=...`
+ * and receives all new messages across all conversations in a single
+ * response. It then groups them by `conversationId` and calls
+ * `repository.applyServerMessages()` per group — the same write path the
+ * per-conversation runner uses, so the SQLite schema and conflict
+ * resolution logic are completely unchanged.
+ *
+ * Pagination: if the server returns `hasMore: true` (hit the 500-message
+ * limit) the client advances `since` to `syncedUpTo` and fetches the
+ * next page — capped at `incrementalPageCap` pages to prevent runaway
+ * loops on a misbehaving server.
+ *
+ * Conversation ID derivation for DMs:
+ *   The "conversation" with a DM peer is always identified by the peer's
+ *   userId. For a message the local user SENT:  peer = receiver.
+ *   For a message the local user RECEIVED:      peer = sender._id.
+ *   Channel messages use `channelId` directly.
+ *
+ * @param {UnifiedIncrementalOptions} options
+ * @returns {Promise<UnifiedIncrementalResult>}
+ */
+export async function runUnifiedIncremental(options) {
+  if (options == null || options.repository == null) {
+    throw new Error("runUnifiedIncremental: repository is required");
+  }
+  if (options.apiClient == null || typeof options.apiClient.get !== "function") {
+    throw new Error("runUnifiedIncremental: apiClient.get is required");
+  }
+  if (typeof options.buildUrl !== "function") {
+    throw new Error("runUnifiedIncremental: buildUrl is required");
+  }
+  if (typeof options.lastSyncAt !== "string" || options.lastSyncAt.length === 0) {
+    throw new Error("runUnifiedIncremental: lastSyncAt (ISO string) is required");
+  }
+  if (typeof options.setLastIncrementalSyncAt !== "function") {
+    throw new Error("runUnifiedIncremental: setLastIncrementalSyncAt is required");
+  }
+
+  const repository = options.repository;
+  const diagnostics = options.diagnostics;
+  const httpGet = makeHttpGet(options.apiClient, options.buildUrl);
+  const now = typeof options.now === "function" ? options.now : () => Date.now();
+  const pageLimit =
+    typeof options.pageLimit === "number" && options.pageLimit > 0
+      ? Math.floor(options.pageLimit)
+      : 500;
+  const pageCap =
+    typeof options.incrementalPageCap === "number" && options.incrementalPageCap > 0
+      ? Math.floor(options.incrementalPageCap)
+      : INCREMENTAL_PAGE_CAP;
+  const userId = options.userId ?? null;
+
+  const startedAt = now();
+  let currentSince = options.lastSyncAt;
+  let pagesConsumed = 0;
+  let messagesApplied = 0;
+  let batchesApplied = 0;
+
+  diagnostics.log({
+    category: "incremental",
+    code: "UNIFIED_INCREMENTAL_STARTED",
+    outcome: "ok",
+    meta: { since: currentSince },
+  });
+
+  try {
+    while (pagesConsumed < pageCap) {
+      pagesConsumed += 1;
+      const pageStartedAt = now();
+
+      /** @type {{ messages: unknown[], hasMore: boolean, syncedUpTo: string } | null} */
+      let data = null;
+      try {
+        data = await httpGet(SYNC_UPDATES_ROUTE, {
+          since: currentSince,
+          limit: pageLimit,
+        });
+      } catch (err) {
+        diagnostics.log({
+          category: "incremental",
+          code: "UNIFIED_INCREMENTAL_FETCH_FAILED",
+          outcome: "error",
+          durationMs: now() - pageStartedAt,
+          meta: { since: currentSince, reason: describeError(err) },
+        });
+        return {
+          ok: false,
+          messagesApplied,
+          batchesApplied,
+          pagesConsumed,
+          durationMs: now() - startedAt,
+        };
+      }
+
+      // Empty or malformed response — nothing new, we're caught up.
+      if (
+        data == null ||
+        !Array.isArray(data.messages) ||
+        data.messages.length === 0
+      ) {
+        break;
+      }
+
+      const messages = data.messages;
+
+      // Group the flat array by conversationId.
+      // For DMs the conversation peer is always the OTHER user:
+      //   - message sent by local user   → receiver is the peer
+      //   - message received by local user → sender._id is the peer
+      // For channel messages the peer is the channelId itself.
+      /** @type {Map<string, { type: "dm"|"channel", messages: unknown[] }>} */
+      const byConversation = new Map();
+
+      for (const msg of messages) {
+        const raw = /** @type {any} */ (msg);
+        const isChannel =
+          raw.channelId != null && String(raw.channelId).length > 0;
+
+        let conversationId;
+        /** @type {"dm"|"channel"} */
+        let conversationType;
+
+        if (isChannel) {
+          conversationId = String(raw.channelId);
+          conversationType = "channel";
+        } else {
+          // Derive the peer: whoever is NOT the local user.
+          const senderId =
+            raw.sender != null && typeof raw.sender === "object"
+              ? String(raw.sender._id ?? raw.sender)
+              : String(raw.sender ?? "");
+          const receiverId =
+            raw.receiver != null && typeof raw.receiver === "object"
+              ? String(raw.receiver._id ?? raw.receiver)
+              : String(raw.receiver ?? "");
+
+          // If userId is available use it for accurate derivation;
+          // otherwise fall back to assuming sender is local user.
+          if (userId != null && senderId === String(userId)) {
+            conversationId = receiverId;
+          } else if (userId != null && receiverId === String(userId)) {
+            conversationId = senderId;
+          } else {
+            // Fallback (userId unknown): use receiverId as the peer
+            // since the API already filtered to messages relevant to us.
+            conversationId = receiverId || senderId;
+          }
+          conversationType = "dm";
+        }
+
+        if (!byConversation.has(conversationId)) {
+          byConversation.set(conversationId, { type: conversationType, messages: [] });
+        }
+        byConversation.get(conversationId)?.messages.push(msg);
+      }
+
+      // Apply each group — same write path as the per-conversation runner.
+      for (const [conversationId, { type, messages: convMessages }] of byConversation) {
+        try {
+          await repository.applyServerMessages({
+            conversationId,
+            conversationType: type,
+            messages: convMessages,
+            sourceCursor: { lastSyncedAt: new Date(now()).toISOString() },
+          });
+          batchesApplied += 1;
+          messagesApplied += convMessages.length;
+        } catch (err) {
+          diagnostics.log({
+            category: "incremental",
+            code: "UNIFIED_INCREMENTAL_APPLY_FAILED",
+            outcome: "warn",
+            durationMs: now() - pageStartedAt,
+            meta: { conversationId, reason: describeError(err) },
+          });
+          // Non-fatal: log and continue with the next conversation group.
+        }
+      }
+
+      diagnostics.log({
+        category: "incremental",
+        code: "UNIFIED_INCREMENTAL_PAGE_OK",
+        outcome: "ok",
+        durationMs: now() - pageStartedAt,
+        meta: {
+          page: pagesConsumed,
+          messagesInPage: messages.length,
+          conversationsInPage: byConversation.size,
+          hasMore: data.hasMore,
+        },
+      });
+
+      // No more pages — we're fully caught up.
+      if (!data.hasMore) break;
+
+      // Advance the cursor for the next page.
+      if (typeof data.syncedUpTo === "string" && data.syncedUpTo.length > 0) {
+        currentSince = data.syncedUpTo;
+      } else {
+        // Defensive: if syncedUpTo is missing, stop paging to avoid
+        // re-fetching the same page in a loop.
+        break;
+      }
+    }
+
+    // Persist the cursor so the next app-open resumes from here.
+    const completedAt = new Date(now()).toISOString();
+    await options.setLastIncrementalSyncAt(completedAt);
+
+    const durationMs = now() - startedAt;
+    diagnostics.log({
+      category: "incremental",
+      code: "UNIFIED_INCREMENTAL_COMPLETE",
+      outcome: "ok",
+      durationMs,
+      meta: { messagesApplied, batchesApplied, pagesConsumed },
+    });
+
+    return { ok: true, messagesApplied, batchesApplied, pagesConsumed, durationMs };
+  } catch (err) {
+    diagnostics.log({
+      category: "incremental",
+      code: "UNIFIED_INCREMENTAL_UNHANDLED",
+      outcome: "error",
+      durationMs: now() - startedAt,
+      meta: { reason: describeError(err) },
+    });
+    return {
+      ok: false,
+      messagesApplied,
+      batchesApplied,
+      pagesConsumed,
+      durationMs: now() - startedAt,
+    };
+  }
+}
+
