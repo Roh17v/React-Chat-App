@@ -6,6 +6,7 @@ import {
   PRIVATE_CONTACT_MESSAGES_ROUTE,
   DELETE_FOR_ME_ROUTE,
   DELETE_FOR_EVERYONE_ROUTE,
+  MARK_READ_ROUTE,
 } from "@/utils/constants";
 import moment from "moment";
 import React, { useEffect, useRef, useState, useCallback } from "react";
@@ -23,6 +24,7 @@ import { Capacitor } from "@capacitor/core";
 import { toast } from "sonner";
 import { getRepository } from "@/offline";
 import { getSyncEngine } from "@/offline/sync/SyncEngine.js";
+import { getOutboundQueue } from "@/offline/sync/OutboundQueue.js";
 
 /**
  * Defensive accessor for the SyncEngine singleton. The factory throws when
@@ -573,6 +575,18 @@ const MessageContainer = () => {
       // conversation is treated as "new" and triggers the initial-load
       // scroll-to-bottom branch.
       lastTailIdRef.current = null;
+      // Treat every chat-open as a fresh initial-load until the user
+      // actively scrolls up. Without this, the auto-scroll effect can
+      // race the repository's `subscribeMessages` listener: the first
+      // emit lands after `isInitialLoad` was flipped to false (by the
+      // old 100ms timeout) and the new tail id matches whatever
+      // getMessages(1) just wrote, so `tailChanged === false` and no
+      // scroll happens — the user sees messages but not pinned to the
+      // bottom. `wasNearBottomRef` is reset too because it carries
+      // over from the previous chat (if the user scrolled up there,
+      // it was false, which would suppress scroll-on-arrival here).
+      isInitialLoad.current = true;
+      wasNearBottomRef.current = true;
       if (selectedChatType === "contact") {
         setPage(1);
         setHasMore(true);
@@ -598,12 +612,35 @@ const MessageContainer = () => {
               });
           }
         }
+        // Mark-read is sent through THREE channels for durability:
+        //   1. Socket emit — instant, but lost if the socket is mid-
+        //      reconnect when we fire.
+        //   2. REST POST — durable, succeeds even if socket is dead.
+        //   3. OutboundQueue (native only) — survives offline + app
+        //      close, retries automatically when connectivity returns.
+        // Without all three, the unread count gets stuck at the
+        // previous value because the server never learned the user
+        // opened the chat.
         if (socket && user?.id) {
           socket.emit("confirm-read", {
             userId: user.id,
             senderId: selectedChatId,
           });
         }
+        // Fire the REST call regardless of platform. Errors are
+        // swallowed: the queue (on native) or a future chat-open will
+        // retry. Using a relative path so axios picks up the configured
+        // baseURL / withCredentials cookie.
+        axios
+          .post(
+            `${HOST}${MARK_READ_ROUTE}/${selectedChatId}`,
+            {},
+            { withCredentials: true, timeout: 10_000 },
+          )
+          .catch(() => {
+            // Network/HTTP failure — fall through to the queue (native)
+            // or accept that the next /dm-contacts will resync.
+          });
         if (Capacitor.isNativePlatform()) {
           const repo = getRepository();
           if (repo.isReady()) {
@@ -616,6 +653,28 @@ const MessageContainer = () => {
                 fromUserId: selectedChatId,
                 status: "read",
               }).catch(() => {});
+            }
+            // Durable queue entry — drains via socket once connected.
+            // Idempotent: server-side mark-read is a no-op if already
+            // read, so a double-fire (socket + queue) is harmless.
+            try {
+              const queue = getOutboundQueue();
+              if (queue && typeof queue.enqueue === "function" && user?.id) {
+                queue
+                  .enqueue({
+                    kind: "mark_read",
+                    conversationId: selectedChatId,
+                    conversationType: "dm",
+                    payload: {
+                      senderId: selectedChatId,
+                      userId: user.id,
+                    },
+                  })
+                  .catch(() => {});
+              }
+            } catch {
+              // OutboundQueue not initialised yet — fine, the live
+              // socket emit + REST call above already covered it.
             }
           }
         }
@@ -1607,15 +1666,24 @@ const MessageContainer = () => {
       lastMessage?.sender === user?.id ||
       lastMessage?.sender?._id === user?.id;
 
-    // Initial load - instant scroll to bottom
+    // Initial-load branch: while `isInitialLoad.current === true`, EVERY
+    // commit pins the view to the bottom. This stays true until the
+    // user actively scrolls up (the `trackPosition` listener flips it
+    // off the moment the user moves more than 150px from the bottom).
+    //
+    // Why every commit, not just the first: the chat-open path sets
+    // messages multiple times in quick succession — getMessages(1)
+    // commits the network response, then `subscribeMessages` fires
+    // with the local-DB snapshot, then the SyncEngine's incremental
+    // refresh may commit fresh rows. Any of those can land "after"
+    // the initial paint, and without re-pinning the user would see
+    // the chat scroll up unexpectedly. Once the user scrolls (real
+    // intent), we stop fighting them.
     if (isInitialLoad.current) {
       scrollToBottom(false);
-      setTimeout(() => {
-        isInitialLoad.current = false;
-        lastMessageCountRef.current = currentMessageCount;
-        lastTailIdRef.current = lastMessageId;
-        wasNearBottomRef.current = true;
-      }, 100);
+      lastMessageCountRef.current = currentMessageCount;
+      lastTailIdRef.current = lastMessageId;
+      wasNearBottomRef.current = true;
       return;
     }
 
@@ -1648,7 +1716,15 @@ const MessageContainer = () => {
     if (!container) return;
 
     const trackPosition = () => {
-      wasNearBottomRef.current = isNearBottom();
+      const nearBottom = isNearBottom();
+      wasNearBottomRef.current = nearBottom;
+      // The user actively scrolled away from the bottom — we're past
+      // the "initial load" phase, so subsequent message commits should
+      // respect the user's scroll position instead of jumping back to
+      // the bottom unconditionally.
+      if (!nearBottom && isInitialLoad.current) {
+        isInitialLoad.current = false;
+      }
     };
 
     container.addEventListener("scroll", trackPosition, { passive: true });

@@ -390,6 +390,27 @@ describe("repository.resetUnreadCount", () => {
         "VALUES ('user-1', 'hey', '2024-01-01T00:00:00.000Z', 5, 'ready', ?)",
       [new Date().toISOString()]
     );
+    // getContacts now derives unread_count from the messages table, so
+    // we seed five unread DMs from `user-1` to make the "before" assertion
+    // observable. Without these rows, the derived count would be 0
+    // regardless of the column value.
+    for (let i = 0; i < 5; i += 1) {
+      await driver.run(
+        "INSERT INTO messages (id, server_id, client_temp_id, conversation_id, conversation_type, " +
+          "  sender_id, receiver_id, channel_id, message_type, content, file_url, file_name, " +
+          "  file_metadata_json, reply_to_json, status, deleted_for_everyone, deleted_for_me, " +
+          "  deleted_at, created_at, updated_at, sync_state, queue_seq, local_file_path) " +
+          "VALUES (?, ?, NULL, 'user-1', 'dm', 'user-1', 'user-self', NULL, 'text', ?, NULL, NULL, " +
+          "  '{}', NULL, 'delivered', 0, 0, NULL, ?, ?, 'confirmed', NULL, NULL)",
+        [
+          `msg-${i}`,
+          `srv-${i}`,
+          `hello ${i}`,
+          `2024-01-01T00:0${i}:00.000Z`,
+          `2024-01-01T00:0${i}:00.000Z`,
+        ]
+      );
+    }
 
     const contactsBefore = await ctx.repository.getContacts();
     const contactBefore = contactsBefore.find((c) => c._id === "user-1");

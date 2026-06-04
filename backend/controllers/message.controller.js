@@ -188,6 +188,76 @@ export const deleteForMe = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/messages/mark-read/:contactId
+ *
+ * Durable counterpart of the `confirm-read` socket event. Flips every
+ * unread DM the authenticated user received from `contactId` to
+ * `status: "read"` and notifies both peers so their UIs reconcile.
+ *
+ * Why both REST and socket:
+ *   - Socket emit is fire-and-forget — if the socket is mid-reconnect
+ *     when the user opens a chat, the read receipt is lost and the
+ *     unread count gets stuck.
+ *   - REST is durable: 200 means the DB was updated. The native
+ *     OutboundQueue can retry it on reconnect, so unread state survives
+ *     even if the user closes the app immediately after opening a chat.
+ *
+ * The handler is intentionally idempotent: rerunning it on an already-
+ * read conversation is a no-op (the `$in: ["sent", "delivered"]` filter
+ * matches nothing).
+ *
+ * @param {import("express").Request} req
+ * @param {import("express").Response} res
+ * @param {import("express").NextFunction} next
+ */
+export const markRead = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { contactId } = req.params;
+
+    if (!contactId) {
+      return next(createError(400, "contactId is required."));
+    }
+
+    const result = await Message.updateMany(
+      {
+        receiver: userId,
+        sender: contactId,
+        status: { $in: ["sent", "delivered"] },
+      },
+      { $set: { status: "read" } },
+    );
+
+    // Notify both peers via socket so any open client window updates
+    // immediately (the chat list and any open chat view both listen for
+    // `message-status-update`). Mirrors the post-update emits inside the
+    // `updateMessageStatusToRead` socket helper.
+    if (result.modifiedCount > 0) {
+      const senderSockets = userSocketMap.get(contactId.toString()) || new Set();
+      const receiverSockets = userSocketMap.get(userId.toString()) || new Set();
+      const payload = {
+        senderId: contactId.toString(),
+        receiverId: userId.toString(),
+        status: "read",
+      };
+      senderSockets.forEach((socketId) => {
+        io.to(socketId).emit("message-status-update", payload);
+      });
+      receiverSockets.forEach((socketId) => {
+        io.to(socketId).emit("message-status-update", payload);
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      modifiedCount: result.modifiedCount || 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const deleteForEveryone = async (req, res, next) => {
   try {
     const { messageId } = req.params;

@@ -1,8 +1,13 @@
 import useAppStore from "@/store";
 import React from "react";
+import axios from "axios";
 import { Avatar, AvatarImage } from "./ui/avatar";
 import { useSocket } from "@/context/SocketContext";
 import moment from "moment";
+import { Capacitor } from "@capacitor/core";
+import { HOST, MARK_READ_ROUTE } from "@/utils/constants";
+import { getRepository } from "@/offline";
+import { getOutboundQueue } from "@/offline/sync/OutboundQueue.js";
 
 const ContactList = ({ contacts, isChannel = false }) => {
   const { socket } = useSocket();
@@ -22,8 +27,42 @@ const ContactList = ({ contacts, isChannel = false }) => {
     setSelectedChatType(isChannel ? "channel" : "contact");
     setSelectedChatData(contact);
     if (!isChannel) {
+      // Optimistic local reset so the badge clears instantly.
       resetUnreadCount(contact._id);
-      socket.emit("confirm-read", { userId: user.id, senderId: contact._id });
+      // Three-channel mark-read for durability — see MessageContainer
+      // chat-open effect for the rationale (socket can be mid-reconnect,
+      // app can close before HTTP completes, the queue handles both).
+      if (socket && user?.id) {
+        socket.emit("confirm-read", { userId: user.id, senderId: contact._id });
+      }
+      axios
+        .post(
+          `${HOST}${MARK_READ_ROUTE}/${contact._id}`,
+          {},
+          { withCredentials: true, timeout: 10_000 },
+        )
+        .catch(() => {});
+      if (Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady() && typeof repo.resetUnreadCount === "function") {
+          repo.resetUnreadCount(contact._id).catch(() => {});
+        }
+        try {
+          const queue = getOutboundQueue();
+          if (queue && typeof queue.enqueue === "function" && user?.id) {
+            queue
+              .enqueue({
+                kind: "mark_read",
+                conversationId: contact._id,
+                conversationType: "dm",
+                payload: { senderId: contact._id, userId: user.id },
+              })
+              .catch(() => {});
+          }
+        } catch {
+          // Queue not initialised — socket emit + REST already covered it.
+        }
+      }
     }
     if (selectedChatData && selectedChatData._id !== contact._id) {
       setSelectedChatMessages([], true);

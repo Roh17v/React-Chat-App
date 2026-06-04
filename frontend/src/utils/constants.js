@@ -52,3 +52,8 @@ export const CALL_FINALIZE_ROUTE = `${HOST}${CALL_ROUTE}/finalize`;
 
 export const DELETE_FOR_ME_ROUTE = `${MESSAGES_ROUTE}`;
 export const DELETE_FOR_EVERYONE_ROUTE = `${MESSAGES_ROUTE}`;
+
+// Durable mark-read REST endpoint — pairs with the `confirm-read` socket
+// event so unread state is consistent even when the socket is mid-reconnect
+// or the app is backgrounded right after the user opens a chat.
+export const MARK_READ_ROUTE = `${MESSAGES_ROUTE}/mark-read`;

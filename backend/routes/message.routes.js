@@ -6,6 +6,7 @@ import {
   deleteForMe,
   deleteForEveryone,
   getUnifiedUpdates,
+  markRead,
 } from "../controllers/message.controller.js";
 import { validateToken } from "../middlewares/auth.js";
 import upload from "../middlewares/upload.middleware.js";
@@ -33,5 +34,10 @@ messageRouter.patch(
   validateToken,
   deleteForEveryone
 );
+
+// Durable mark-read endpoint — pairs with the `confirm-read` socket event
+// (see message.controller.js for rationale). Idempotent: safe to call
+// repeatedly from the OutboundQueue retry path.
+messageRouter.post("/mark-read/:contactId", validateToken, markRead);
 
 export default messageRouter;

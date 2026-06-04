@@ -1001,9 +1001,36 @@ export function createRepository(options = {}) {
    */
   async function getContacts() {
     requireReady("getContacts");
+    // `unread_count` is derived on read from the `messages` table, not
+    // trusted from the `unread_count` column. The column is kept in
+    // sync as a best-effort cache (so reads from cold storage don't have
+    // to scan messages), but the messages table is the source of truth:
+    //
+    //   - `applyLiveMessage` writes new rows but does NOT touch
+    //     `unread_count` — deriving makes that bookkeeping unnecessary.
+    //   - `applyStatusUpdate` flips status to "read" — derived count
+    //     drops automatically.
+    //   - `resetUnreadCount` flips local rows to "read" too — same.
+    //   - The /dm-contacts response from the server is treated as a
+    //     hint, not as authoritative (its value can be stale by the time
+    //     it arrives). `applyContacts` only seeds `unread_count` on
+    //     first insert; later writes preserve the local value.
+    //
+    // The subquery filters by `sender_id = c.user_id` (messages from the
+    // contact, addressed to the current user) and excludes locally-
+    // deleted rows. `status != 'read'` covers both "sent" and
+    // "delivered". This is a small per-row scan over an indexed table
+    // (idx_messages_status_pending) so the contact list query stays
+    // fast even with thousands of messages.
     const rows = /** @type {Record<string, unknown>[]} */ (
       await driver.query(
-        "SELECT c.user_id, c.last_message, c.last_message_at, c.unread_count, " +
+        "SELECT c.user_id, c.last_message, c.last_message_at, " +
+          "       COALESCE((SELECT COUNT(*) FROM messages m " +
+          "                  WHERE m.conversation_id = c.user_id " +
+          "                    AND m.conversation_type = 'dm' " +
+          "                    AND m.sender_id = c.user_id " +
+          "                    AND m.status != 'read' " +
+          "                    AND m.deleted_for_me = 0), c.unread_count) AS unread_count, " +
           "       c.bootstrap_status, c.updated_at, " +
           "       u.first_name, u.last_name, u.email, u.username, " +
           "       u.image, u.color_json, u.last_seen " +
@@ -1448,7 +1475,18 @@ export function createRepository(options = {}) {
               "     WHEN contacts.last_message_at IS NULL THEN excluded.last_message_at " +
               "     WHEN excluded.last_message_at > contacts.last_message_at THEN excluded.last_message_at " +
               "     ELSE contacts.last_message_at END, " +
-              "  unread_count = excluded.unread_count, " +
+              // unread_count is now derived on read from the messages
+              // table (see getContacts). The column is preserved as a
+              // best-effort cache for the cold-start case where the
+              // messages table hasn't been populated yet — but never
+              // overwritten from the server's stale value, since
+              // confirm-read may not have round-tripped before
+              // /dm-contacts was sampled. Without this guard, a chat the
+              // user just opened (local count → 0) snaps back to the
+              // server's previous value (e.g. 5) and stays stuck until
+              // the next /dm-contacts after the read receipt is
+              // processed.
+              "  unread_count = contacts.unread_count, " +
               "  bootstrap_status = 'ready', " +
               "  updated_at = excluded.updated_at",
             [userIdRaw, lastMessage, lastMessageAt, unread, updatedAt],
@@ -1491,11 +1529,32 @@ export function createRepository(options = {}) {
   async function resetUnreadCountLocked(contactId) {
     requireReady("resetUnreadCount");
     if (typeof contactId !== "string" || contactId.length === 0) return;
-    await driver.run(
-      "UPDATE contacts SET unread_count = 0 WHERE user_id = ?",
-      [contactId]
-    );
+    // Two writes inside a single transaction so getContacts (which now
+    // derives unread_count from the messages table) and the column-
+    // backed fallback stay consistent. Without flipping messages, the
+    // derived count would still report a positive number even though
+    // the column is 0 — and the next emitContacts would re-render the
+    // badge.
+    await driver.withTransaction(async (tx) => {
+      await tx.run(
+        "UPDATE contacts SET unread_count = 0 WHERE user_id = ?",
+        [contactId],
+      );
+      // Mirror the server-side `updateMessageStatusToRead`: every DM
+      // FROM `contactId` TO us, currently sent or delivered, becomes
+      // read. Bump updated_at so a later wire-format comparison sees
+      // the row as newer than any pre-read server payload.
+      await tx.run(
+        "UPDATE messages SET status = 'read', updated_at = ? " +
+          "WHERE conversation_id = ? AND conversation_type = 'dm' " +
+          "  AND sender_id = ? AND status IN ('sent','delivered')",
+        [new Date().toISOString(), contactId, contactId],
+      );
+    });
     await emitContacts();
+    // The chat view subscribes per-conversationId — emit the matching
+    // bucket so an open chat repaints the status ticks immediately.
+    await emitMessages(contactId);
   }
 
   async function resetUnreadCount(contactId) {
