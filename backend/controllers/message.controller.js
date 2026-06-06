@@ -401,7 +401,7 @@ export const getUnifiedUpdates = async (req, res, next) => {
     })
       .sort({ createdAt: 1 })   // ascending — what applyServerMessages expects
       .limit(limit)
-      .populate("sender", "_id email color firstName lastName image")
+      .populate("sender", "_id email color firstName lastName image lastSeen")
       .lean();
 
     const sanitized = messages.map(sanitizeDeleted);

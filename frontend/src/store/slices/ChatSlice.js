@@ -65,6 +65,138 @@ export const createChatSlice = (set, get) => ({
       return { selectedChatMessages: uniqueMessages };
     }),
 
+  /**
+   * Merge a fresh "newest 50" snapshot from the repository's
+   * `subscribeMessages` callback into the live chat window.
+   *
+   * Why a dedicated merge (not `setSelectedChatMessages(..., true)`):
+   *   the live chat window can hold messages that are NOT in the
+   *   snapshot — older messages the user paged in via scroll-up, plus
+   *   optimistic local-only messages waiting for server confirmation.
+   *   A destructive reset (`reset=true`) destroys both of those on
+   *   every DB write, which (a) kicks the user back to the newest 50
+   *   when a live socket / read receipt / periodic sync fires while
+   *   they are scrolled up, and (b) can drop optimistic placeholders.
+   *
+   * What this merge does, in order:
+   *   1. In-place field updates — for any message that exists in both
+   *      the state and the snapshot, take the snapshot's `status`,
+   *      `deletedForEveryone`, and `content` (the fields a live write
+   *      can change) while preserving UI-only fields on the state row
+   *      (`_stableKey`, `isOptimistic`, locally-edited `content`, …).
+   *   2. New tail messages — messages in the snapshot whose
+   *      `createdAt` is newer than the state's tail are appended.
+   *   3. New older messages — messages older than the state's head are
+   *      prepended (this happens when a periodic sync catches the user
+   *      up on offline backlog, e.g. they were offline and a peer sent
+   *      several messages in a row, then they came back online).
+   *   4. New middle messages — anything in between is inserted at the
+   *      correct ascending slot.
+   *   5. Messages in the state but NOT in the snapshot are kept
+   *      as-is — they're either paginated-in older history, optimistic
+   *      placeholders the server hasn't confirmed yet, or messages
+   *      whose content was cleared by a deletion the snapshot doesn't
+   *      re-surface (the in-place update at step 1 covers the
+   *      `deletedForEveryone` / `content` re-clearing case).
+   *
+   * No-op when nothing changed: returns `{}` so Zustand doesn't trigger
+   * a re-render.
+   *
+   * @param {Array<{_id: string, createdAt?: string, status?: string, content?: string|null, deletedForEveryone?: boolean}>} snapshot
+   */
+  applySubscriptionSnapshot: (snapshot) =>
+    set((state) => {
+      if (!Array.isArray(snapshot) || snapshot.length === 0) {
+        return {};
+      }
+      const current = state.selectedChatMessages;
+      const snapById = new Map(snapshot.map((m) => [m._id, m]));
+      const currentIds = new Set(current.map((m) => m._id));
+
+      // 1. In-place field updates.
+      let hasUpdates = false;
+      const merged = current.map((m) => {
+        const snap = snapById.get(m._id);
+        if (snap == null) return m;
+        const nextStatus =
+          snap.status != null && snap.status !== m.status
+            ? snap.status
+            : m.status;
+        const nextDeleted =
+          snap.deletedForEveryone === true
+            ? true
+            : snap.deletedForEveryone === false
+              ? false
+              : m.deletedForEveryone;
+        const nextContent =
+          snap.content !== undefined && snap.content !== m.content
+            ? snap.content
+            : m.content;
+        if (
+          nextStatus !== m.status ||
+          nextDeleted !== m.deletedForEveryone ||
+          nextContent !== m.content
+        ) {
+          hasUpdates = true;
+          return {
+            ...m,
+            status: nextStatus,
+            deletedForEveryone: nextDeleted,
+            content: nextContent,
+          };
+        }
+        return m;
+      });
+
+      // 2-4. New messages (in snapshot, not in state). Bucket by position
+      // relative to the existing window so the merge is O(n+m) instead
+      // of O(n*m).
+      const newOnes = snapshot.filter((m) => !currentIds.has(m._id));
+      if (newOnes.length === 0) {
+        return hasUpdates ? { selectedChatMessages: merged } : {};
+      }
+
+      const stateOldest = merged[0]?.createdAt;
+      const stateNewest = merged[merged.length - 1]?.createdAt;
+      const cmp = (a, b) =>
+        a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
+
+      const older = [];
+      const newer = [];
+      const middle = [];
+      for (const m of newOnes) {
+        if (typeof m.createdAt !== "string") {
+          // No createdAt — treat as a tail append (defensive: never lose
+          // a message just because the payload is malformed).
+          newer.push(m);
+          continue;
+        }
+        if (stateOldest != null && m.createdAt < stateOldest) {
+          older.push(m);
+        } else if (stateNewest != null && m.createdAt > stateNewest) {
+          newer.push(m);
+        } else {
+          middle.push(m);
+        }
+      }
+
+      older.sort(cmp);
+      newer.sort(cmp);
+
+      let next = merged;
+      if (older.length > 0) next = [...older, ...next];
+      if (newer.length > 0) next = [...next, ...newer];
+      // Middle: insert each in its sorted slot. O(n) per insert is fine
+      // — middle buckets are small in practice (offline sync rare).
+      for (const m of middle) {
+        const idx = next.findIndex((sm) => sm.createdAt > m.createdAt);
+        if (idx === -1) next.push(m);
+        else next.splice(idx, 0, m);
+      }
+
+      return { selectedChatMessages: next };
+    }),
+
   addContact: (contact) => {
     const contacts = get().directMessagesContacts || [];
     const exists = contacts.some((c) => c._id.toString() === contact._id.toString());

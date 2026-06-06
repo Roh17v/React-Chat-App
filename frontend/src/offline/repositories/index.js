@@ -1280,7 +1280,40 @@ export function createRepository(options = {}) {
     /** @type {{ serverId: string, createdAt: string } | null} */
     let watermark = null;
 
+    const nowIso = new Date().toISOString();
+
     await driver.withTransaction(async (tx) => {
+      // Auto-promote the DM peer into the `users` + `contacts` tables so
+      // a message from a never-seen contact surfaces in the sidebar the
+      // moment this batch commits — no waiting on the next
+      // /api/users/dm-contacts poll. WhatsApp-grade behavior: a chat
+      // thread appears the instant a message from that thread lands.
+      //   - users row: lifted from the message's populated sender/receiver
+      //     via findPeerDocInBatch, keyed by conversationId (= peer id).
+      //     If the message only carries a bare id, a stub `users` row is
+      //     created to satisfy the `contacts.user_id` FK — the sidebar
+      //     row will have NULL name / image until the next dm-contacts
+      //     poll fills them in.
+      //   - contacts row: stub with bootstrap_status='pending'; the
+      //     JOIN-derived columns in getContacts (last_message,
+      //     last_message_at, unread_count) fill in from `messages` on
+      //     read, so a stub is sufficient for first render. The next
+      //     applyContacts call promotes bootstrap_status to 'ready'.
+      if (args.conversationType === "dm" && args.conversationId.length > 0) {
+        const peerDoc = findPeerDocInBatch(messages, args.conversationId);
+        if (peerDoc != null) {
+          await upsertUserRow(tx, peerDoc, nowIso);
+        } else {
+          await ensureUserStub(tx, args.conversationId, nowIso);
+        }
+        await tx.run(
+          "INSERT INTO contacts (user_id, bootstrap_status, updated_at) " +
+            "VALUES (?, 'pending', ?) " +
+            "ON CONFLICT(user_id) DO NOTHING",
+          [args.conversationId, nowIso],
+        );
+      }
+
       for (const m of messages) {
         const r = await resolveAndApply(tx, m, {
           conversationId: args.conversationId,
@@ -1432,6 +1465,74 @@ export function createRepository(options = {}) {
   // channels are shared collections (no per-conversation key applies).
   // Errors on a single row are swallowed and logged; a malformed payload
   // for one contact must not stop us from upserting the rest.
+
+  /**
+   * Find the populated sender / receiver subdoc in a message batch whose
+   * id matches `peerId`. Used by the DM auto-promotion paths in
+   * `applyServerMessagesLocked` and `applyLiveMessageLocked` to lift
+   * the peer's display fields (firstName, lastName, image, color,
+   * lastSeen) into the `users` table the moment a message from a
+   * never-seen peer lands — so the sidebar surfaces the new chat
+   * thread without waiting for the next /api/users/dm-contacts poll.
+   *
+   * Returns `null` when the peer is referenced only by id (e.g. the
+   * server didn't populate `sender` for that row) — the caller then
+   * falls back to letting the next /api/users/dm-contacts call handle
+   * the user-table write.
+   *
+   * @param {unknown[]} messages
+   * @param {string} peerId
+   * @returns {Record<string, unknown> | null}
+   */
+  function findPeerDocInBatch(messages, peerId) {
+    if (!Array.isArray(messages)) return null;
+    for (const m of messages) {
+      if (m == null || typeof m !== "object") continue;
+      const doc = /** @type {Record<string, unknown>} */ (m);
+      const sender = doc.sender;
+      if (
+        sender != null &&
+        typeof sender === "object" &&
+        !Array.isArray(sender) &&
+        extractIdLike(sender) === peerId
+      ) {
+        return /** @type {Record<string, unknown>} */ (sender);
+      }
+      const receiver = doc.receiver;
+      if (
+        receiver != null &&
+        typeof receiver === "object" &&
+        !Array.isArray(receiver) &&
+        extractIdLike(receiver) === peerId
+      ) {
+        return /** @type {Record<string, unknown>} */ (receiver);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Ensure a `users` row exists for `userId` without overwriting any
+   * existing display fields. Used by the DM auto-promotion paths as a
+   * FK-satisfying stub when the incoming message payload only carries
+   * a bare sender/receiver id (no populated object to lift fields from)
+   * — the chat thread still surfaces in the sidebar with NULL name /
+   * image, and the next /api/users/dm-contacts poll fills them in.
+   *
+   * `INSERT OR IGNORE` (not `INSERT OR REPLACE`) so a previously
+   * populated row is never clobbered by the stub.
+   *
+   * @param {{ run: (sql: string, values?: unknown[]) => Promise<unknown> }} tx
+   * @param {string} userId
+   * @param {string} updatedAt
+   * @returns {Promise<void>}
+   */
+  async function ensureUserStub(tx, userId, updatedAt) {
+    await tx.run(
+      "INSERT OR IGNORE INTO users (user_id, updated_at) VALUES (?, ?)",
+      [userId, updatedAt],
+    );
+  }
 
   /**
    * Upsert a single user row. Used by the contact and channel writers
@@ -1802,6 +1903,30 @@ export function createRepository(options = {}) {
 
     let rejectedField = null;
     await driver.withTransaction(async (tx) => {
+      // Auto-promote the DM peer (socket path) so a message from a
+      // never-seen contact surfaces in the sidebar immediately, without
+      // waiting for the next /api/users/dm-contacts poll. See the
+      // matching block in applyServerMessagesLocked for the full
+      // rationale. ensureUserStub covers the case where the socket
+      // payload only carries a bare sender id (no populated object) —
+      // we still want the chat thread to surface, even with a NULL
+      // name / image until the next dm-contacts poll fills it in.
+      if (conversationType === "dm" && conversationIdResolved.length > 0) {
+        const liveTs = new Date().toISOString();
+        const peerDoc = findPeerDocInBatch([m], conversationIdResolved);
+        if (peerDoc != null) {
+          await upsertUserRow(tx, peerDoc, liveTs);
+        } else {
+          await ensureUserStub(tx, conversationIdResolved, liveTs);
+        }
+        await tx.run(
+          "INSERT INTO contacts (user_id, bootstrap_status, updated_at) " +
+            "VALUES (?, 'pending', ?) " +
+            "ON CONFLICT(user_id) DO NOTHING",
+          [conversationIdResolved, liveTs],
+        );
+      }
+
       const r = await resolveAndApply(tx, m, {
         conversationId: conversationIdResolved,
         conversationType,

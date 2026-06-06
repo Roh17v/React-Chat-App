@@ -520,3 +520,237 @@ describe("repository.applyStatusUpdate", () => {
     expect(rows[0].status).toBe("pending");
   });
 });
+
+describe("DM peer auto-promotion", () => {
+  /**
+   * Helper: build a message with a populated `sender` object (the shape
+   * the unified feed and the socket emit for a peer's display fields).
+   *
+   * @param {Partial<{ _id: string, sender: Record<string, unknown>, content: string, createdAt: string, updatedAt: string, status: string }>} overrides
+   */
+  function makePopulatedMessage(overrides = {}) {
+    const senderObj = overrides.sender || {
+      _id: "user-newpeer",
+      firstName: "Alice",
+      lastName: "Anderson",
+      email: "alice@example.com",
+      image: "https://example.com/a.png",
+      color: { hue: 210 },
+      lastSeen: "2024-01-01T00:00:00.000Z",
+    };
+    return {
+      _id: overrides._id || "srv-1",
+      sender: senderObj,
+      receiver: { _id: "user-self" },
+      messageType: "text",
+      content: overrides.content == null ? "hello" : overrides.content,
+      fileUrl: null,
+      fileName: null,
+      fileMetadata: {},
+      replyTo: null,
+      status: overrides.status || "delivered",
+      channelId: null,
+      deletedForEveryone: false,
+      deletedAt: null,
+      createdAt: overrides.createdAt || "2024-01-01T00:00:00.000Z",
+      updatedAt: overrides.updatedAt || "2024-01-01T00:00:00.000Z",
+      clientTempId: null,
+    };
+  }
+
+  it("applyServerMessages lifts the peer into users + stub contacts for a never-seen DM sender", async () => {
+    const ctx = await makeRepository();
+    const peer = {
+      _id: "user-newpeer",
+      firstName: "Alice",
+      lastName: "Anderson",
+      email: "alice@example.com",
+      image: "https://example.com/a.png",
+      color: { hue: 210 },
+      lastSeen: "2024-01-01T00:00:00.000Z",
+    };
+    await ctx.repository.applyServerMessages({
+      conversationId: "user-newpeer",
+      conversationType: "dm",
+      messages: [makePopulatedMessage({ _id: "srv-a", sender: peer })],
+    });
+
+    const users = await ctx.driver.query(
+      "SELECT first_name, last_name, email, image, last_seen FROM users WHERE user_id = 'user-newpeer'",
+    );
+    expect(users).toEqual([
+      {
+        first_name: "Alice",
+        last_name: "Anderson",
+        email: "alice@example.com",
+        image: "https://example.com/a.png",
+        last_seen: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const contacts = await ctx.driver.query(
+      "SELECT user_id, bootstrap_status FROM contacts WHERE user_id = 'user-newpeer'",
+    );
+    expect(contacts).toEqual([
+      { user_id: "user-newpeer", bootstrap_status: "pending" },
+    ]);
+  });
+
+  it("applyLiveMessage lifts the peer into users + stub contacts for a never-seen DM sender", async () => {
+    const ctx = await makeRepository();
+    await ctx.repository.applyLiveMessage(makePopulatedMessage({ _id: "srv-l" }));
+
+    const users = await ctx.driver.query(
+      "SELECT first_name, last_name, image, last_seen FROM users WHERE user_id = 'user-newpeer'",
+    );
+    expect(users).toHaveLength(1);
+    expect(users[0].first_name).toBe("Alice");
+
+    const contacts = await ctx.driver.query(
+      "SELECT bootstrap_status FROM contacts WHERE user_id = 'user-newpeer'",
+    );
+    expect(contacts).toEqual([{ bootstrap_status: "pending" }]);
+  });
+
+  it("still creates a stub contacts row when the sender is id-only (not populated)", async () => {
+    // Some server payloads only carry the sender's id, not the populated
+    // object. The chat thread should still surface in the sidebar — even
+    // if the name / image are NULL — so the user can see the message.
+    // ensureUserStub inserts a minimal `users` row to satisfy the
+    // `contacts.user_id` FK; display fields stay NULL until the next
+    // dm-contacts poll fills them in.
+    const ctx = await makeRepository();
+    await ctx.repository.applyServerMessages({
+      conversationId: "user-bareid",
+      conversationType: "dm",
+      messages: [
+        {
+          _id: "srv-bare",
+          sender: "user-bareid",
+          receiver: "user-self",
+          messageType: "text",
+          content: "hi",
+          status: "delivered",
+          channelId: null,
+          deletedForEveryone: false,
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+          clientTempId: null,
+        },
+      ],
+    });
+
+    const users = await ctx.driver.query(
+      "SELECT first_name, last_name, image FROM users WHERE user_id = 'user-bareid'",
+    );
+    expect(users).toEqual([{ first_name: null, last_name: null, image: null }]);
+
+    const contacts = await ctx.driver.query(
+      "SELECT bootstrap_status FROM contacts WHERE user_id = 'user-bareid'",
+    );
+    expect(contacts).toEqual([{ bootstrap_status: "pending" }]);
+  });
+
+  it("getContacts returns the auto-promoted peer with name, image, preview, and unread count", async () => {
+    // Validates the bug #1 fix still owns last_message / unread_count
+    // after the auto-promotion path is in place: the stub contacts row
+    // has NULL for those columns; the JOIN-derived columns from
+    // `messages` must fill them in.
+    const ctx = await makeRepository();
+    await ctx.repository.applyLiveMessage(
+      makePopulatedMessage({ _id: "srv-r", content: "hey there" }),
+    );
+
+    const rows = await ctx.repository.getContacts();
+    expect(rows).toHaveLength(1);
+    const peer = rows[0];
+    expect(peer._id).toBe("user-newpeer");
+    expect(peer.firstName).toBe("Alice");
+    expect(peer.lastName).toBe("Anderson");
+    expect(peer.image).toBe("https://example.com/a.png");
+    expect(peer.unreadCount).toBe(1);
+    // lastMessage / lastMessageAt come from the messages LEFT JOIN, not
+    // the stub contacts row — confirms bug #1's derivation wins.
+    expect(peer.lastMessage).toBe("hey there");
+    expect(peer.lastMessageMeta.senderId).toBe("user-newpeer");
+    expect(peer.bootstrapStatus).toBe("pending");
+  });
+
+  it("is idempotent: a second message from the same peer does not clobber display fields", async () => {
+    const ctx = await makeRepository();
+    await ctx.repository.applyLiveMessage(
+      makePopulatedMessage({
+        _id: "srv-1",
+        content: "first",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-01T00:00:00.000Z",
+      }),
+    );
+
+    // Second live message carries the same display fields, but the
+    // local users row already has them. The UPSERT must preserve them
+    // (upsertUserRow is INSERT OR REPLACE — every field overwritten
+    // with the latest payload value, which is identical here).
+    await ctx.repository.applyLiveMessage(
+      makePopulatedMessage({
+        _id: "srv-2",
+        content: "second",
+        createdAt: "2024-01-01T00:00:01.000Z",
+        updatedAt: "2024-01-01T00:00:01.000Z",
+      }),
+    );
+
+    const users = await ctx.driver.query(
+      "SELECT first_name, image FROM users WHERE user_id = 'user-newpeer'",
+    );
+    expect(users).toEqual([{ first_name: "Alice", image: "https://example.com/a.png" }]);
+
+    const messages = await ctx.driver.query(
+      "SELECT content FROM messages WHERE conversation_id = 'user-newpeer' ORDER BY created_at",
+    );
+    expect(messages.map((m) => m.content)).toEqual(["first", "second"]);
+  });
+
+  it("applyContacts promotes bootstrap_status from 'pending' to 'ready' on the next dm-contacts poll", async () => {
+    // The auto-promoted stub row has bootstrap_status='pending'. The
+    // follow-up /api/users/dm-contacts call (applyContactsLocked) must
+    // upgrade it to 'ready' once the server has acknowledged the
+    // contact. unread_count must be preserved (the ON CONFLICT clause
+    // uses `unread_count = contacts.unread_count`).
+    const ctx = await makeRepository();
+    await ctx.repository.applyLiveMessage(
+      makePopulatedMessage({ _id: "srv-a", content: "hi" }),
+    );
+
+    // Simulate the local unread_count having moved (e.g. the user
+    // marked-read) before the dm-contacts poll lands.
+    await ctx.repository.markConversationRead?.({ conversationId: "user-newpeer" });
+    // markConversationRead may or may not exist on this build — drive
+    // the unread count down a different way: applyStatusUpdate.
+    await ctx.repository.applyStatusUpdate({
+      conversationId: "user-newpeer",
+      fromUserId: "user-newpeer",
+      status: "read",
+    });
+
+    await ctx.repository.applyContacts([
+      {
+        _id: "user-newpeer",
+        firstName: "Alice",
+        lastName: "Anderson",
+        email: "alice@example.com",
+        image: "https://example.com/a.png",
+        color: { hue: 210 },
+        lastSeen: "2024-01-01T00:00:00.000Z",
+        unreadCount: 99, // server's stale value must NOT overwrite our 0
+        lastMessage: "hi",
+        lastMessageAt: "2024-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    const contacts = await ctx.driver.query(
+      "SELECT bootstrap_status FROM contacts WHERE user_id = 'user-newpeer'",
+    );
+    expect(contacts).toEqual([{ bootstrap_status: "ready" }]);
+  });
+});

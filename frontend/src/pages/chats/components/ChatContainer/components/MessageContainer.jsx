@@ -172,6 +172,7 @@ const MessageContainer = () => {
     setImageURL,
     connectivity,
     isInitialized,
+    applySubscriptionSnapshot,
   } = useAppStore();
   const { socket } = useSocket();
 
@@ -732,6 +733,14 @@ const MessageContainer = () => {
   // Subscribe to live repository updates for the current conversation (Req 1.2, 5.5).
   // Fires whenever the SyncEngine or OutboundQueue commits a write to the
   // messages table, keeping the UI in sync without a separate poll.
+  //
+  // The repository's `emitMessages` carries a "newest 50" snapshot. The
+  // chat window can also hold messages NOT in that snapshot — older
+  // rows the user paged in via scroll-up, plus optimistic placeholders
+  // waiting for server confirmation. We do a smart merge
+  // (applySubscriptionSnapshot) instead of a destructive reset, so a
+  // live socket delivery / read receipt / periodic sync firing while
+  // the user is scrolled up does not kick them back to the newest 50.
   useEffect(() => {
     if (!selectedChatId || !Capacitor.isNativePlatform()) return;
     const repo = getRepository();
@@ -741,13 +750,13 @@ const MessageContainer = () => {
       const uiMessages = Array.isArray(messages)
         ? messages.slice().reverse().map(toUiMessage)
         : [];
-      setSelectedChatMessages(uiMessages, true);
+      applySubscriptionSnapshot(uiMessages);
     });
 
     return () => {
       unsubscribe();
     };
-  }, [selectedChatId, setSelectedChatMessages, isInitialized]);
+  }, [selectedChatId, applySubscriptionSnapshot, isInitialized]);
 
   // Clear typing indicators when leaving chat
   useEffect(() => {
