@@ -5,6 +5,7 @@ import { useRef, useEffect, useState } from "react";
 import { createContext, useContext } from "react";
 import useMediaStream from "@/hooks/useMediaStream";
 import { Capacitor } from "@capacitor/core";
+import { Network } from "@capacitor/network";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import { toast } from "sonner";
 import { getSyncEngine } from "@/offline/sync/SyncEngine";
@@ -163,6 +164,29 @@ export const SocketProvider = ({ children }) => {
       // `socket: null` whenever the device is offline at boot — no socket
       // event ever fires to nudge React.
       setSocketReady(true);
+
+      // Force instant reconnection when the network comes back online,
+      // bypassing Socket.IO's internal exponential backoff timer.
+      let networkListenerPromise = null;
+      const handleBrowserOnline = () => {
+        if (socket.current && !socket.current.connected) {
+          // Hard-reset the socket. If it's stalled in a "connecting" state from a 
+          // dropped packet, .connect() alone won't do anything. We must disconnect first.
+          socket.current.disconnect();
+          socket.current.connect();
+        }
+      };
+      
+      if (Capacitor.isNativePlatform()) {
+        networkListenerPromise = Network.addListener("networkStatusChange", (status) => {
+          if (status.connected && socket.current && !socket.current.connected) {
+            socket.current.disconnect();
+            socket.current.connect();
+          }
+        });
+      } else {
+        window.addEventListener("online", handleBrowserOnline);
+      }
 
       const onSocketConnect = () => {
         console.log("Connected to socket server");
@@ -613,6 +637,17 @@ export const SocketProvider = ({ children }) => {
           socket.current.disconnect();
           socket.current = null;
           setSocketReady(false);
+          
+          if (networkListenerPromise) {
+            networkListenerPromise
+              .then((listener) => {
+                if (listener && typeof listener.remove === "function") {
+                  listener.remove().catch(() => {});
+                }
+              })
+              .catch(() => {});
+          }
+          window.removeEventListener("online", handleBrowserOnline);
         }
       };
     }

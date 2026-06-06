@@ -9,13 +9,13 @@ import {
   MARK_READ_ROUTE,
 } from "@/utils/constants";
 import moment from "moment";
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { MdFolderZip } from "react-icons/md";
 import { IoArrowDownCircle, IoCloseSharp } from "react-icons/io5";
 import { IoMdDoneAll } from "react-icons/io";
 import { MdDone } from "react-icons/md";
-import { ChevronDown, Trash2, Ban, Copy } from "lucide-react";
+import { ChevronDown, Loader2, Trash2, Ban, Copy } from "lucide-react";
 import { RiReplyLine } from "react-icons/ri";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
@@ -25,6 +25,8 @@ import { toast } from "sonner";
 import { getRepository } from "@/offline";
 import { getSyncEngine } from "@/offline/sync/SyncEngine.js";
 import { getOutboundQueue } from "@/offline/sync/OutboundQueue.js";
+import { computeAnchorAdjustment } from "./scrollAnchor.js";
+import { decideScroll, decideBadge } from "./scrollDecision.js";
 
 /**
  * Defensive accessor for the SyncEngine singleton. The factory throws when
@@ -68,13 +70,38 @@ const toUiMessage = (m) => {
   // server payloads use `sender`.
   if (m.sender !== undefined && m._id !== undefined) return m;
 
+  // Stable identity for a local-sent message across the optimistic →
+  // confirmed transition. The optimistic row written by `enqueueOutbound`
+  // has `serverId = null` and `clientTempId = <uuid>`. After
+  // `resolveAndApply` runs (either from the `receiveMessage` socket event
+  // or the OutboundQueue's `markOutboundConfirmed`), the SAME local row
+  // is updated in place — `client_temp_id` is preserved (the conflict
+  // resolver's UPDATE does not touch it) and `server_id` transitions from
+  // NULL to the real server id. If we derive the UI `_id` from
+  // `serverId`, the React key for that bubble changes the moment the
+  // server confirms, and `applySubscriptionSnapshot`'s id-keyed merge
+  // treats the optimistic and confirmed versions as TWO different
+  // messages — both stay in state, and the user sees the bubble twice
+  // (one stuck on the optimistic "pending"/clock icon, one with the real
+  // "sent"/"delivered" status). On chat-close+reopen, `getMessages(1)`
+  // re-reads the local DB; the merge rebuilds state from scratch and only
+  // the confirmed row is in the DB, so the duplicate vanishes — which
+  // matches the user's report exactly.
+  //
+  // `clientTempId` is the natural stable id: it is generated when the
+  // user sends, sent to the server, echoed back in `receiveMessage`,
+  // preserved in the local row forever, and present on every local-sent
+  // message regardless of confirmation state. For received messages
+  // (from another user) `clientTempId` is null and we fall through to
+  // `serverId` (the repo's `server_id` column) — same value the user
+  // would have seen in a server-payload shape (`m._id`).
   const _id =
     typeof m._id === "string" && m._id.length > 0
       ? m._id
-      : typeof m.serverId === "string" && m.serverId.length > 0
-        ? m.serverId
-        : typeof m.clientTempId === "string" && m.clientTempId.length > 0
-          ? m.clientTempId
+      : typeof m.clientTempId === "string" && m.clientTempId.length > 0
+        ? m.clientTempId
+        : typeof m.serverId === "string" && m.serverId.length > 0
+          ? m.serverId
           : typeof m.id === "string"
             ? m.id
             : undefined;
@@ -180,6 +207,13 @@ const MessageContainer = () => {
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  // Count of new tail messages that arrived while the user was scrolled
+  // up. Rendered as a badge on the scroll-to-bottom button so the user
+  // has a clear affordance to jump down and see what's new. Ref + state:
+  // ref is the synchronous read source for the messages effect, state
+  // is what re-renders the badge.
+  const [newTailMessageCount, setNewTailMessageCount] = useState(0);
+  const newTailMessageCountRef = useRef(0);
   const containerRef = useRef(null);
   const newMessageRef = useRef(null);
   const isInitialLoad = useRef(true);
@@ -192,6 +226,32 @@ const MessageContainer = () => {
   // shrink while the tail still moved forward.
   const lastTailIdRef = useRef(null);
   const wasNearBottomRef = useRef(true);
+  // Tracks whether the initial scroll-to-bottom has fired for the
+  // current chat session. The container's `scrollTop` is stale on
+  // chat-open (it carries over from the previous chat, or is 0 on
+  // fresh mount), so checking `isNearBottom()` on the very first
+  // commit returns false even though the user clearly wants to
+  // land at the tail. We force the first scroll unconditionally,
+  // then gate the rest of the initial-load window on the live
+  // `isNearBottom()` reading. Reset in the chat-open useEffect.
+  const initialScrollDoneRef = useRef(false);
+  // Synchronous guard against firing multiple paginations from a
+  // single user action. `getMessages`/`getChannelMessages` use the
+  // React `loading` state to prevent re-entry, but `setLoading(true)`
+  // is async (React batches) and the scroll handler's `useCallback`
+  // only re-attaches a new closure after the next commit. In the
+  // race window, two scroll events that land before the commit both
+  // see `loading === false` in their closure and each initiate a
+  // pagination. The result: 2-3 in-flight `getMessages` calls, each
+  // capturing the same `scrollYBeforeFetch`, and each one fires a
+  // rAF that pushes the user further from the top (`scrollTop =
+  // newScrollHeight - scrollYBeforeFetch` shrinks as more pages land
+  // on top of each other). The user perceives this as "scroll bar
+  // keeps shrinking, I'm being shoved down". A ref updates
+  // synchronously, so checking this in the scroll handler (and inside
+  // the page-fetchers) closes the window. Reset in the `finally`
+  // block so a failed/aborted fetch still allows the next attempt.
+  const paginationInFlightRef = useRef(false);
   const longPressTimerRef = useRef(null);
   const menuRef = useRef(null);
   const [menuPosition, setMenuPosition] = useState(null); // { top, left, direction }
@@ -215,6 +275,7 @@ const MessageContainer = () => {
   // Keeping a ref (not state) so successive `getMessages(page+1)` reads
   // see the latest value without a re-render race.
   const lastServerPageRef = useRef(0);
+  const paginationAnchorRef = useRef(null);
 
   // Typing indicator state
   const typingUsers = selectedChatId
@@ -249,8 +310,69 @@ const MessageContainer = () => {
     });
   }, []);
 
+  // Capture the message at the top of the scroll viewport. Used as the
+  // anchor for preserving the user's scroll position across a pagination
+  // — anchoring to a specific message identity is robust to anything
+  // that changes the content height between capture and apply (the
+  // top-of-list loading spinner, an `applySubscriptionSnapshot` that
+  // prepends an offline-backlog row mid-fetch, image lazy-load, etc.).
+  // Returns the message's `_id` and its viewport position relative to
+  // the container's content top, or `null` if no message is in view.
+  const captureScrollAnchor = useCallback((container) => {
+    if (!container) return null;
+    const containerTop = container.getBoundingClientRect().top;
+    const messageEls = container.querySelectorAll("[data-message-id]");
+    for (const el of messageEls) {
+      // Anchor to the actual message bubble, not the wrapper. 
+      // The wrapper includes the date separator, which can appear or disappear 
+      // during pagination (e.g., if older messages from the same day are loaded),
+      // causing the wrapper's height to change and creating a visual jump.
+      const inner = el.querySelector('.animate-message-in') || el;
+      const rect = inner.getBoundingClientRect();
+      if (rect.bottom > containerTop) {
+        return {
+          id: el.dataset.messageId,
+          viewportTop: rect.top - containerTop,
+        };
+      }
+    }
+    return null;
+  }, []);
+
+  // Apply a captured anchor to the live DOM. Re-measures the same
+  // message's viewport position after the new rows have rendered, then
+  // adjusts `scrollTop` by however far the element shifted in the
+  // content. Anchoring to the message identity (not a height delta)
+  // means the shift is exact even if other height changes happened
+  // between the two reads.
+  const applyScrollAnchor = useCallback((container, anchor) => {
+    if (!container || !anchor) return;
+    const el = document.getElementById(`msg-${anchor.id}`);
+    if (!el) return;
+    const inner = el.querySelector('.animate-message-in') || el;
+    const containerTop = container.getBoundingClientRect().top;
+    const newViewportTop = inner.getBoundingClientRect().top - containerTop;
+    const adjustment = computeAnchorAdjustment(anchor.viewportTop, newViewportTop);
+    if (adjustment !== 0) {
+      container.scrollTop += adjustment;
+    }
+  }, []);
+
   const getMessages = async (pageNumber = 1) => {
-    if (!selectedChatId || loading || !hasMore) return;
+    if (!selectedChatId || !hasMore) return;
+    // Page 1 is the chat-open path — always allow it (the chat-open
+    // IIFE awaits a single resolution). For page > 1, the synchronous
+    // ref guard prevents a second `getMessages` from starting while
+    // the first one is still in flight. The `loading` state check
+    // below is a secondary guard for slower paths, but it's not
+    // sufficient on its own because `setLoading(true)` is async and
+    // multiple scroll events can fire before React commits it.
+    if (pageNumber > 1) {
+      if (loading || paginationInFlightRef.current) return;
+      paginationInFlightRef.current = true;
+    } else if (loading) {
+      return;
+    }
 
     setLoading(true);
     try {
@@ -316,6 +438,9 @@ const MessageContainer = () => {
               0,
             );
             if (newCount > 0 || pageNumber === 1) {
+              if (pageNumber > 1) {
+                paginationAnchorRef.current = captureScrollAnchor(containerRef.current);
+              }
               setSelectedChatMessages(uiMessages, false);
               if (pageNumber === 1) {
                 isInitialLoad.current = true;
@@ -350,82 +475,75 @@ const MessageContainer = () => {
       // cache (the dedup absorbs the overlap, store size grows by less
       // than 20, the formula recomputes to the same page).
       let serverPage;
-      if (lastServerPageRef.current === 0) {
-        // First network call for this conversation. Seed from the
-        // current store size so we resume just before the oldest local
-        // message we already have.
-        serverPage = Math.max(
-          1,
-          Math.floor(selectedChatMessages.length / 20) + 1,
-        );
-      } else {
-        serverPage = lastServerPageRef.current + 1;
-      }
-
-      // Skip the network fetch entirely when offline. Without this the
-      // axios call would either hang on the OS-level timeout or fail
-      // after a long delay, leaving the loading dots spinning forever.
-      // We also stop further pagination attempts so the spinner clears.
-      if (Capacitor.isNativePlatform() && connectivity === "offline") {
-        setHasMore(false);
-        setLoading(false);
-        return;
-      }
-
-      const response = await axios.get(
-        `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
-        {
-          withCredentials: true,
-          // Hard timeout so a slow / dropping network can't keep the
-          // pagination spinner up indefinitely.
-          timeout: 15_000,
-        }
-      );
-
-      lastServerPageRef.current = serverPage;
+      let newCount = 0;
+      let responseData = [];
       const sizeBefore = selectedChatMessages.length;
 
-      console.log(
-        `[MessageContainer] DM network page ${serverPage} returned ${response.data?.length ?? 0} rows for ${selectedChatId} (localExhausted=${localExhausted}, store size=${sizeBefore})`,
-      );
+      while (newCount === 0) {
+        if (lastServerPageRef.current === 0) {
+          // First network call for this conversation. Seed from the
+          // current store size so we resume just before the oldest local
+          // message we already have.
+          serverPage = Math.max(
+            1,
+            Math.floor(sizeBefore / 20) + 1,
+          );
+        } else {
+          serverPage = lastServerPageRef.current + 1;
+        }
 
-      if (response.data.length === 0) {
-        setHasMore(false);
-        setLoading(false);
-        return;
-      }
+        // Skip the network fetch entirely when offline.
+        if (Capacitor.isNativePlatform() && connectivity === "offline") {
+          setHasMore(false);
+          setLoading(false);
+          return;
+        }
 
-      // If every row in the response is already in the store the
-      // dedup will absorb everything and the user sees no progress.
-      // Detect that and either advance to a further server page on
-      // the next scroll or stop if we've clearly walked off the end.
-      const known = new Set(
-        selectedChatMessages
-          .map((m) => (m && typeof m._id === "string" ? m._id : null))
-          .filter(Boolean),
-      );
-      const newCount = response.data.reduce(
-        (acc, m) =>
-          m && typeof m._id === "string" && !known.has(m._id) ? acc + 1 : acc,
-        0,
-      );
-      if (newCount === 0) {
-        // The page we just fetched is fully overlapping with what
-        // we already showed (cache boundary). Try the next page on
-        // the next scroll. If multiple consecutive pages return
-        // overlap-only, the recursion below will eventually return
-        // an empty page and `hasMore` will flip to false.
-        console.log(
-          `[MessageContainer] DM page ${serverPage} fully overlapped; advancing to page ${serverPage + 1}`,
+        const response = await axios.get(
+          `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
+          {
+            withCredentials: true,
+            timeout: 15_000,
+          }
         );
-        setLoading(false);
-        // Recurse synchronously so the user sees no extra spinner
-        // round-trips. `lastServerPageRef.current` was just updated
-        // so the next call uses page+1.
-        return getMessages(pageNumber);
+
+        lastServerPageRef.current = serverPage;
+
+        console.log(
+          `[MessageContainer] DM network page ${serverPage} returned ${response.data?.length ?? 0} rows for ${selectedChatId} (localExhausted=${localExhausted}, store size=${sizeBefore})`,
+        );
+
+        if (response.data.length === 0) {
+          setHasMore(false);
+          setLoading(false);
+          return;
+        }
+
+        const known = new Set(
+          selectedChatMessages
+            .map((m) => (m && typeof m._id === "string" ? m._id : null))
+            .filter(Boolean),
+        );
+        newCount = response.data.reduce(
+          (acc, m) =>
+            m && typeof m._id === "string" && !known.has(m._id) ? acc + 1 : acc,
+          0,
+        );
+
+        if (newCount === 0) {
+          console.log(
+            `[MessageContainer] DM page ${serverPage} fully overlapped; advancing to page ${serverPage + 1}`,
+          );
+          // Loop continues to fetch the next page synchronously
+        } else {
+          responseData = response.data;
+        }
       }
 
-      setSelectedChatMessages(response.data, false);
+      if (pageNumber > 1) {
+        paginationAnchorRef.current = captureScrollAnchor(containerRef.current);
+      }
+      setSelectedChatMessages(responseData, false);
 
       if (pageNumber === 1) {
         isInitialLoad.current = true;
@@ -436,11 +554,18 @@ const MessageContainer = () => {
       console.log(error);
     } finally {
       setLoading(false);
+      if (pageNumber > 1) paginationInFlightRef.current = false;
     }
   };
 
   const getChannelMessages = async (pageNumber = 1) => {
-    if (!selectedChatId || loading || !hasMore) return;
+    if (!selectedChatId || !hasMore) return;
+    if (pageNumber > 1) {
+      if (loading || paginationInFlightRef.current) return;
+      paginationInFlightRef.current = true;
+    } else if (loading) {
+      return;
+    }
     setLoading(true);
 
     try {
@@ -509,62 +634,71 @@ const MessageContainer = () => {
       }
 
       let serverPage;
-      if (lastServerPageRef.current === 0) {
-        serverPage = Math.max(
-          1,
-          Math.floor(selectedChatMessages.length / 20) + 1,
-        );
-      } else {
-        serverPage = lastServerPageRef.current + 1;
-      }
-
-      // Skip the network fetch when offline (see DM path comment).
-      if (Capacitor.isNativePlatform() && connectivity === "offline") {
-        setHasMore(false);
-        setLoading(false);
-        return;
-      }
-
-      const response = await axios.get(
-        `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
-        {
-          withCredentials: true,
-          timeout: 15_000,
-        }
-      );
-
-      lastServerPageRef.current = serverPage;
+      let newCount = 0;
+      let responseData = [];
       const sizeBefore = selectedChatMessages.length;
 
-      console.log(
-        `[MessageContainer] Channel network page ${serverPage} returned ${response.data?.length ?? 0} rows for ${selectedChatId} (localExhausted=${localExhausted}, store size=${sizeBefore})`,
-      );
+      while (newCount === 0) {
+        if (lastServerPageRef.current === 0) {
+          serverPage = Math.max(
+            1,
+            Math.floor(sizeBefore / 20) + 1,
+          );
+        } else {
+          serverPage = lastServerPageRef.current + 1;
+        }
 
-      if (response.data.length === 0) {
-        setHasMore(false);
-        setLoading(false);
-        return;
-      }
+        if (Capacitor.isNativePlatform() && connectivity === "offline") {
+          setHasMore(false);
+          setLoading(false);
+          return;
+        }
 
-      const known = new Set(
-        selectedChatMessages
-          .map((m) => (m && typeof m._id === "string" ? m._id : null))
-          .filter(Boolean),
-      );
-      const newCount = response.data.reduce(
-        (acc, m) =>
-          m && typeof m._id === "string" && !known.has(m._id) ? acc + 1 : acc,
-        0,
-      );
-      if (newCount === 0) {
-        console.log(
-          `[MessageContainer] Channel page ${serverPage} fully overlapped; advancing to page ${serverPage + 1}`,
+        const response = await axios.get(
+          `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
+          {
+            withCredentials: true,
+            timeout: 15_000,
+          }
         );
-        setLoading(false);
-        return getChannelMessages(pageNumber);
+
+        lastServerPageRef.current = serverPage;
+
+        console.log(
+          `[MessageContainer] Channel network page ${serverPage} returned ${response.data?.length ?? 0} rows for ${selectedChatId} (localExhausted=${localExhausted}, store size=${sizeBefore})`,
+        );
+
+        if (response.data.length === 0) {
+          setHasMore(false);
+          setLoading(false);
+          return;
+        }
+
+        const known = new Set(
+          selectedChatMessages
+            .map((m) => (m && typeof m._id === "string" ? m._id : null))
+            .filter(Boolean),
+        );
+        newCount = response.data.reduce(
+          (acc, m) =>
+            m && typeof m._id === "string" && !known.has(m._id) ? acc + 1 : acc,
+          0,
+        );
+
+        if (newCount === 0) {
+          console.log(
+            `[MessageContainer] Channel page ${serverPage} fully overlapped; advancing to page ${serverPage + 1}`,
+          );
+          // Loop continues to fetch the next page synchronously
+        } else {
+          responseData = response.data;
+        }
       }
 
-      setSelectedChatMessages(response.data, false);
+      if (pageNumber > 1) {
+        paginationAnchorRef.current = captureScrollAnchor(containerRef.current);
+      }
+      setSelectedChatMessages(responseData, false);
 
       if (pageNumber === 1) {
         isInitialLoad.current = true;
@@ -575,6 +709,7 @@ const MessageContainer = () => {
       console.log(error);
     } finally {
       setLoading(false);
+      if (pageNumber > 1) paginationInFlightRef.current = false;
     }
   };
 
@@ -599,6 +734,16 @@ const MessageContainer = () => {
       // it was false, which would suppress scroll-on-arrival here).
       isInitialLoad.current = true;
       wasNearBottomRef.current = true;
+      // A fresh chat has no "new messages" badge to surface — the user
+      // is opening the chat for the first time and the next commit is
+      // the initial-load that scrolls to the bottom anyway.
+      newTailMessageCountRef.current = 0;
+      setNewTailMessageCount(0);
+      // The first commit after chat-open scrolls to the bottom
+      // unconditionally (the container's `scrollTop` is stale from
+      // the previous chat and `isNearBottom()` would return false
+      // — see the comment on `initialScrollDoneRef`).
+      initialScrollDoneRef.current = false;
       if (selectedChatType === "contact") {
         setPage(1);
         setHasMore(true);
@@ -1657,31 +1802,38 @@ const MessageContainer = () => {
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
     setShowScrollButton(distanceFromBottom > 300);
 
-    // Load more messages when near top
-    if (!loading && hasMore && scrollTop < 50) {
-      const scrollYBeforeFetch = scrollHeight;
-
+    // Load more messages when within 300px of the top. The 300px
+    // threshold is pre-emptive — the old 50px threshold created a
+    // visible "dead zone" where the user had to scroll to within 50px
+    // of the top to trigger the next page, which felt like the
+    // pagination got stuck. With 300px, the trigger fires continuously
+    // as the user scrolls up: each new batch lands before they reach
+    // the top, so they can keep scrolling smoothly.
+    //
+    // `paginationInFlightRef` is the synchronous guard against firing
+    // a second pagination while the first is still in flight (see the
+    // ref declaration for the full race-condition story).
+    if (
+      !loading &&
+      !paginationInFlightRef.current &&
+      hasMore &&
+      scrollTop < 300
+    ) {
       if (selectedChatType === "contact") {
-        getMessages(page + 1).then(() => {
-          requestAnimationFrame(() => {
-            if (containerRef.current) {
-              containerRef.current.scrollTop =
-                containerRef.current.scrollHeight - scrollYBeforeFetch;
-            }
-          });
-        });
+        getMessages(page + 1);
       } else if (selectedChatType === "channel") {
-        getChannelMessages(page + 1).then(() => {
-          requestAnimationFrame(() => {
-            if (containerRef.current) {
-              containerRef.current.scrollTop =
-                containerRef.current.scrollHeight - scrollYBeforeFetch;
-            }
-          });
-        });
+        getChannelMessages(page + 1);
       }
     }
   }, [loading, hasMore, selectedChatType, page]);
+
+  // Apply scroll anchor synchronously before paint to prevent visible jumps
+  useLayoutEffect(() => {
+    if (paginationAnchorRef.current && containerRef.current) {
+      applyScrollAnchor(containerRef.current, paginationAnchorRef.current);
+      paginationAnchorRef.current = null;
+    }
+  }, [selectedChatMessages, applyScrollAnchor]);
 
   // Scroll to bottom on initial load and new messages
   useEffect(() => {
@@ -1693,50 +1845,58 @@ const MessageContainer = () => {
     const isOwnMessage =
       lastMessage?.sender === user?.id ||
       lastMessage?.sender?._id === user?.id;
-
-    // Initial-load branch: while `isInitialLoad.current === true`, EVERY
-    // commit pins the view to the bottom. This stays true until the
-    // user actively scrolls up (the `trackPosition` listener flips it
-    // off the moment the user moves more than 150px from the bottom).
-    //
-    // Why every commit, not just the first: the chat-open path sets
-    // messages multiple times in quick succession — getMessages(1)
-    // commits the network response, then `subscribeMessages` fires
-    // with the local-DB snapshot, then the SyncEngine's incremental
-    // refresh may commit fresh rows. Any of those can land "after"
-    // the initial paint, and without re-pinning the user would see
-    // the chat scroll up unexpectedly. Once the user scrolls (real
-    // intent), we stop fighting them.
-    if (isInitialLoad.current) {
-      scrollToBottom(false);
-      lastMessageCountRef.current = currentMessageCount;
-      lastTailIdRef.current = lastMessageId;
-      wasNearBottomRef.current = true;
-      return;
-    }
-
-    // A new message arrived at the tail. We detect this by comparing
-    // the id of the last array entry against the previously recorded
-    // tail id. This catches both the "array grew" case (live socket
-    // append) and the "array reset to a fresh window" case (the offline
-    // repository's `subscribeMessages` fires with a fresh ordered slice
-    // after each write — the count can stay flat or shrink while the
-    // tail still moved forward).
+    const isAtBottom = isNearBottom();
+    const arrayGrew = currentMessageCount > lastMessageCountRef.current;
     const tailChanged =
       lastMessageId != null && lastMessageId !== lastTailIdRef.current;
 
-    if (tailChanged) {
-      const wasAtBottom = wasNearBottomRef.current;
-      // Always scroll for own messages, or if user was near bottom for
-      // received messages.
-      if (isOwnMessage || wasAtBottom) {
-        scrollToBottom(true);
-      }
+    // Delegate the scroll + badge decisions to pure functions. The
+    // entire MessageContainer scroll policy is specified in
+    // `decideScroll` / `decideBadge` and exhaustively unit-tested
+    // in `scrollDecision.test.js` — any change to the policy
+    // starts with a test. The component's job is reduced to:
+    // gather inputs (refs, live scroll position, message array),
+    // call the functions, act on the result.
+    const scrollMode = decideScroll({
+      isInitialLoad: isInitialLoad.current,
+      initialScrollDone: initialScrollDoneRef.current,
+      arrayGrew,
+      tailChanged,
+      isOwnMessage,
+      isAtBottom,
+    });
+
+    if (scrollMode === "instant-bottom") {
+      scrollToBottom(false);
+    } else if (scrollMode === "smooth-bottom") {
+      scrollToBottom(true);
+    }
+
+    const badgeMode = decideBadge({
+      isInitialLoad: isInitialLoad.current,
+      tailChanged,
+      isOwnMessage,
+      isAtBottom,
+    });
+
+    if (badgeMode === "reset") {
+      newTailMessageCountRef.current = 0;
+      setNewTailMessageCount(0);
+    } else if (badgeMode === "increment") {
+      newTailMessageCountRef.current += 1;
+      setNewTailMessageCount(newTailMessageCountRef.current);
+    }
+
+    // First commit of this chat session has fired; subsequent
+    // commits fall through to the `arrayGrew` branch of the policy.
+    if (!initialScrollDoneRef.current) {
+      initialScrollDoneRef.current = true;
     }
 
     lastMessageCountRef.current = currentMessageCount;
     lastTailIdRef.current = lastMessageId;
-  }, [selectedChatMessages, scrollToBottom, user?.id]);
+    wasNearBottomRef.current = isAtBottom;
+  }, [selectedChatMessages, scrollToBottom, user?.id, isNearBottom]);
 
   // Track scroll position continuously
   useEffect(() => {
@@ -1808,11 +1968,16 @@ const MessageContainer = () => {
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-y-auto overflow-x-hidden bg-background px-3 py-4 sm:px-4 md:px-6"
+      className="flex-1 overflow-y-auto overflow-x-hidden bg-background px-3 py-4 sm:px-4 md:px-6 relative"
     >
-      {/* Loading indicator */}
-      {loading && (
-        <div className="flex justify-center py-4">
+      {/* Pagination indicator — pinned to the top of the scroll viewport
+          and overlaid via `absolute` so it never shifts the message list
+          (the previous in-flow dots pushed every message down by ~40px
+          and created a visible "lift" on every page load). Only shows
+          for paginations (page > 1); the initial chat-open is fast
+          enough that a spinner is overkill. */}
+      {loading && page > 1 && (
+        <div className="absolute top-4 left-0 right-0 z-10 flex justify-center pointer-events-none">
           <div className="flex gap-1">
             <div className="typing-dot" />
             <div className="typing-dot" />
@@ -1842,18 +2007,33 @@ const MessageContainer = () => {
       {/* Scroll anchor */}
       <div ref={newMessageRef} />
 
-      {/* Scroll to bottom button */}
+      {/* Scroll to bottom button — shows a red badge with the count of
+          new tail messages that arrived while the user was scrolled up,
+          so they have a clear affordance to jump down to the latest. */}
       <button
-        onClick={() => scrollToBottom(true)}
+        onClick={() => {
+          newTailMessageCountRef.current = 0;
+          setNewTailMessageCount(0);
+          scrollToBottom(true);
+        }}
         className={cn(
           "fixed bottom-24 right-4 sm:right-8 z-40 w-10 h-10 rounded-full bg-background-secondary border border-border-subtle shadow-lg flex items-center justify-center transition-all duration-300 hover:bg-accent hover:scale-110 active:scale-95",
           showScrollButton 
             ? "opacity-100 translate-y-0" 
             : "opacity-0 translate-y-4 pointer-events-none"
         )}
-        aria-label="Scroll to bottom"
+        aria-label={
+          newTailMessageCount > 0
+            ? `Scroll to bottom — ${newTailMessageCount} new message${newTailMessageCount === 1 ? "" : "s"}`
+            : "Scroll to bottom"
+        }
       >
         <ChevronDown className="w-5 h-5 text-foreground" />
+        {newTailMessageCount > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 px-1.5 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center shadow-sm pointer-events-none">
+            {newTailMessageCount > 99 ? "99+" : newTailMessageCount}
+          </span>
+        )}
       </button>
 
       {/* Image Preview Modal */}

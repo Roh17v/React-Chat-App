@@ -754,3 +754,156 @@ describe("DM peer auto-promotion", () => {
     expect(contacts).toEqual([{ bootstrap_status: "ready" }]);
   });
 });
+
+describe("optimistic→confirmed row identity preservation", () => {
+  /**
+   * The local-send happy path:
+   *   1. `enqueueOutbound` writes a row with `client_temp_id` set and
+   *      `server_id = NULL` (status = "pending", sync_state = "local_only").
+   *   2. The OutboundQueue dispatches the socket emit; the server echoes
+   *      the message back via `receiveMessage` with the same
+   *      `clientTempId`. `applyLiveMessage` calls `resolveAndApply`,
+   *      which finds the optimistic row by `client_temp_id` and updates
+   *      it in place — `server_id` transitions to the real id, status
+   *      moves to "sent" or "delivered", `sync_state` becomes
+   *      "confirmed".
+   *
+   * The UI derives the bubble's React key from this row via
+   * `toUiMessage` in `MessageContainer.jsx`. The key MUST be stable
+   * across the optimistic→confirmed transition, otherwise the
+   * `applySubscriptionSnapshot` merge treats them as two different
+   * messages and the user sees their sent message duplicated
+   * ("sent instantly" + clock-icon stuck on "sending" forever; the
+   * duplicate vanishes on chat-close+reopen because `getMessages(1)`
+   * rebuilds state from scratch and only the confirmed row is in the DB).
+   *
+   * The natural stable id is `client_temp_id` — it is generated when
+   * the user sends, sent to the server, echoed back, and preserved
+   * across the confirmation UPDATE (the conflict resolver does not
+   * touch it). These tests pin that property at the repository layer
+   * so the UI's `toUiMessage` priority order can rely on it.
+   */
+  it("enqueueOutbound writes a local_only row with client_temp_id set and server_id NULL", async () => {
+    const ctx = await makeRepository();
+    const result = await ctx.repository.enqueueOutbound({
+      kind: "send_text",
+      conversationId: "user-other",
+      conversationType: "dm",
+      payload: {
+        sender: "user-self",
+        receiver: "user-other",
+        content: "hi",
+        messageType: "text",
+      },
+    });
+    expect(result.clientTempId).toMatch(/^[0-9a-f-]{36}$/);
+
+    const rows = await ctx.driver.query(
+      "SELECT id, server_id, client_temp_id, status, sync_state " +
+        "FROM messages WHERE client_temp_id = ?",
+      [result.clientTempId],
+    );
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row.server_id).toBeNull();
+    expect(row.client_temp_id).toBe(result.clientTempId);
+    expect(row.status).toBe("pending");
+    expect(row.sync_state).toBe("local_only");
+  });
+
+  it("server confirmation updates server_id in place and PRESERVES client_temp_id", async () => {
+    const ctx = await makeRepository();
+    const enqueue = await ctx.repository.enqueueOutbound({
+      kind: "send_text",
+      conversationId: "user-other",
+      conversationType: "dm",
+      payload: {
+        sender: "user-self",
+        receiver: "user-other",
+        content: "hi",
+        messageType: "text",
+      },
+    });
+
+    // The server's `receiveMessage` echo carrying the same clientTempId
+    // — the conflict resolver's byTemp lookup should find the optimistic
+    // row and update it in place.
+    await ctx.repository.applyLiveMessage(
+      makeServerMessage({
+        _id: "srv-confirmed",
+        sender: "user-self",
+        receiver: "user-other",
+        content: "hi",
+        status: "delivered",
+        clientTempId: enqueue.clientTempId,
+      }),
+    );
+
+    const rows = await ctx.driver.query(
+      "SELECT id, server_id, client_temp_id, status, sync_state " +
+        "FROM messages WHERE server_id = ?",
+      ["srv-confirmed"],
+    );
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    // server_id transitioned to the real id...
+    expect(row.server_id).toBe("srv-confirmed");
+    // ...client_temp_id is preserved (THIS is the property the UI's
+    // toUiMessage relies on for a stable React key).
+    expect(row.client_temp_id).toBe(enqueue.clientTempId);
+    // ...the local row's primary key is unchanged (the optimistic and
+    // confirmed versions of the message are the SAME local row).
+    expect(row.id).toBe(enqueue.localMessage?.id);
+    expect(row.status).toBe("delivered");
+    expect(row.sync_state).toBe("confirmed");
+  });
+
+  it("a second confirmation echo does not create a duplicate row", async () => {
+    const ctx = await makeRepository();
+    const enqueue = await ctx.repository.enqueueOutbound({
+      kind: "send_text",
+      conversationId: "user-other",
+      conversationType: "dm",
+      payload: {
+        sender: "user-self",
+        receiver: "user-other",
+        content: "hi",
+        messageType: "text",
+      },
+    });
+
+    // The OutboundQueue's markOutboundConfirmed also calls
+    // resolveAndApply once the deferred resolves. If the socket
+    // `receiveMessage` echo landed first (which is the common race
+    // winner), applyLiveMessage already updated the row; the second
+    // resolveAndApply call from markOutboundConfirmed must NOT
+    // create a duplicate.
+    await ctx.repository.applyLiveMessage(
+      makeServerMessage({
+        _id: "srv-confirmed",
+        sender: "user-self",
+        receiver: "user-other",
+        content: "hi",
+        status: "delivered",
+        clientTempId: enqueue.clientTempId,
+      }),
+    );
+    await ctx.repository.markOutboundConfirmed({
+      queueId: enqueue.id,
+      serverMessage: makeServerMessage({
+        _id: "srv-confirmed",
+        sender: "user-self",
+        receiver: "user-other",
+        content: "hi",
+        status: "delivered",
+        clientTempId: enqueue.clientTempId,
+      }),
+    });
+
+    const rows = await ctx.driver.query(
+      "SELECT id, server_id FROM messages",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].server_id).toBe("srv-confirmed");
+  });
+});
