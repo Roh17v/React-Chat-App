@@ -487,8 +487,12 @@ export function OfflineProvider({ children }) {
     }
 
     // 10. Start the queue, then the engine. Engine `start()` is
-    //     non-blocking: it kicks off bootstrap or incremental in the
-    //     background (Req 4.2 — UI must not block on bootstrap).
+    //     partially blocking: on a warm boot it awaits the first
+    //     incremental pass (~200-500ms) so the sidebar paints with
+    //     fresh unread counts / `last_message` previews; on a cold
+    //     boot it fires bootstrap in the background (Req 4.2 — UI must
+    //     not block on bootstrap) because the local DB is empty and a
+    //     cold bootstrap can take 10+ seconds.
     if (outboundQueue != null) {
       try {
         await outboundQueue.start();

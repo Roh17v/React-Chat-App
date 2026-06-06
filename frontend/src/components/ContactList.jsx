@@ -86,9 +86,30 @@ const ContactList = ({ contacts, isChannel = false }) => {
   };
 
   const getDmPreview = (contact) => {
-    const preview = (contact.lastMessage || "").trim();
-    if (preview) return preview;
-    return "No messages yet";
+    const meta = contact.lastMessageMeta;
+    const raw = (contact.lastMessage || "").trim();
+
+    // No message yet (contact exists but no conversation has happened).
+    if (!raw && !meta?.type) return "No messages yet";
+
+    // "You: " prefix for messages I sent, matching WhatsApp.
+    const isMine =
+      meta?.senderId && user?.id && meta.senderId === user.id;
+    const prefix = isMine ? "You: " : "";
+
+    if (meta?.deletedForEveryone) {
+      return `${prefix}This message was deleted`;
+    }
+
+    switch (meta?.type) {
+      case "file":
+        return `${prefix}📎 Attachment`;
+      case "call":
+        return `${prefix}📞 ${raw || "Call"}`;
+      case "text":
+      default:
+        return `${prefix}${raw}`;
+    }
   };
 
   if (!contacts || contacts.length === 0) {

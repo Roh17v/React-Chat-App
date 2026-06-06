@@ -152,6 +152,13 @@ const ACTIVE_OUTBOUND_STATUSES = ["queued", "in_flight", "failed"];
  */
 
 /**
+ * @typedef {Object} ContactLastMessageMeta
+ * @property {"text" | "file" | "call"} type
+ * @property {boolean} deletedForEveryone
+ * @property {string | null} senderId
+ */
+
+/**
  * @typedef {Object} ContactRow
  * @property {string} _id            User id (matches the existing UI shape).
  * @property {string | null} firstName
@@ -161,8 +168,9 @@ const ACTIVE_OUTBOUND_STATUSES = ["queued", "in_flight", "failed"];
  * @property {string | null} image
  * @property {{ bgColor?: string, textColor?: string } | null} color
  * @property {string | null} lastSeen
- * @property {string | null} lastMessage
- * @property {string | null} lastMessageAt
+ * @property {string | null} lastMessage      Derived from the messages table (see getContacts).
+ * @property {string | null} lastMessageAt    Derived from the messages table (see getContacts).
+ * @property {ContactLastMessageMeta} lastMessageMeta  Raw fields for WhatsApp-style preview formatting.
  * @property {number} unreadCount
  * @property {string} bootstrapStatus
  * @property {string} updatedAt
@@ -356,10 +364,39 @@ function mapMessageRow(row) {
  * The UI consumes `_id` / `firstName` / etc. (see `ContactList.jsx`), so we
  * project to that shape rather than to a snake_case mirror of the table.
  *
+ * `lastMessage` / `lastMessageAt` / `lastMessageMeta` are derived from the
+ * messages subquery in getContacts (source of truth). The cached columns on
+ * the contacts row are used only as a fallback for the cold-start window
+ * before any per-conversation messages have been hydrated locally.
+ *
  * @param {Record<string, unknown>} row
  * @returns {ContactRow}
  */
 function mapContactRow(row) {
+  const derivedContent =
+    row.last_message_content != null ? String(row.last_message_content) : null;
+  const derivedType =
+    row.last_message_type != null ? String(row.last_message_type) : "text";
+  const derivedDeleted =
+    row.last_deleted_for_everyone != null
+      ? Number(row.last_deleted_for_everyone) === 1
+      : false;
+  const derivedSenderId =
+    row.last_message_sender_id != null
+      ? String(row.last_message_sender_id)
+      : null;
+  const derivedCreatedAt =
+    row.last_message_created_at != null
+      ? String(row.last_message_created_at)
+      : null;
+
+  const lastMessage =
+    derivedContent != null ? derivedContent : toNullableString(row.last_message_cached);
+  const lastMessageAt =
+    derivedCreatedAt != null
+      ? derivedCreatedAt
+      : toNullableString(row.last_message_at_cached);
+
   return {
     _id: String(row.user_id),
     firstName: toNullableString(row.first_name),
@@ -371,8 +408,13 @@ function mapContactRow(row) {
       parseJsonOrFallback(row.color_json, null)
     ),
     lastSeen: toNullableString(row.last_seen),
-    lastMessage: toNullableString(row.last_message),
-    lastMessageAt: toNullableString(row.last_message_at),
+    lastMessage,
+    lastMessageAt,
+    lastMessageMeta: {
+      type: /** @type {"text" | "file" | "call"} */ (derivedType),
+      deletedForEveryone: derivedDeleted,
+      senderId: derivedSenderId,
+    },
     unreadCount: toIntegerOrZero(row.unread_count),
     bootstrapStatus:
       typeof row.bootstrap_status === "string" ? row.bootstrap_status : "pending",
@@ -1001,30 +1043,38 @@ export function createRepository(options = {}) {
    */
   async function getContacts() {
     requireReady("getContacts");
-    // `unread_count` is derived on read from the `messages` table, not
-    // trusted from the `unread_count` column. The column is kept in
-    // sync as a best-effort cache (so reads from cold storage don't have
-    // to scan messages), but the messages table is the source of truth:
+    // `unread_count`, `last_message`, and `last_message_at` are all
+    // derived on read from the `messages` table — the messages table is
+    // the single source of truth. The columns on the `contacts` row are
+    // kept as a COALESCE bootstrap hint for the cold-start window where
+    // /dm-contacts has run but per-conversation messages have not yet
+    // been hydrated locally; once any message exists, the messages
+    // subquery wins.
     //
-    //   - `applyLiveMessage` writes new rows but does NOT touch
-    //     `unread_count` — deriving makes that bookkeeping unnecessary.
-    //   - `applyStatusUpdate` flips status to "read" — derived count
-    //     drops automatically.
-    //   - `resetUnreadCount` flips local rows to "read" too — same.
-    //   - The /dm-contacts response from the server is treated as a
-    //     hint, not as authoritative (its value can be stale by the time
-    //     it arrives). `applyContacts` only seeds `unread_count` on
-    //     first insert; later writes preserve the local value.
+    // The previous design stored the preview text and sort timestamp as
+    // denormalized columns on the `contacts` row. No message-write path
+    // (enqueueOutbound / applyServerMessages / applyLiveMessage /
+    // markOutboundConfirmed / applyStatusUpdate / applyDeletion)
+    // updated that row, so after a send the home page sort and preview
+    // stayed frozen on whatever the last server /dm-contacts sync said.
+    // Deriving eliminates that bug class and matches the decision made
+    // for `unread_count` in 77843b5.
     //
-    // The subquery filters by `sender_id = c.user_id` (messages from the
-    // contact, addressed to the current user) and excludes locally-
-    // deleted rows. `status != 'read'` covers both "sent" and
-    // "delivered". This is a small per-row scan over an indexed table
-    // (idx_messages_status_pending) so the contact list query stays
-    // fast even with thousands of messages.
+    // The last-message subquery uses idx_messages_conv_created
+    // (conversation_id, created_at DESC) for a single index seek per
+    // contact. The inner tiebreaker (server_id DESC with NULLs last via
+    // the CASE expression) matches the one used by getMessages() so the
+    // "latest message" definition is consistent everywhere.
     const rows = /** @type {Record<string, unknown>[]} */ (
       await driver.query(
-        "SELECT c.user_id, c.last_message, c.last_message_at, " +
+        "SELECT c.user_id, " +
+        "       c.last_message AS last_message_cached, " +
+        "       c.last_message_at AS last_message_at_cached, " +
+          "       lm.content              AS last_message_content, " +
+          "       lm.message_type         AS last_message_type, " +
+          "       lm.deleted_for_everyone AS last_deleted_for_everyone, " +
+          "       lm.sender_id            AS last_message_sender_id, " +
+          "       lm.created_at           AS last_message_created_at, " +
           "       COALESCE((SELECT COUNT(*) FROM messages m " +
           "                  WHERE m.conversation_id = c.user_id " +
           "                    AND m.conversation_type = 'dm' " +
@@ -1036,7 +1086,23 @@ export function createRepository(options = {}) {
           "       u.image, u.color_json, u.last_seen " +
           "FROM contacts c " +
           "LEFT JOIN users u ON u.user_id = c.user_id " +
-          "ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC",
+          "LEFT JOIN ( " +
+          "  SELECT m.conversation_id, m.content, m.message_type, " +
+          "         m.deleted_for_everyone, m.sender_id, m.created_at " +
+          "  FROM messages m " +
+          "  WHERE m.conversation_type = 'dm' " +
+          "    AND m.deleted_for_me = 0 " +
+          "    AND m.id = ( " +
+          "      SELECT m2.id FROM messages m2 " +
+          "      WHERE m2.conversation_id = m.conversation_id " +
+          "        AND m2.conversation_type = 'dm' " +
+          "        AND m2.deleted_for_me = 0 " +
+          "      ORDER BY m2.created_at DESC, " +
+          "               CASE WHEN m2.server_id IS NULL THEN m2.id ELSE m2.server_id END DESC " +
+          "      LIMIT 1 " +
+          "    ) " +
+          ") lm ON lm.conversation_id = c.user_id " +
+          "ORDER BY COALESCE(lm.created_at, c.last_message_at, c.updated_at) DESC",
       )
     );
     return rows.map(mapContactRow);
@@ -1418,13 +1484,22 @@ export function createRepository(options = {}) {
 
   /**
    * Upsert the DM contact list returned by `GET /api/users/dm-contacts`.
-   * Each entry is the populated user doc plus message-derived fields
-   * (`unreadCount`, `lastMessage`, `lastMessageAt`).
+   * Each entry is the populated user doc plus the server-computed
+   * `unreadCount` (kept as a best-effort cache) and `lastMessage` /
+   * `lastMessageAt` (kept as a cold-start hint only).
    *
    * The repository owns the snake_case schema; this method is the only
    * place in the codebase that writes the `contacts` and `users` tables
    * for the DM list payload. Subscribers registered via
    * {@link subscribeContacts} fire after the transaction commits.
+   *
+   * `last_message` and `last_message_at` are written here purely as a
+   * COALESCE fallback for the cold-start window where /dm-contacts has
+   * run but per-conversation messages have not yet been hydrated
+   * locally. The source of truth is the `messages` table — see
+   * getContacts() and mapContactRow(). As soon as any message exists
+   * for the conversation, the derived query wins and these columns are
+   * no longer read.
    *
    * Internal — runs under the GLOBAL_MUTEX_KEY acquired by the public
    * {@link applyContacts} wrapper.
@@ -1466,26 +1541,19 @@ export function createRepository(options = {}) {
             "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
               "VALUES (?, ?, ?, ?, 'ready', ?) " +
               "ON CONFLICT(user_id) DO UPDATE SET " +
+              // last_message / last_message_at are derived from the
+              // messages table on read (see getContacts) — they are the
+              // source of truth. The columns are only retained as a
+              // COALESCE bootstrap hint for the cold-start window.
               "  last_message = excluded.last_message, " +
-              // Keep the larger lastMessageAt so a server payload that
-              // pre-dates a live event we already received does not roll
-              // the timestamp backwards (Property 16).
-              "  last_message_at = CASE " +
-              "     WHEN excluded.last_message_at IS NULL THEN contacts.last_message_at " +
-              "     WHEN contacts.last_message_at IS NULL THEN excluded.last_message_at " +
-              "     WHEN excluded.last_message_at > contacts.last_message_at THEN excluded.last_message_at " +
-              "     ELSE contacts.last_message_at END, " +
-              // unread_count is now derived on read from the messages
-              // table (see getContacts). The column is preserved as a
+              "  last_message_at = excluded.last_message_at, " +
+              // unread_count is derived on read from the messages table
+              // (see getContacts). The column is preserved as a
               // best-effort cache for the cold-start case where the
               // messages table hasn't been populated yet — but never
               // overwritten from the server's stale value, since
               // confirm-read may not have round-tripped before
-              // /dm-contacts was sampled. Without this guard, a chat the
-              // user just opened (local count → 0) snaps back to the
-              // server's previous value (e.g. 5) and stays stuck until
-              // the next /dm-contacts after the read receipt is
-              // processed.
+              // /dm-contacts was sampled.
               "  unread_count = contacts.unread_count, " +
               "  bootstrap_status = 'ready', " +
               "  updated_at = excluded.updated_at",

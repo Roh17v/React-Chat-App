@@ -267,7 +267,13 @@ const MessageContainer = () => {
           const args = {
             conversationId: selectedChatId,
             conversationType: "dm",
-            limit: 20,
+            // Match `repositories/index.js:3007` `emitMessages` default
+            // (50) so the chat-open read returns the same window the
+            // live-update subscription returns. A mismatch here causes
+            // a visible flash on chat-open — the view shrinks from the
+            // larger window to the smaller one (or grows, on the
+            // pre-IIFE code path).
+            limit: 50,
           };
           if (pageNumber > 1) {
             // The store already holds the messages we've shown so far —
@@ -447,7 +453,12 @@ const MessageContainer = () => {
           const args = {
             conversationId: selectedChatId,
             conversationType: "channel",
-            limit: 20,
+            // Match `repositories/index.js:3007` `emitMessages` default
+            // (50) so the chat-open read returns the same window the
+            // live-update subscription returns. A mismatch here causes
+            // a visible flash on channel-open — the view shrinks from
+            // the larger window to the smaller one.
+            limit: 50,
           };
           if (pageNumber > 1) {
             const oldest = selectedChatMessages.reduce((acc, m) => {
@@ -591,27 +602,35 @@ const MessageContainer = () => {
         setPage(1);
         setHasMore(true);
         setSelectedChatMessages([], true);
-        getMessages(1);
-        // Kick a parallel incremental refresh on native — pulls anything
-        // newer than the cursor so the user doesn't see "old window for a
-        // moment, then new messages flash in" when they were offline and
-        // had pending unreads. The repository's `subscribeMessages`
-        // listener (registered above) will fire as soon as the new rows
-        // commit, so the UI updates without a separate refetch loop.
-        if (Capacitor.isNativePlatform()) {
-          const engine = tryGetSyncEngine();
-          if (engine && typeof engine.refreshConversation === "function") {
-            engine
-              .refreshConversation({
-                conversationId: selectedChatId,
-                conversationType: "dm",
-              })
-              .catch(() => {
-                // Silently ignore — the periodic incremental pass and
-                // live socket events will catch up regardless.
-              });
+        // On native, block the first read on the per-conversation refresh
+        // so the user does not see "old window for a moment, then new
+        // messages flash in" when they were offline and now have unread
+        // messages. We race the refresh against a 2 s safety timeout so
+        // a slow network cannot leave the user staring at an empty chat;
+        // if the timeout wins, `getMessages(1)` reads whatever is in the
+        // local DB and the in-flight refresh commits append via
+        // `subscribeMessages` when it lands. The refresh's own `.catch`
+        // absorbs network errors, the timeout's race never throws, so
+        // the await always resolves and `getMessages(1)` always runs.
+        void (async () => {
+          if (Capacitor.isNativePlatform()) {
+            const engine = tryGetSyncEngine();
+            if (engine && typeof engine.refreshConversation === "function") {
+              const refresh = engine
+                .refreshConversation({
+                  conversationId: selectedChatId,
+                  conversationType: "dm",
+                })
+                .catch(() => {});
+              const CHAT_OPEN_REFRESH_TIMEOUT_MS = 2000;
+              const timeout = new Promise((resolve) =>
+                setTimeout(resolve, CHAT_OPEN_REFRESH_TIMEOUT_MS),
+              );
+              await Promise.race([refresh, timeout]);
+            }
           }
-        }
+          getMessages(1);
+        })();
         // Mark-read is sent through THREE channels for durability:
         //   1. Socket emit — instant, but lost if the socket is mid-
         //      reconnect when we fire.

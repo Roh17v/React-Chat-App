@@ -764,7 +764,9 @@ describe("SyncEngine.refreshConversation", () => {
       "SELECT server_id FROM messages WHERE conversation_id = ?",
       ["user-other"],
     );
-    expect(rows.map((r) => r.server_id)).toContain("srv-new");
+    expect(
+      rows.map((r) => /** @type {{ server_id: string }} */ (r).server_id),
+    ).toContain("srv-new");
   });
 
   it("returns ok:false immediately when the engine is offline", async () => {
@@ -874,6 +876,150 @@ describe("SyncEngine.refreshConversation", () => {
     });
 
     expect(result.ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// start() — warm-boot blocking semantics
+// ---------------------------------------------------------------------------
+// On a warm boot, the sidebar hydrates from the local DB BEFORE
+// `OfflineProvider` calls `engine.start()`. If `start()` does not block
+// on the first incremental, the user sees stale `unread_count` /
+// `last_message` values, then watches them "drop" 1-2s later when
+// incremental lands. The fix is for `start()` to await incremental so
+// the sidebar's first paint is already consistent with the server.
+// Cold-boot bootstrap is intentionally left fire-and-forget (a cold
+// bootstrap can take 10+ seconds and the local DB is empty anyway).
+
+describe("SyncEngine.start blocks on warm-boot incremental", () => {
+  it("does not resolve until the first incremental pass completes", async () => {
+    const { repository } = await makeRepository();
+
+    // Deferred we control: start() must block until this resolves.
+    let resolveIncrementalFetch = /** @type {(v: unknown) => void} */ (
+      () => {}
+    );
+    const incrementalFetchPromise = new Promise((resolve) => {
+      resolveIncrementalFetch = resolve;
+    });
+
+    // Build an apiClient whose `.get` is the unified-incremental
+    // endpoint. Any other endpoint (per-conversation) is left unstubbed
+    // and would throw — the test never reaches the fallback path
+    // because the unified path is taken (lastIncrementalSyncAt is set
+    // by the meta hydration below).
+    const apiClient = {
+      get: vi.fn(async (url) => {
+        if (typeof url === "string" && url.includes("/api/messages/updates")) {
+          await incrementalFetchPromise;
+          return { data: { messages: [], contacts: [], channels: [] } };
+        }
+        throw Object.assign(new Error(`apiClient stub: no route for ${url}`), {
+          code: "NO_STUB_ROUTE",
+          url,
+        });
+      }),
+    };
+
+    const engine = createSyncEngine({
+      repository: /** @type {any} */ (repository),
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+
+    // Seed `last_incremental_sync_at` so `hydrateLastIncrementalSyncAt`
+    // sets the in-memory cursor and `incremental()` takes the unified
+    // path (the path that fetches /api/messages/updates — our
+    // controllable deferred).
+    const driver = /** @type {any} */ (repository.getDriver());
+    await driver.run(
+      "INSERT INTO meta (key, value) VALUES (?, ?)",
+      ["last_incremental_sync_at", "2024-01-01T00:00:00.000Z"],
+    );
+    await driver.run(
+      "INSERT INTO meta (key, value) VALUES (?, ?)",
+      ["bootstrap_completed_at", "2024-01-01T00:00:00.000Z"],
+    );
+    // Seed a sync_cursors row too so shouldBootstrap() returns false.
+    await driver.run(
+      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_created_at, last_server_id) VALUES (?, ?, ?, ?)",
+      ["user-other", "dm", "2024-01-01T00:00:00.000Z", "srv-old"],
+    );
+
+    // Kick off start() but DO NOT await — we want to assert it is
+    // still blocked on incremental.
+    let startResolved = false;
+    const startPromise = engine
+      .start({ userId: "user-self" })
+      .then(() => {
+        startResolved = true;
+      });
+
+    // Yield a few microtasks + one macrotask so start() can run past
+    // `hydrateLastIncrementalSyncAt`, `shouldBootstrap`, and into the
+    // awaiting `incremental()`.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // start() must still be pending — it is blocked on our deferred.
+    expect(startResolved).toBe(false);
+    // The engine has advanced to the "incremental" phase.
+    expect(engine.getStatus().phase).toBe("incremental");
+    // The apiClient was actually called (start() is past the no-op
+    // bootstrap path).
+    expect(apiClient.get).toHaveBeenCalled();
+
+    // Release the deferred — start() should now resolve.
+    resolveIncrementalFetch(undefined);
+    await startPromise;
+
+    // start() has resolved. The phase should be "ready".
+    expect(startResolved).toBe(true);
+    expect(engine.getStatus().phase).toBe("ready");
+  });
+
+  it("resolves cleanly even if incremental throws (errors are absorbed)", async () => {
+    const { repository } = await makeRepository();
+
+    // The unified endpoint rejects — simulates a network error during
+    // the warm-boot first sync.
+    const apiClient = {
+      get: vi.fn(async (url) => {
+        if (typeof url === "string" && url.includes("/api/messages/updates")) {
+          throw new Error("Network down");
+        }
+        throw Object.assign(new Error(`apiClient stub: no route for ${url}`), {
+          code: "NO_STUB_ROUTE",
+          url,
+        });
+      }),
+    };
+
+    const engine = createSyncEngine({
+      repository: /** @type {any} */ (repository),
+      apiClient,
+      tempIdRegistry: createClientTempIdRegistry(),
+      host: "",
+      sleep: async () => {},
+    });
+
+    const driver = /** @type {any} */ (repository.getDriver());
+    await driver.run(
+      "INSERT INTO meta (key, value) VALUES (?, ?)",
+      ["last_incremental_sync_at", "2024-01-01T00:00:00.000Z"],
+    );
+    await driver.run(
+      "INSERT INTO meta (key, value) VALUES (?, ?)",
+      ["bootstrap_completed_at", "2024-01-01T00:00:00.000Z"],
+    );
+    await driver.run(
+      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_created_at, last_server_id) VALUES (?, ?, ?, ?)",
+      ["user-other", "dm", "2024-01-01T00:00:00.000Z", "srv-old"],
+    );
+
+    // Must resolve (not reject) despite the network error.
+    await expect(engine.start({ userId: "user-self" })).resolves.not.toThrow();
   });
 });
 

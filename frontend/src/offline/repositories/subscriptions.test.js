@@ -476,3 +476,222 @@ describe("repository.subscribeChannels", () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe("repository.getContacts derived lastMessage", () => {
+  /**
+   * Regression test for the bug where the home-page contact list stayed
+   * frozen on the last /dm-contacts server payload because no
+   * message-write path updated the contacts.last_message / last_message_at
+   * columns. After the fix, getContacts derives both fields from the
+   * `messages` table, so a new send (or any insert into messages) is
+   * reflected immediately.
+   */
+
+  it("derives lastMessage / lastMessageAt from the latest messages table row", async () => {
+    const ctx = await makeRepository();
+    const driver = ctx.driver;
+    const updatedAt = new Date().toISOString();
+
+    // Seed two users + two contacts.
+    await driver.run(
+      "INSERT INTO users (user_id, first_name, last_name, email, username, image, color_json, last_seen, updated_at) " +
+        "VALUES ('user-A', 'Alice', null, 'a@test.com', 'alice', null, null, null, ?)",
+      [updatedAt],
+    );
+    await driver.run(
+      "INSERT INTO users (user_id, first_name, last_name, email, username, image, color_json, last_seen, updated_at) " +
+        "VALUES ('user-B', 'Bob', null, 'b@test.com', 'bob', null, null, null, ?)",
+      [updatedAt],
+    );
+    await driver.run(
+      "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
+        "VALUES ('user-A', NULL, NULL, 0, 'ready', ?)",
+      [updatedAt],
+    );
+    await driver.run(
+      "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
+        "VALUES ('user-B', NULL, NULL, 0, 'ready', ?)",
+      [updatedAt],
+    );
+
+    // Older message in user-A's conversation, newer in user-B's.
+    await ctx.repository.applyServerMessages({
+      conversationId: "user-A",
+      conversationType: "dm",
+      messages: [
+        makeServerMessage({
+          _id: "srv-A1",
+          sender: "user-A",
+          content: "hi from A",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        }),
+      ],
+    });
+    await ctx.repository.applyServerMessages({
+      conversationId: "user-B",
+      conversationType: "dm",
+      messages: [
+        makeServerMessage({
+          _id: "srv-B1",
+          sender: "user-B",
+          content: "hi from B",
+          createdAt: "2024-01-01T00:01:00.000Z",
+          updatedAt: "2024-01-01T00:01:00.000Z",
+        }),
+      ],
+    });
+
+    // Initial sort: user-B first (newer).
+    const initial = await ctx.repository.getContacts();
+    expect(initial.map((c) => c._id)).toEqual(["user-B", "user-A"]);
+    const a0 = initial.find((c) => c._id === "user-A");
+    expect(a0?.lastMessage).toBe("hi from A");
+    expect(a0?.lastMessageAt).toBe("2024-01-01T00:00:00.000Z");
+    expect(a0?.lastMessageMeta).toEqual({
+      type: "text",
+      deletedForEveryone: false,
+      senderId: "user-A",
+    });
+
+    // Now send a NEW message to user-A (newer than user-B's last).
+    // enqueueOutbound inserts an optimistic row into `messages`; that
+    // single insert is what the previous code missed updating contacts
+    // for, leaving the sort and preview frozen.
+    const enq = await ctx.repository.enqueueOutbound({
+      kind: "send_text",
+      conversationId: "user-A",
+      conversationType: "dm",
+      payload: { content: "reply to A" },
+    });
+    expect(enq.clientTempId).toBeTruthy();
+
+    // Sort must now put user-A first; preview must reflect the new send.
+    const after = await ctx.repository.getContacts();
+    expect(after.map((c) => c._id)).toEqual(["user-A", "user-B"]);
+    const a1 = after.find((c) => c._id === "user-A");
+    expect(a1?.lastMessage).toBe("reply to A");
+    expect(a1?.lastMessageMeta?.senderId).toBe("user-self");
+    expect(a1?.lastMessageMeta?.type).toBe("text");
+    expect(a1?.lastMessageMeta?.deletedForEveryone).toBe(false);
+    // lastMessageAt should be the new optimistic message's created_at.
+    expect(typeof a1?.lastMessageAt).toBe("string");
+    expect(new Date(a1.lastMessageAt).getTime()).toBeGreaterThan(
+      new Date("2024-01-01T00:01:00.000Z").getTime(),
+    );
+  });
+
+  it("reflects file and call message types in lastMessageMeta", async () => {
+    const ctx = await makeRepository();
+    const driver = ctx.driver;
+    const updatedAt = new Date().toISOString();
+
+    await driver.run(
+      "INSERT INTO users (user_id, first_name, last_name, email, username, image, color_json, last_seen, updated_at) " +
+        "VALUES ('user-file', null, null, null, null, null, null, null, ?)",
+      [updatedAt],
+    );
+    await driver.run(
+      "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
+        "VALUES ('user-file', NULL, NULL, 0, 'ready', ?)",
+      [updatedAt],
+    );
+
+    await ctx.repository.applyServerMessages({
+      conversationId: "user-file",
+      conversationType: "dm",
+      messages: [
+        makeServerMessage({
+          _id: "srv-file-1",
+          sender: "user-file",
+          messageType: "file",
+          content: null,
+          fileUrl: "https://x/y.png",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        }),
+      ],
+    });
+
+    const contacts = await ctx.repository.getContacts();
+    const c = contacts.find((x) => x._id === "user-file");
+    expect(c?.lastMessageMeta?.type).toBe("file");
+  });
+
+  it("reflects deletedForEveryone in lastMessageMeta when applyDeletion clears the message", async () => {
+    const ctx = await makeRepository();
+    const driver = ctx.driver;
+    const updatedAt = new Date().toISOString();
+
+    await driver.run(
+      "INSERT INTO users (user_id, first_name, last_name, email, username, image, color_json, last_seen, updated_at) " +
+        "VALUES ('user-del', null, null, null, null, null, null, null, ?)",
+      [updatedAt],
+    );
+    await driver.run(
+      "INSERT INTO contacts (user_id, last_message, last_message_at, unread_count, bootstrap_status, updated_at) " +
+        "VALUES ('user-del', NULL, NULL, 0, 'ready', ?)",
+      [updatedAt],
+    );
+
+    await ctx.repository.applyServerMessages({
+      conversationId: "user-del",
+      conversationType: "dm",
+      messages: [
+        makeServerMessage({
+          _id: "srv-del-1",
+          sender: "user-del",
+          content: "about to be deleted",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:00.000Z",
+        }),
+      ],
+    });
+
+    let c = (await ctx.repository.getContacts()).find((x) => x._id === "user-del");
+    expect(c?.lastMessageMeta?.deletedForEveryone).toBe(false);
+    expect(c?.lastMessage).toBe("about to be deleted");
+
+    await ctx.repository.applyDeletion({
+      serverId: "srv-del-1",
+      deletedForEveryone: true,
+    });
+
+    c = (await ctx.repository.getContacts()).find((x) => x._id === "user-del");
+    // The latest message still exists (it's been tombstoned, not deleted
+    // for me), so it remains the latest; but the UI's `getDmPreview` keys
+    // off `deletedForEveryone` to show "This message was deleted".
+    expect(c?.lastMessageMeta?.deletedForEveryone).toBe(true);
+  });
+
+  it("falls back to the cached contacts.last_message column when no messages exist locally yet (cold-start)", async () => {
+    const ctx = await makeRepository();
+
+    // applyContacts seeds the row with last_message / last_message_at as
+    // a hint; getContacts uses the messages subquery as the source of
+    // truth and falls back to the columns when no messages exist.
+    await ctx.repository.applyContacts([
+      {
+        _id: "user-cold",
+        firstName: "Cold",
+        lastName: "Start",
+        email: "c@test.com",
+        lastMessage: "server preview",
+        lastMessageAt: "2024-01-01T00:00:00.000Z",
+        unreadCount: 0,
+      },
+    ]);
+
+    const c = (await ctx.repository.getContacts())[0];
+    expect(c?._id).toBe("user-cold");
+    // No messages in the messages table → falls back to the cached column.
+    expect(c?.lastMessage).toBe("server preview");
+    expect(c?.lastMessageAt).toBe("2024-01-01T00:00:00.000Z");
+    // lastMessageMeta defaults to text / not-deleted / null sender.
+    expect(c?.lastMessageMeta).toEqual({
+      type: "text",
+      deletedForEveryone: false,
+      senderId: null,
+    });
+  });
+});

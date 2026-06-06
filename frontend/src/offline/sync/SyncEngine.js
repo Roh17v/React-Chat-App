@@ -1393,7 +1393,9 @@ export function createSyncEngine(options) {
     if (await shouldBootstrap()) {
       // Run bootstrap in the background so the UI does not block on the
       // initial sync — Req 4.2 ("expose a bootstrap status flag so the
-      // UI can render a progress indicator without blocking").
+      // UI can render a progress indicator without blocking"). On cold
+      // boot the local DB is empty so there is no stale data to hide,
+      // and a cold bootstrap can take 10+ seconds.
       void bootstrap().catch((err) => {
         diagnostics.log({
           category: "bootstrap",
@@ -1403,7 +1405,16 @@ export function createSyncEngine(options) {
         });
       });
     } else {
-      void incremental().catch((err) => {
+      // On a warm boot we already have data in the local DB (and the
+      // sidebar hydrates from it in `OfflineProvider.boot` before
+      // `start()` runs). Block the `start()` promise on incremental
+      // so the sidebar reads, message counts, and `last_message`
+      // previews reflect the latest server state by the time the UI
+      // becomes interactive. Without this, the sidebar paints with
+      // stale `unread_count` / `last_message` values and the user sees
+      // the counts "drop" 1-2s later when the first incremental lands.
+      // Errors are absorbed by the `.catch` so `start()` never rejects.
+      await incremental().catch((err) => {
         diagnostics.log({
           category: "incremental",
           code: "INCREMENTAL_UNHANDLED",
