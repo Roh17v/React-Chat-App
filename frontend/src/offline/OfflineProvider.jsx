@@ -48,6 +48,7 @@ import { getSyncEngine } from "./sync/SyncEngine.js";
 import { getOutboundQueue } from "./sync/OutboundQueue.js";
 import { getConnectivity } from "./services/Connectivity.js";
 import { getMediaCache } from "./services/MediaCache.js";
+import { HOST } from "../utils/constants.js";
 import { getEncryptionLayer } from "./services/EncryptionLayer.js";
 import { getDiagnostics } from "./utils/Diagnostics.js";
 
@@ -421,6 +422,8 @@ export function OfflineProvider({ children }) {
         socket: liveSocket,
         apiClient: /** @type {any} */ (axios),
         connectivity,
+        messagesRoute: `${HOST}/api/messages`,
+        uploadFileRoute: `${HOST}/api/messages/upload-file`,
       });
       refs.current.outboundQueue = outboundQueue;
     } catch (err) {

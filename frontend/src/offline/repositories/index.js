@@ -925,11 +925,11 @@ export function createRepository(options = {}) {
     const startedAt = Date.now();
     try {
       await wipeInternal();
-      if (typeof driver.close === "function") {
-        await driver.close();
-      }
       if (typeof driver.deleteDatabase === "function") {
         await driver.deleteDatabase(DB_NAME);
+      }
+      if (typeof driver.close === "function") {
+        await driver.close();
       }
       userId = null;
       ready = false;
@@ -2630,13 +2630,13 @@ export function createRepository(options = {}) {
         }
       } else if (args.kind === "delete_for_me" && typeof payload.messageId === "string") {
         await tx.run(
-          `UPDATE messages SET deleted_for_me = 1, updated_at = ? WHERE server_id = ?`,
-          [now, payload.messageId]
+          `UPDATE messages SET deleted_for_me = 1, updated_at = ? WHERE server_id = ? OR id = ? OR client_temp_id = ?`,
+          [now, payload.messageId, payload.messageId, payload.messageId]
         );
       } else if (args.kind === "delete_for_everyone" && typeof payload.messageId === "string") {
         await tx.run(
-          `UPDATE messages SET deleted_for_everyone = 1, content = NULL, file_url = NULL, file_name = NULL, updated_at = ? WHERE server_id = ?`,
-          [now, payload.messageId]
+          `UPDATE messages SET deleted_for_everyone = 1, content = NULL, file_url = NULL, file_name = NULL, updated_at = ? WHERE server_id = ? OR id = ? OR client_temp_id = ?`,
+          [now, payload.messageId, payload.messageId, payload.messageId]
         );
       }
 

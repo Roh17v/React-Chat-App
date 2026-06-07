@@ -355,9 +355,15 @@ export const createChatSlice = (set, get) => ({
   setMessageActionMenu: (menu) => set({ messageActionMenu: menu }),
   deleteMessageForMe: (messageId) =>
     set((state) => {
-      const filtered = state.selectedChatMessages.filter(
-        (msg) => msg._id !== messageId
-      );
+      console.log("ChatSlice.deleteMessageForMe called with messageId:", messageId);
+      const filtered = state.selectedChatMessages.filter((msg) => {
+        const keep = msg._id !== messageId && msg.serverId !== messageId && msg.clientTempId !== messageId;
+        if (!keep) {
+          console.log("Filtered out message from state:", msg);
+        }
+        return keep;
+      });
+      console.log("Old length:", state.selectedChatMessages.length, "New length:", filtered.length);
       // Update sidebar preview if the deleted msg was the last one
       const lastMsg = filtered[filtered.length - 1];
       const contacts = state.directMessagesContacts?.map((c) => {
@@ -381,13 +387,13 @@ export const createChatSlice = (set, get) => ({
   replaceWithDeletedPlaceholder: (messageId) =>
     set((state) => {
       const updatedMessages = state.selectedChatMessages.map((msg) =>
-        msg._id === messageId
+        msg._id === messageId || msg.serverId === messageId || msg.clientTempId === messageId
           ? { ...msg, deletedForEveryone: true, content: null, fileUrl: null }
           : msg
       );
       // Update sidebar preview if the deleted msg was the last one
       const lastMsg = updatedMessages[updatedMessages.length - 1];
-      const isLastDeleted = lastMsg?._id === messageId;
+      const isLastDeleted = lastMsg?._id === messageId || lastMsg?.serverId === messageId || lastMsg?.clientTempId === messageId;
       const contacts = isLastDeleted
         ? state.directMessagesContacts?.map((c) => {
             if (c._id === state.selectedChatData?._id) {

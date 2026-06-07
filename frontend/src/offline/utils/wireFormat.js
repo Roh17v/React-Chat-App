@@ -229,18 +229,18 @@ export function toLocalRow(m) {
   // reject `undefined`/`null`/non-string here.
   let content = null;
   if (messageType === "text") {
-    if (typeof m.content !== "string") return missing("content");
-    content = m.content;
+    if (typeof m.content !== "string" && m.deletedForEveryone !== true) return missing("content");
+    content = typeof m.content === "string" ? m.content : null;
   } else if (typeof m.content === "string") {
     content = m.content;
   }
 
   let fileUrl = null;
   if (messageType === "file") {
-    if (typeof m.fileUrl !== "string" || m.fileUrl.length === 0) {
+    if ((typeof m.fileUrl !== "string" || m.fileUrl.length === 0) && m.deletedForEveryone !== true) {
       return missing("fileUrl");
     }
-    fileUrl = m.fileUrl;
+    fileUrl = typeof m.fileUrl === "string" ? m.fileUrl : null;
   } else if (typeof m.fileUrl === "string") {
     fileUrl = m.fileUrl;
   }
@@ -343,11 +343,11 @@ export function toWirePayload(row) {
   const updatedAt = optString(row.updatedAt);
   if (updatedAt === null) return missing("updatedAt");
 
-  if (messageType === "text" && typeof row.content !== "string") {
+  if (messageType === "text" && typeof row.content !== "string" && row.deletedForEveryone !== true) {
     return missing("content");
   }
   if (messageType === "file") {
-    if (typeof row.fileUrl !== "string" || row.fileUrl.length === 0) {
+    if ((typeof row.fileUrl !== "string" || row.fileUrl.length === 0) && row.deletedForEveryone !== true) {
       return missing("fileUrl");
     }
   }

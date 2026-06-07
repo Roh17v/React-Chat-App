@@ -19,7 +19,7 @@ import axios from "axios";
 
 const ProfileInfo = () => {
   const user = useAppStore((state) => state.user);
-  const setUser = useAppStore((state) => state.setUser);
+  const logout = useAppStore((state) => state.logout);
   const navigate = useNavigate();
   const [showAvatarPreview, setShowAvatarPreview] = useState(false);
 
@@ -34,25 +34,9 @@ const ProfileInfo = () => {
       if (response.status === 200) {
         await Preferences.remove({ key: "auth_token" });
         await Preferences.remove({ key: "auth_user" }).catch(() => {});
-        // Req 1.6 / 10.6 — wipe offline store, then destroy encryption key,
-        // before clearing the React user state. Errors are swallowed so a
-        // failing offline layer never blocks the user from logging out.
-        try {
-          const repo = getRepository();
-          if (repo.isReady()) {
-            await repo.wipe();
-          }
-        } catch (e) {
-          console.warn("[logout] offlineStore.wipe() failed:", e);
-        }
-        try {
-          const enc = getEncryptionLayer();
-          await enc.destroy();
-        } catch (e) {
-          console.warn("[logout] Encryption.destroy() failed:", e);
-        }
+        
         toast.success("Logged out successfully");
-        setUser(null);
+        logout();
         navigate("/auth");
       }
     } catch (error) {

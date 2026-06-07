@@ -971,6 +971,8 @@ export function getOutboundQueue(init) {
       );
     }
     singleton = createOutboundQueue(init);
+  } else if (init != null && init.socket !== undefined) {
+    singleton.setSocket(init.socket);
   }
   return singleton;
 }

@@ -1115,7 +1115,7 @@ const MessageContainer = () => {
           await repo.enqueueOutbound({
             kind: "delete_for_me",
             conversationId: selectedChatData._id,
-            conversationType: selectedChatType,
+            conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
             payload: { messageId }
           });
         }
@@ -1142,7 +1142,7 @@ const MessageContainer = () => {
           await repo.enqueueOutbound({
             kind: "delete_for_everyone",
             conversationId: selectedChatData._id,
-            conversationType: selectedChatType,
+            conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
             payload: { messageId }
           });
         }
