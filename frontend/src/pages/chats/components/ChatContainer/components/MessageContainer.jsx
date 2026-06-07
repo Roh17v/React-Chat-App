@@ -1109,11 +1109,23 @@ const MessageContainer = () => {
 
   const handleDeleteForMe = async (messageId) => {
     try {
-      await axios.patch(
-        `${HOST}${DELETE_FOR_ME_ROUTE}/${messageId}/delete-for-me`,
-        {},
-        { withCredentials: true }
-      );
+      if (Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          await repo.enqueueOutbound({
+            kind: "delete_for_me",
+            conversationId: selectedChatData._id,
+            conversationType: selectedChatType,
+            payload: { messageId }
+          });
+        }
+      } else {
+        await axios.patch(
+          `${HOST}${DELETE_FOR_ME_ROUTE}/${messageId}/delete-for-me`,
+          {},
+          { withCredentials: true }
+        );
+      }
       deleteMessageForMe(messageId);
     } catch (error) {
       console.error("Delete for me failed:", error);
@@ -1124,11 +1136,23 @@ const MessageContainer = () => {
 
   const handleDeleteForEveryone = async (messageId) => {
     try {
-      await axios.patch(
-        `${HOST}${DELETE_FOR_EVERYONE_ROUTE}/${messageId}/delete-for-everyone`,
-        {},
-        { withCredentials: true }
-      );
+      if (Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          await repo.enqueueOutbound({
+            kind: "delete_for_everyone",
+            conversationId: selectedChatData._id,
+            conversationType: selectedChatType,
+            payload: { messageId }
+          });
+        }
+      } else {
+        await axios.patch(
+          `${HOST}${DELETE_FOR_EVERYONE_ROUTE}/${messageId}/delete-for-everyone`,
+          {},
+          { withCredentials: true }
+        );
+      }
       replaceWithDeletedPlaceholder(messageId);
     } catch (error) {
       console.error("Delete for everyone failed:", error);
@@ -2103,7 +2127,7 @@ const MessageContainer = () => {
                 </button>
               )}
               <button
-                onClick={() => handleDeleteForMe(messageActionMenu.message._id)}
+                onClick={() => handleDeleteForMe(messageActionMenu.message.serverId || messageActionMenu.message._id)}
                 className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-foreground hover:bg-accent transition-colors"
               >
                 <Trash2 className="w-4 h-4 text-foreground-muted" />
@@ -2111,7 +2135,7 @@ const MessageContainer = () => {
               </button>
               {messageActionMenu.isSent && (
                 <button
-                  onClick={() => handleDeleteForEveryone(messageActionMenu.message._id)}
+                  onClick={() => handleDeleteForEveryone(messageActionMenu.message.serverId || messageActionMenu.message._id)}
                   className="flex items-center gap-3 w-full px-4 py-2.5 text-left text-sm text-destructive hover:bg-destructive/10 transition-colors"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -2148,7 +2172,7 @@ const MessageContainer = () => {
                     </button>
                   )}
                   <button
-                    onClick={() => handleDeleteForMe(messageActionMenu.message._id)}
+                    onClick={() => handleDeleteForMe(messageActionMenu.message.serverId || messageActionMenu.message._id)}
                     className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-foreground hover:bg-accent transition-colors"
                   >
                     <Trash2 className="w-5 h-5 text-foreground-muted" />
@@ -2156,7 +2180,7 @@ const MessageContainer = () => {
                   </button>
                   {messageActionMenu.isSent && (
                     <button
-                      onClick={() => handleDeleteForEveryone(messageActionMenu.message._id)}
+                      onClick={() => handleDeleteForEveryone(messageActionMenu.message.serverId || messageActionMenu.message._id)}
                       className="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-left text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors"
                     >
                       <Trash2 className="w-5 h-5" />

@@ -2628,6 +2628,16 @@ export function createRepository(options = {}) {
           );
           optimisticLocal = built.localMessage;
         }
+      } else if (args.kind === "delete_for_me" && typeof payload.messageId === "string") {
+        await tx.run(
+          `UPDATE messages SET deleted_for_me = 1, updated_at = ? WHERE server_id = ?`,
+          [now, payload.messageId]
+        );
+      } else if (args.kind === "delete_for_everyone" && typeof payload.messageId === "string") {
+        await tx.run(
+          `UPDATE messages SET deleted_for_everyone = 1, content = NULL, file_url = NULL, file_name = NULL, updated_at = ? WHERE server_id = ?`,
+          [now, payload.messageId]
+        );
       }
 
       // 3. Insert the queue row.
@@ -2678,9 +2688,9 @@ export function createRepository(options = {}) {
       },
     });
 
-    // Post-commit emit so the optimistic row appears in the conversation
+    // Post-commit emit so the optimistic row (or optimistic deletion) appears in the conversation
     // immediately (Req 6.2).
-    if (isMessageKind) {
+    if (isMessageKind || args.kind === "delete_for_me" || args.kind === "delete_for_everyone") {
       await emitMessages(args.conversationId);
       if (args.conversationType === "channel") {
         await emitChannels();

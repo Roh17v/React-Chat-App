@@ -46,7 +46,7 @@ export const createChatSlice = (set, get) => ({
       return { directMessagesContacts: updated };
     }),
   setSelectedChatData: (selectedChatData) =>
-    set({ selectedChatData, replyToMessage: null }),
+    set({ selectedChatData, replyToMessage: null, selectedChatMessages: [] }),
   setSelectedChatType: (selectedChatType) => set({ selectedChatType }),
   showImage: false,
   imageURL: null,

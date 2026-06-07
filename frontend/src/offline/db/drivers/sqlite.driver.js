@@ -458,7 +458,7 @@ export function createSqliteDriver(options = {}) {
   async function deleteDatabase(dbName) {
     if (!isNativePlatform()) return;
     try {
-      await sqlite.deleteDatabase(dbName, false);
+      await CapacitorSQLite.deleteDatabase({ database: dbName });
       diagnostics.log({
         category: "boot",
         code: "SQLITE_DELETED",
