@@ -60,7 +60,7 @@ export const createChatSlice = (set, get) => ({
 
       const uniqueMessages = Array.from(
         new Map(allMessages.map((msg) => [msg._id, msg])).values(),
-      );
+      ).filter(msg => !msg.deletedForMe);
 
       // Explicitly sort by createdAt to guarantee chronological order (oldest to newest).
       // This prevents UI ordering issues if the native/web fallback pagination
@@ -143,32 +143,41 @@ export const createChatSlice = (set, get) => ({
           snap.content !== undefined && snap.content !== m.content
             ? snap.content
             : m.content;
+        const nextDeletedForMe =
+          snap.deletedForMe === true
+            ? true
+            : m.deletedForMe;
         if (
           nextStatus !== m.status ||
           nextDeleted !== m.deletedForEveryone ||
-          nextContent !== m.content
+          nextContent !== m.content ||
+          nextDeletedForMe !== m.deletedForMe
         ) {
           hasUpdates = true;
           return {
             ...m,
             status: nextStatus,
             deletedForEveryone: nextDeleted,
+            deletedForMe: nextDeletedForMe,
             content: nextContent,
           };
         }
         return m;
       });
 
+      const filteredMerged = merged.filter(m => !m.deletedForMe);
+      if (filteredMerged.length !== merged.length) hasUpdates = true;
+
       // 2-4. New messages (in snapshot, not in state). Bucket by position
       // relative to the existing window so the merge is O(n+m) instead
       // of O(n*m).
-      const newOnes = snapshot.filter((m) => !currentIds.has(m._id));
+      const newOnes = snapshot.filter((m) => !currentIds.has(m._id) && !m.deletedForMe);
       if (newOnes.length === 0) {
-        return hasUpdates ? { selectedChatMessages: merged } : {};
+        return hasUpdates ? { selectedChatMessages: filteredMerged } : {};
       }
 
-      const stateOldest = merged[0]?.createdAt;
-      const stateNewest = merged[merged.length - 1]?.createdAt;
+      const stateOldest = filteredMerged[0]?.createdAt;
+      const stateNewest = filteredMerged[filteredMerged.length - 1]?.createdAt;
       const cmp = (a, b) =>
         a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
 
@@ -194,7 +203,7 @@ export const createChatSlice = (set, get) => ({
       older.sort(cmp);
       newer.sort(cmp);
 
-      let next = merged;
+      let next = filteredMerged;
       if (older.length > 0) next = [...older, ...next];
       if (newer.length > 0) next = [...next, ...newer];
       // Middle: insert each in its sorted slot. O(n) per insert is fine
@@ -232,6 +241,7 @@ export const createChatSlice = (set, get) => ({
       messageActionMenu: null,
     }),
   addMessage: (message) => {
+    if (message.deletedForMe) return;
     const { selectedChatMessages, selectedChatType } = get();
     set({
       selectedChatMessages: [
