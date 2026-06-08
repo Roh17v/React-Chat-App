@@ -1346,7 +1346,11 @@ export function createRepository(options = {}) {
           const uat =
             typeof incoming.updatedAt === "string" ? incoming.updatedAt : null;
           if (sid != null && uat != null) {
-            if (watermark == null || uat > watermark.updatedAt) {
+            if (
+              watermark == null ||
+              uat > watermark.updatedAt ||
+              (uat === watermark.updatedAt && sid > watermark.serverId)
+            ) {
               watermark = /** @type {{ serverId: string, updatedAt: string }} */ ({ serverId: sid, updatedAt: uat });
             }
           }
