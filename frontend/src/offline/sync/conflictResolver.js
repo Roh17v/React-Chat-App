@@ -183,7 +183,7 @@ export async function resolveAndApply(tx, serverMessage, ctx) {
         incoming.replyToJson,
         incoming.status,
         incoming.deletedForEveryone ? 1 : 0,
-        0,
+        incoming.deletedForMe ? 1 : 0,
         incoming.deletedAt,
         incoming.createdAt,
         incoming.updatedAt,
@@ -207,6 +207,7 @@ export async function resolveAndApply(tx, serverMessage, ctx) {
   const localSyncState =
     typeof local.sync_state === "string" ? local.sync_state : "confirmed";
   const localDeletedForEveryone = toBool(local.deleted_for_everyone);
+  const localDeletedForMe = toBool(local.deleted_for_me);
 
   // 4a. Resurrection guard. If the local row is already deleted-for-everyone
   //     and the server payload says otherwise, only accept it if the server's
@@ -230,6 +231,7 @@ export async function resolveAndApply(tx, serverMessage, ctx) {
   // 5. Server wins. Reconcile status with the lifecycle helper so we never
   //    move a confirmed row backwards (Req 7.5 / 7.6 / Property 12).
   const nextStatus = monotonicMaxStatus(localStatus, incoming.status);
+  const nextDeletedForMe = localDeletedForMe || incoming.deletedForMe;
 
   await tx.run(
     `UPDATE messages SET
@@ -245,6 +247,7 @@ export async function resolveAndApply(tx, serverMessage, ctx) {
        reply_to_json = ?,
        status = ?,
        deleted_for_everyone = ?,
+       deleted_for_me = ?,
        deleted_at = ?,
        created_at = ?,
        updated_at = ?,
@@ -263,6 +266,7 @@ export async function resolveAndApply(tx, serverMessage, ctx) {
       incoming.replyToJson,
       nextStatus,
       incoming.deletedForEveryone ? 1 : 0,
+      nextDeletedForMe ? 1 : 0,
       incoming.deletedAt,
       incoming.createdAt,
       incoming.updatedAt,

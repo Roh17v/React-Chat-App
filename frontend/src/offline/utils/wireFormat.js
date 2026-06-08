@@ -65,6 +65,7 @@ const missing = (field) => ({
  * @property {"pending" | "sent" | "delivered" | "read" | "failed"} [status]
  * @property {string | null} [channelId]
  * @property {boolean} [deletedForEveryone]
+ * @property {boolean} [deletedForMe]
  * @property {string | null} [deletedAt]
  * @property {string} createdAt
  * @property {string} updatedAt
@@ -93,6 +94,7 @@ const missing = (field) => ({
  * @property {string | null} replyToJson Either JSON-encoded string or null
  * @property {"pending" | "sent" | "delivered" | "read" | "failed"} status
  * @property {boolean} deletedForEveryone
+ * @property {boolean} deletedForMe
  * @property {string | null} deletedAt
  * @property {string} createdAt
  * @property {string} updatedAt
@@ -287,6 +289,7 @@ export function toLocalRow(m) {
     replyToJson,
     status,
     deletedForEveryone: m.deletedForEveryone === true,
+    deletedForMe: m.deletedForMe === true,
     deletedAt: optString(m.deletedAt),
     createdAt,
     updatedAt,

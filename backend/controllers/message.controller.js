@@ -11,17 +11,20 @@ import { io, userSocketMap } from "../socket.js";
 const DEFAULT_MESSAGES_LIMIT = 50;
 const MAX_MESSAGES_LIMIT = 200;
 
-const sanitizeDeleted = (msg) => {
-  if (msg.deletedForEveryone) {
+const sanitizeDeleted = (userId) => (msg) => {
+  const isDeletedForMe = msg.deletedFor && msg.deletedFor.some(id => id.toString() === userId.toString());
+
+  if (msg.deletedForEveryone || isDeletedForMe) {
     return {
       ...msg,
       content: null,
       fileUrl: null,
       fileName: null,
       messageType: msg.messageType,
+      deletedForMe: isDeletedForMe,
     };
   }
-  return msg;
+  return { ...msg, deletedForMe: false };
 };
 
 const parseLimit = (raw) => {
@@ -48,7 +51,6 @@ export const getMessages = async (req, res, next) => {
         { sender: userId, receiver: contactId },
         { sender: contactId, receiver: userId },
       ],
-      deletedFor: { $ne: userId },
     };
 
     let messages;
@@ -88,7 +90,7 @@ export const getMessages = async (req, res, next) => {
 
     // Sanitize deleted-for-everyone messages. `updatedAt` is included via
     // `{ timestamps: true }` on the schema and survives `.lean()` (Req 13.5).
-    const sanitized = messages.map(sanitizeDeleted);
+    const sanitized = messages.map(sanitizeDeleted(userId));
 
     const responseData = since ? sanitized : sanitized.reverse();
 
@@ -132,7 +134,6 @@ export const getChannelMessages = async (req, res, next) => {
 
     const baseQuery = {
       channelId,
-      deletedFor: { $ne: userId },
     };
 
     let messages;
@@ -172,7 +173,7 @@ export const getChannelMessages = async (req, res, next) => {
     }
 
     // `updatedAt` is included via `{ timestamps: true }` on the schema (Req 13.5).
-    const sanitized = messages.map(sanitizeDeleted);
+    const sanitized = messages.map(sanitizeDeleted(userId));
 
     const responseData = since ? sanitized : sanitized.reverse();
 
@@ -201,6 +202,7 @@ export const deleteForMe = async (req, res, next) => {
 
     await Message.findByIdAndUpdate(messageId, {
       $addToSet: { deletedFor: userId },
+      $set: { updatedAt: new Date() }
     });
 
 
