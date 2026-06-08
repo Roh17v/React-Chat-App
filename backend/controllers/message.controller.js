@@ -33,7 +33,7 @@ const parseLimit = (raw) => {
 export const getMessages = async (req, res, next) => {
   const { contactId } = req.params;
   const userId = req.user._id;
-  let { page = 1, limit, since } = req.query;
+  let { page = 1, limit, since, lastId } = req.query;
 
   if (!contactId || !userId)
     return next(createError(400, "ContactId and userId is required."));
@@ -57,13 +57,24 @@ export const getMessages = async (req, res, next) => {
       if (Number.isNaN(sinceDate.getTime())) {
         return next(createError(400, "Invalid `since` timestamp."));
       }
+      
+      let syncQuery = { updatedAt: { $gt: sinceDate } };
+      if (lastId && lastId !== "undefined" && lastId !== "null") {
+        syncQuery = {
+          $or: [
+            { updatedAt: { $gt: sinceDate } },
+            { updatedAt: sinceDate, _id: { $gt: lastId } },
+          ],
+        };
+      }
+
       // Incremental-sync path: ascending by updatedAt, no skip/page semantics
       // (the client paginates by advancing `since`). Req 13.1, 13.3, 13.4.
       messages = await Message.find({
         ...baseQuery,
-        updatedAt: { $gt: sinceDate },
+        ...syncQuery,
       })
-        .sort({ updatedAt: 1 })
+        .sort({ updatedAt: 1, _id: 1 })
         .limit(limit)
         .lean();
     } else {
@@ -111,7 +122,7 @@ export const getChannelMessages = async (req, res, next) => {
   try {
     const { channelId } = req.params;
     const userId = req.user._id;
-    let { page = 1, limit, since } = req.query;
+    let { page = 1, limit, since, lastId } = req.query;
 
     if (!channelId) return next(createError(400, "Channel ID is required"));
 
@@ -130,12 +141,23 @@ export const getChannelMessages = async (req, res, next) => {
       if (Number.isNaN(sinceDate.getTime())) {
         return next(createError(400, "Invalid `since` timestamp."));
       }
-      // Incremental-sync path: ascending by createdAt (Req 13.2, 13.3, 13.4).
+
+      let syncQuery = { updatedAt: { $gt: sinceDate } };
+      if (lastId && lastId !== "undefined" && lastId !== "null") {
+        syncQuery = {
+          $or: [
+            { updatedAt: { $gt: sinceDate } },
+            { updatedAt: sinceDate, _id: { $gt: lastId } },
+          ],
+        };
+      }
+
+      // Incremental-sync path: ascending by updatedAt (Req 13.2, 13.3, 13.4).
       messages = await Message.find({
         ...baseQuery,
-        createdAt: { $gt: sinceDate },
+        ...syncQuery,
       })
-        .sort({ createdAt: 1 })
+        .sort({ updatedAt: 1, _id: 1 })
         .populate("sender", "_id email color firstName lastName")
         .limit(limit)
         .lean();

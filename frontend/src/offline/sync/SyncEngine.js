@@ -774,6 +774,9 @@ export function createSyncEngine(options) {
           if (cursor.lastUpdatedAt != null) {
             params.since = cursor.lastUpdatedAt;
           }
+          if (cursor.lastServerId != null) {
+            params.lastId = cursor.lastServerId;
+          }
           const startedAt = now();
           /** @type {unknown[]} */
           let page = [];
