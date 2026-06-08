@@ -140,6 +140,10 @@ const toUiMessage = (m) => {
       typeof m.deletedForEveryone === "boolean"
         ? m.deletedForEveryone
         : Boolean(m.deletedForEveryone),
+    deletedForMe:
+      typeof m.deletedForMe === "boolean"
+        ? m.deletedForMe
+        : Boolean(m.deletedForMe),
     // Keep clientTempId visible to the dedup / confirm flows.
     clientTempId:
       m.clientTempId !== undefined && m.clientTempId !== null

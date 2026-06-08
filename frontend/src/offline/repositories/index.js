@@ -1127,7 +1127,7 @@ export function createRepository(options = {}) {
    * `deleted_for_me` rows per §3.6 ("Delete-for-me is handled at the read
    * layer").
    *
-   * @param {{ conversationId: string, conversationType: ConversationType, before?: string, limit?: number }} args
+   * @param {{ conversationId: string, conversationType: ConversationType, before?: string, limit?: number, includeDeletedForMe?: boolean }} args
    * @returns {Promise<LocalMessage[]>}
    */
   async function getMessages(args) {
@@ -1143,8 +1143,10 @@ export function createRepository(options = {}) {
       typeof args.limit === "number" && Number.isFinite(args.limit) && args.limit > 0
         ? Math.floor(args.limit)
         : 50;
-    /** @type {string[]} */
-    const where = ["conversation_id = ?", "deleted_for_me = 0"];
+    const where = ["conversation_id = ?"];
+    if (!args.includeDeletedForMe) {
+      where.push("deleted_for_me = 0");
+    }
     /** @type {unknown[]} */
     const params = [args.conversationId];
     if (typeof args.before === "string" && args.before.length > 0) {
@@ -3145,6 +3147,7 @@ export function createRepository(options = {}) {
       // older history; the live emit always carries the newest window.
       rows = await getMessages({
         conversationId,
+        includeDeletedForMe: true,
         // conversationType is informational only inside getMessages — the
         // SQL filters by conversationId. Pass the type the row map will
         // surface in the result, defaulting to "dm".
