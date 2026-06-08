@@ -57,13 +57,13 @@ export const getMessages = async (req, res, next) => {
       if (Number.isNaN(sinceDate.getTime())) {
         return next(createError(400, "Invalid `since` timestamp."));
       }
-      // Incremental-sync path: ascending by createdAt, no skip/page semantics
+      // Incremental-sync path: ascending by updatedAt, no skip/page semantics
       // (the client paginates by advancing `since`). Req 13.1, 13.3, 13.4.
       messages = await Message.find({
         ...baseQuery,
-        createdAt: { $gt: sinceDate },
+        updatedAt: { $gt: sinceDate },
       })
-        .sort({ createdAt: 1 })
+        .sort({ updatedAt: 1 })
         .limit(limit)
         .lean();
     } else {
@@ -226,7 +226,7 @@ export const markRead = async (req, res, next) => {
         sender: contactId,
         status: { $in: ["sent", "delivered"] },
       },
-      { $set: { status: "read" } },
+      { $set: { status: "read", updatedAt: new Date() } },
     );
 
     // Notify both peers via socket so any open client window updates
@@ -349,8 +349,8 @@ export const deleteForEveryone = async (req, res, next) => {
  * Query design:
  *   - DMs:      sender = userId  OR  receiver = userId
  *   - Channels: channelId ∈ channels where userId is member OR admin
- *   - Filter:   createdAt > since  AND  deletedFor ∉ userId
- *   - Sort:     createdAt ASC  (matches what applyServerMessages expects)
+ *   - Filter:   updatedAt > since  AND  deletedFor ∉ userId
+ *   - Sort:     updatedAt ASC  (matches what applyServerMessages expects)
  *   - Limit:    default 500, max 1 000 — hasMore signals pagination need
  *
  * @param {import("express").Request} req
@@ -390,8 +390,9 @@ export const getUnifiedUpdates = async (req, res, next) => {
     //    - sender branch   → { sender: 1, createdAt: -1 }  (already exists)
     //    - receiver branch → { receiver: 1, createdAt: 1 } (added in model)
     //    - channelId branch→ { channelId: 1, createdAt: -1 } (already exists)
+    const serverTimestamp = new Date().toISOString();
     const messages = await Message.find({
-      createdAt: { $gt: sinceDate },
+      updatedAt: { $gt: sinceDate },
       deletedFor: { $ne: userId },
       $or: [
         { sender: userId },
@@ -399,7 +400,7 @@ export const getUnifiedUpdates = async (req, res, next) => {
         ...(channelIds.length > 0 ? [{ channelId: { $in: channelIds } }] : []),
       ],
     })
-      .sort({ createdAt: 1 })   // ascending — what applyServerMessages expects
+      .sort({ updatedAt: 1 })   // ascending — what applyServerMessages expects
       .limit(limit)
       .populate("sender", "_id email color firstName lastName image lastSeen")
       .lean();
@@ -410,13 +411,14 @@ export const getUnifiedUpdates = async (req, res, next) => {
     // without re-reading its own state.
     const syncedUpTo =
       sanitized.length > 0
-        ? sanitized[sanitized.length - 1].createdAt
+        ? sanitized[sanitized.length - 1].updatedAt
         : since;
 
     return res.status(200).json({
       messages: sanitized,
       hasMore: messages.length === limit,
       syncedUpTo,
+      serverTimestamp,
     });
   } catch (error) {
     next(error);

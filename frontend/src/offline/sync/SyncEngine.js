@@ -334,16 +334,16 @@ export function createSyncEngine(options) {
    * repository advances cursors atomically inside `applyServerMessages`, so
    * the engine only ever READS this table — never writes it directly.
    *
-   * @returns {Promise<Map<string, { type: "dm"|"channel", lastCreatedAt: string | null, lastServerId: string | null }>>}
+   * @returns {Promise<Map<string, { type: "dm"|"channel", lastUpdatedAt: string | null, lastServerId: string | null }>>}
    */
   async function readCursors() {
     const driver = /** @type {{ query: (sql: string, values?: unknown[]) => Promise<Record<string, unknown>[]> }} */ (
       repository.getDriver()
     );
     const rows = await driver.query(
-      "SELECT conversation_id, conversation_type, last_created_at, last_server_id FROM sync_cursors",
+      "SELECT conversation_id, conversation_type, last_updated_at, last_server_id FROM sync_cursors",
     );
-    /** @type {Map<string, { type: "dm"|"channel", lastCreatedAt: string | null, lastServerId: string | null }>} */
+    /** @type {Map<string, { type: "dm"|"channel", lastUpdatedAt: string | null, lastServerId: string | null }>} */
     const out = new Map();
     if (!Array.isArray(rows)) return out;
     for (const row of rows) {
@@ -353,15 +353,15 @@ export function createSyncEngine(options) {
           : null;
       if (id == null) continue;
       const type = row.conversation_type === "channel" ? "channel" : "dm";
-      const lastCreatedAt =
-        typeof row.last_created_at === "string" && row.last_created_at.length > 0
-          ? row.last_created_at
+      const lastUpdatedAt =
+        typeof row.last_updated_at === "string" && row.last_updated_at.length > 0
+          ? row.last_updated_at
           : null;
       const lastServerId =
         typeof row.last_server_id === "string" && row.last_server_id.length > 0
           ? row.last_server_id
           : null;
-      out.set(id, { type, lastCreatedAt, lastServerId });
+      out.set(id, { type, lastUpdatedAt, lastServerId });
     }
     return out;
   }
@@ -766,13 +766,13 @@ export function createSyncEngine(options) {
           const cursors = await readCursors();
           const cursor = cursors.get(conv.id) || {
             type: conv.type,
-            lastCreatedAt: null,
+            lastUpdatedAt: null,
             lastServerId: null,
           };
           /** @type {Record<string, unknown>} */
           const params = { limit: pageLimit };
-          if (cursor.lastCreatedAt != null) {
-            params.since = cursor.lastCreatedAt;
+          if (cursor.lastUpdatedAt != null) {
+            params.since = cursor.lastUpdatedAt;
           }
           const startedAt = now();
           /** @type {unknown[]} */
@@ -808,15 +808,15 @@ export function createSyncEngine(options) {
           // shape `applyServerMessages` expects. Convert the legacy shape
           // into ascending order so the conflict resolver always sees
           // ascending input.
-          if (cursor.lastCreatedAt == null) {
+          if (cursor.lastUpdatedAt == null) {
             page = page.slice().reverse();
           }
 
-          /** @type {{ lastServerId?: string, lastCreatedAt?: string, lastSyncedAt?: string }} */
+          /** @type {{ lastServerId?: string, lastUpdatedAt?: string, lastSyncedAt?: string }} */
           const sourceCursor = {
             lastSyncedAt: new Date(now()).toISOString(),
           };
-          if (cursor.lastCreatedAt != null) sourceCursor.lastCreatedAt = cursor.lastCreatedAt;
+          if (cursor.lastUpdatedAt != null) sourceCursor.lastUpdatedAt = cursor.lastUpdatedAt;
           if (cursor.lastServerId != null) sourceCursor.lastServerId = cursor.lastServerId;
 
           await repository.applyServerMessages({

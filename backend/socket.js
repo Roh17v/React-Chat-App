@@ -774,7 +774,7 @@ const setupSocket = (server) => {
           sender: senderId,
           status: { $in: ["sent", "delivered"] },
         },
-        { $set: { status: "read" } },
+        { $set: { status: "read", updatedAt: new Date() } },
       );
       if (updatedMessages.modifiedCount > 0) {
 
@@ -975,7 +975,7 @@ const setupSocket = (server) => {
       if (undeliveredMessages.length > 0) {
         await Message.updateMany(
           { receiver: userId, status: "sent" },
-          { $set: { status: "delivered" } },
+          { $set: { status: "delivered", updatedAt: new Date() } },
         );
 
         const senderIds = [
@@ -986,6 +986,7 @@ const setupSocket = (server) => {
           const senderSockets = userSocketMap.get(senderId) || new Set();
           senderSockets.forEach((sockId) =>
             io.to(sockId).emit("message-status-update", {
+              senderId,
               receiverId: userId,
               status: "delivered",
             }),

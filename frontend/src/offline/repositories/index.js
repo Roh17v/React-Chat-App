@@ -1257,7 +1257,7 @@ export function createRepository(options = {}) {
    * wrapper below). Splitting the body keeps the locking layer in one
    * spot — see §3.5 / Req 5.6.
    *
-   * @param {{ conversationId: string, conversationType: ConversationType, messages: unknown[], sourceCursor?: { lastServerId?: string, lastCreatedAt?: string, lastSyncedAt?: string } }} args
+   * @param {{ conversationId: string, conversationType: ConversationType, messages: unknown[], sourceCursor?: { lastServerId?: string, lastUpdatedAt?: string, lastSyncedAt?: string } }} args
    * @returns {Promise<{ inserted: number, updated: number, ignored: number }>}
    */
   async function applyServerMessagesLocked(args) {
@@ -1277,7 +1277,7 @@ export function createRepository(options = {}) {
     let updated = 0;
     let ignored = 0;
     let rejected = 0;
-    /** @type {{ serverId: string, createdAt: string } | null} */
+    /** @type {{ serverId: string, updatedAt: string } | null} */
     let watermark = null;
 
     const nowIso = new Date().toISOString();
@@ -1339,15 +1339,15 @@ export function createRepository(options = {}) {
           r.outcome === "updated" ||
           r.outcome === "merged"
         ) {
-          const incoming = /** @type {{ _id?: unknown, createdAt?: unknown }} */ (
+          const incoming = /** @type {{ _id?: unknown, createdAt?: unknown, updatedAt?: unknown }} */ (
             m == null || typeof m !== "object" ? {} : m
           );
           const sid = typeof incoming._id === "string" ? incoming._id : null;
-          const cat =
-            typeof incoming.createdAt === "string" ? incoming.createdAt : null;
-          if (sid != null && cat != null) {
-            if (watermark == null || cat > watermark.createdAt) {
-              watermark = { serverId: sid, createdAt: cat };
+          const uat =
+            typeof incoming.updatedAt === "string" ? incoming.updatedAt : null;
+          if (sid != null && uat != null) {
+            if (watermark == null || uat > watermark.updatedAt) {
+              watermark = /** @type {{ serverId: string, updatedAt: string }} */ ({ serverId: sid, updatedAt: uat });
             }
           }
         }
@@ -1359,11 +1359,11 @@ export function createRepository(options = {}) {
       // empty-ish batch (e.g. all `ignored`) still records that we asked the
       // backend for everything up to that timestamp.
       const supplied = args.sourceCursor || null;
-      const finalCreatedAt =
-        watermark != null && (supplied == null || watermark.createdAt > (supplied.lastCreatedAt || ""))
-          ? watermark.createdAt
-          : supplied != null && typeof supplied.lastCreatedAt === "string"
-            ? supplied.lastCreatedAt
+      const finalUpdatedAt =
+        watermark != null && (supplied == null || watermark.updatedAt > (supplied.lastUpdatedAt || ""))
+          ? watermark.updatedAt
+          : supplied != null && typeof supplied.lastUpdatedAt === "string"
+            ? supplied.lastUpdatedAt
             : null;
       const finalServerId =
         watermark != null
@@ -1372,27 +1372,27 @@ export function createRepository(options = {}) {
             ? supplied.lastServerId
             : null;
 
-      if (finalCreatedAt != null) {
+      if (finalUpdatedAt != null) {
         await tx.run(
-          `INSERT INTO sync_cursors (conversation_id, conversation_type, last_server_id, last_created_at, last_synced_at)
+          `INSERT INTO sync_cursors (conversation_id, conversation_type, last_server_id, last_updated_at, last_synced_at)
              VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(conversation_id, conversation_type) DO UPDATE SET
              last_server_id  = CASE
-                                  WHEN excluded.last_created_at >= sync_cursors.last_created_at
+                                  WHEN excluded.last_updated_at >= COALESCE(sync_cursors.last_updated_at, '')
                                   THEN excluded.last_server_id
                                   ELSE sync_cursors.last_server_id
                                 END,
-             last_created_at = CASE
-                                  WHEN excluded.last_created_at >= sync_cursors.last_created_at
-                                  THEN excluded.last_created_at
-                                  ELSE sync_cursors.last_created_at
+             last_updated_at = CASE
+                                  WHEN excluded.last_updated_at >= COALESCE(sync_cursors.last_updated_at, '')
+                                  THEN excluded.last_updated_at
+                                  ELSE sync_cursors.last_updated_at
                                 END,
              last_synced_at  = excluded.last_synced_at`,
           [
             args.conversationId,
             args.conversationType,
             finalServerId,
-            finalCreatedAt,
+            finalUpdatedAt,
             new Date().toISOString(),
           ],
         );

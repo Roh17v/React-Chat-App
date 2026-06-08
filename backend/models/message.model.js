@@ -104,9 +104,11 @@ messageSchema.index({ channelId: 1, createdAt: -1 });
 messageSchema.index({ sender: 1, createdAt: -1 });
 messageSchema.index({ receiver: 1, status: 1 });
 // Supports the unified incremental-sync feed (GET /api/messages/updates).
-// The $or branch for DM receiver uses createdAt > since + sort ASC,
-// which benefits from an ascending cursor index.
-messageSchema.index({ receiver: 1, createdAt: 1 });
+// The $or branches for unified sync use updatedAt > since + sort ASC,
+// which benefits from an ascending cursor index on updatedAt.
+messageSchema.index({ receiver: 1, updatedAt: 1 });
+messageSchema.index({ sender: 1, updatedAt: 1 });
+messageSchema.index({ channelId: 1, updatedAt: 1 });
 
 
 const Message = mongoose.model("Message", messageSchema);

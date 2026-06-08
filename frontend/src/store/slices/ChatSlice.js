@@ -62,6 +62,17 @@ export const createChatSlice = (set, get) => ({
         new Map(allMessages.map((msg) => [msg._id, msg])).values(),
       );
 
+      // Explicitly sort by createdAt to guarantee chronological order (oldest to newest).
+      // This prevents UI ordering issues if the native/web fallback pagination
+      // overlaps with a background subscription push (which can cause deduplication
+      // by Map.values() to pull newer overlapping messages to the front of the array).
+      uniqueMessages.sort((a, b) => {
+        if (!a.createdAt && !b.createdAt) return 0;
+        if (!a.createdAt) return 1;
+        if (!b.createdAt) return -1;
+        return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
+      });
+
       return { selectedChatMessages: uniqueMessages };
     }),
 

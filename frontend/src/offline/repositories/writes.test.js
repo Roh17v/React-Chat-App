@@ -131,12 +131,12 @@ describe("repository.applyServerMessages", () => {
     ]);
 
     const cursor = await ctx.driver.query(
-      "SELECT last_server_id, last_created_at FROM sync_cursors",
+      "SELECT last_server_id, last_updated_at FROM sync_cursors",
     );
     expect(cursor).toEqual([
       {
         last_server_id: "srv-b",
-        last_created_at: "2024-01-01T00:01:00.000Z",
+        last_updated_at: "2024-01-01T00:01:00.000Z",
       },
     ]);
   });

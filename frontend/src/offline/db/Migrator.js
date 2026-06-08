@@ -52,6 +52,8 @@ import { getDiagnostics } from "../utils/Diagnostics.js";
 import init001Sql from "./migrations/001__init.sql?raw";
 // @ts-ignore
 import init002Sql from "./migrations/002__ensure_schema.sql?raw";
+// @ts-ignore
+import init003Sql from "./migrations/003__updated_at_cursors.sql?raw";
 
 /**
  * @typedef {Object} Migration
@@ -79,6 +81,7 @@ import init002Sql from "./migrations/002__ensure_schema.sql?raw";
 export const MIGRATIONS = Object.freeze([
   Object.freeze({ version: 1, name: "init", sql: init001Sql }),
   Object.freeze({ version: 2, name: "ensure_schema", sql: init002Sql }),
+  Object.freeze({ version: 3, name: "updated_at_cursors", sql: init003Sql }),
 ]);
 
 /**

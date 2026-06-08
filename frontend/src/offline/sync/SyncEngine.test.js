@@ -219,14 +219,14 @@ describe("SyncEngine.bootstrap", () => {
     // Cursors advanced for conversations that received messages.
     /** @type {any[]} */
     const cursors = await driver.query(
-      "SELECT conversation_id, last_server_id, last_created_at FROM sync_cursors " +
+      "SELECT conversation_id, last_server_id, last_updated_at FROM sync_cursors " +
         "ORDER BY conversation_id",
     );
     const c1 = cursors.find((r) => r.conversation_id === "contact-1");
     const ch1 = cursors.find((r) => r.conversation_id === "channel-1");
     expect(c1).toBeDefined();
-    expect(c1?.last_server_id).toBe("srv-c1-a"); // newer createdAt wins
-    expect(c1?.last_created_at).toBe("2024-01-01T00:00:01.000Z");
+    expect(c1?.last_server_id).toBe("srv-c1-a"); // newer updatedAt wins
+    expect(c1?.last_updated_at).toBe("2024-01-01T00:00:01.000Z");
     expect(ch1?.last_server_id).toBe("srv-ch1-a");
   });
 
@@ -370,10 +370,10 @@ describe("SyncEngine.incremental", () => {
     expect(result.messagesApplied).toBe(4);
     expect(result.failedConversationIds).toEqual([]);
 
-    // First page: cursor was the seeded createdAt.
+    // First page: cursor was the seeded updatedAt.
     expect(recordedCalls[0].since).toBe("2024-01-01T00:00:00.000Z");
     expect(recordedCalls[0].limit).toBe(3);
-    // Second page: cursor advanced to the latest createdAt from page 1.
+    // Second page: cursor advanced to the latest updatedAt from page 1.
     expect(recordedCalls[1].since).toBe("2024-01-01T00:00:03.000Z");
 
     // No third page — the second response was short.
@@ -382,10 +382,10 @@ describe("SyncEngine.incremental", () => {
     // Cursor advanced to the most recent message overall.
     /** @type {any[]} */
     const cursors = await driver.query(
-      "SELECT last_created_at, last_server_id FROM sync_cursors WHERE conversation_id = ?",
+      "SELECT last_updated_at, last_server_id FROM sync_cursors WHERE conversation_id = ?",
       ["contact-1"],
     );
-    expect(cursors[0].last_created_at).toBe("2024-01-01T00:00:10.000Z");
+    expect(cursors[0].last_updated_at).toBe("2024-01-01T00:00:10.000Z");
     expect(cursors[0].last_server_id).toBe("srv-page2-1");
 
     // meta.last_incremental_sync_at persisted (Req 5.8).
@@ -944,7 +944,7 @@ describe("SyncEngine.start blocks on warm-boot incremental", () => {
     );
     // Seed a sync_cursors row too so shouldBootstrap() returns false.
     await driver.run(
-      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_created_at, last_server_id) VALUES (?, ?, ?, ?)",
+      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_updated_at, last_server_id) VALUES (?, ?, ?, ?)",
       ["user-other", "dm", "2024-01-01T00:00:00.000Z", "srv-old"],
     );
 
@@ -1014,7 +1014,7 @@ describe("SyncEngine.start blocks on warm-boot incremental", () => {
       ["bootstrap_completed_at", "2024-01-01T00:00:00.000Z"],
     );
     await driver.run(
-      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_created_at, last_server_id) VALUES (?, ?, ?, ?)",
+      "INSERT INTO sync_cursors (conversation_id, conversation_type, last_updated_at, last_server_id) VALUES (?, ?, ?, ?)",
       ["user-other", "dm", "2024-01-01T00:00:00.000Z", "srv-old"],
     );
 

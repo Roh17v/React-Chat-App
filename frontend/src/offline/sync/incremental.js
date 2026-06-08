@@ -72,7 +72,7 @@ export const INCREMENTAL_PAGE_CAP = 50;
 /**
  * @typedef {Object} IncrementalCursor
  * @property {"dm"|"channel"} type
- * @property {string|null} lastCreatedAt
+ * @property {string|null} lastUpdatedAt
  * @property {string|null} lastServerId
  */
 
@@ -242,13 +242,13 @@ export function runIncrementalConversation(options) {
         const cursor =
           cursors.get(conv.id) || {
             type: conv.type,
-            lastCreatedAt: null,
+            lastUpdatedAt: null,
             lastServerId: null,
           };
         /** @type {Record<string, unknown>} */
         const params = { limit: pageLimit };
-        if (cursor.lastCreatedAt != null) {
-          params.since = cursor.lastCreatedAt;
+        if (cursor.lastUpdatedAt != null) {
+          params.since = cursor.lastUpdatedAt;
         }
         const startedAt = now();
         /** @type {unknown[]} */
@@ -284,15 +284,15 @@ export function runIncrementalConversation(options) {
         // ascending — the shape `applyServerMessages` expects.
         // Convert the legacy shape into ascending order so the
         // conflict resolver always sees ascending input.
-        if (cursor.lastCreatedAt == null) {
+        if (cursor.lastUpdatedAt == null) {
           page = page.slice().reverse();
         }
 
-        /** @type {{ lastServerId?: string, lastCreatedAt?: string, lastSyncedAt?: string }} */
+        /** @type {{ lastServerId?: string, lastUpdatedAt?: string, lastSyncedAt?: string }} */
         const sourceCursor = {
           lastSyncedAt: new Date(now()).toISOString(),
         };
-        if (cursor.lastCreatedAt != null) sourceCursor.lastCreatedAt = cursor.lastCreatedAt;
+        if (cursor.lastUpdatedAt != null) sourceCursor.lastUpdatedAt = cursor.lastUpdatedAt;
         if (cursor.lastServerId != null) sourceCursor.lastServerId = cursor.lastServerId;
 
         await repository.applyServerMessages({
@@ -630,6 +630,7 @@ export async function runUnifiedIncremental(options) {
   let pagesConsumed = 0;
   let messagesApplied = 0;
   let batchesApplied = 0;
+  let finalServerTimestamp = null;
 
   diagnostics.log({
     category: "incremental",
@@ -643,7 +644,7 @@ export async function runUnifiedIncremental(options) {
       pagesConsumed += 1;
       const pageStartedAt = now();
 
-      /** @type {{ messages: unknown[], hasMore: boolean, syncedUpTo: string } | null} */
+      /** @type {{ messages: unknown[], hasMore: boolean, syncedUpTo: string, serverTimestamp?: string } | null} */
       let data = null;
       try {
         data = await httpGet(SYNC_UPDATES_ROUTE, {
@@ -730,7 +731,7 @@ export async function runUnifiedIncremental(options) {
       }
 
       // Apply each group — same write path as the per-conversation runner.
-      for (const [conversationId, { type, messages: convMessages }] of byConversation) {
+      for (const [conversationId, { type, messages: convMessages }] of Array.from(byConversation)) {
         try {
           await repository.applyServerMessages({
             conversationId,
@@ -776,10 +777,16 @@ export async function runUnifiedIncremental(options) {
         // re-fetching the same page in a loop.
         break;
       }
+      
+      if (typeof data.serverTimestamp === "string" && data.serverTimestamp.length > 0) {
+        finalServerTimestamp = data.serverTimestamp;
+      }
     }
 
     // Persist the cursor so the next app-open resumes from here.
-    const completedAt = new Date(now()).toISOString();
+    // Use the server's timestamp if available to prevent clock-skew bugs (where
+    // the client clock is ahead/behind the server clock).
+    const completedAt = finalServerTimestamp || new Date(now()).toISOString();
     await options.setLastIncrementalSyncAt(completedAt);
 
     const durationMs = now() - startedAt;
