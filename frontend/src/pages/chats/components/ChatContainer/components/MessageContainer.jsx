@@ -1638,7 +1638,17 @@ const MessageContainer = () => {
   };
 
   const renderChannelMessage = (message, index) => {
-    const isSent = message.sender?._id === user.id;
+    let senderObj = message.sender;
+    if (!senderObj || typeof senderObj === "string") {
+      const actualSenderId = typeof senderObj === "string" ? senderObj : message.senderId;
+      if (actualSenderId && selectedChatData?.members) {
+        senderObj = selectedChatData.members.find(
+          (m) => m._id === actualSenderId
+        );
+      }
+    }
+
+    const isSent = senderObj?._id === user.id || message.sender === user.id || message.senderId === user.id;
 
     // Render deleted placeholder
     if (message.deletedForEveryone) {
@@ -1672,9 +1682,9 @@ const MessageContainer = () => {
           }}
         >
           {/* Sender name for channel messages (received only) */}
-          {!isSent && message.sender && (
+          {!isSent && senderObj && (
             <p className="text-xs font-medium text-primary mb-1">
-              {message.sender?.firstName} {message.sender?.lastName}
+              {senderObj?.firstName} {senderObj?.lastName}
             </p>
           )}
 

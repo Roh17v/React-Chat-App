@@ -332,6 +332,12 @@ export const SocketProvider = ({ children }) => {
 
       socket.current.on("new-channel-contact", (channel) => {
         console.log("New Channel Received: ", channel);
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "new-channel-contact",
+            payload: channel,
+          });
+        }
         addChannel(channel);
       });
 
@@ -772,10 +778,53 @@ export const SocketProvider = ({ children }) => {
           payload: message,
         });
       } else {
-        if (selectedChatData && selectedChatType !== undefined) {
+        if (
+          selectedChatData &&
+          selectedChatType === "channel" &&
+          selectedChatData._id === message.channelId
+        ) {
           addMessage(message);
         }
       }
+
+      // Update channels list in the sidebar with the new message preview
+      const state = useAppStore.getState();
+      const channels = state.channels || [];
+      const channelIndex = channels.findIndex((c) => c._id === message.channelId);
+      if (channelIndex !== -1) {
+        const updatedChannels = [...channels];
+        const existingChannel = updatedChannels[channelIndex];
+        
+        // Use the sender's full name if populated, otherwise fallback
+        let senderName = "Someone";
+        if (message.sender && typeof message.sender !== "string" && message.sender.firstName) {
+          senderName = `${message.sender.firstName} ${message.sender.lastName || ""}`.trim();
+        } else if (existingChannel.members) {
+          const senderObj = existingChannel.members.find(m => m._id === message.sender || m._id === message.senderId);
+          if (senderObj) senderName = `${senderObj.firstName} ${senderObj.lastName || ""}`.trim();
+        }
+
+        const isMessageFromMe = message.sender?._id === user.id || message.sender === user.id;
+        const messagePreview = message.messageType === "text" 
+          ? `${isMessageFromMe ? "You" : senderName}: ${message.content}`
+          : `${isMessageFromMe ? "You" : senderName} sent a file`;
+
+        const updatedChannel = {
+          ...existingChannel,
+          lastMessage: messagePreview,
+          lastMessageAt: message.createdAt || new Date().toISOString(),
+          // Don't increment unread if the chat is currently open!
+          unreadCount: 
+            (state.selectedChatType === "channel" && state.selectedChatData?._id === message.channelId)
+            ? 0
+            : (existingChannel.unreadCount || 0) + 1,
+        };
+
+        updatedChannels.splice(channelIndex, 1);
+        updatedChannels.unshift(updatedChannel);
+        useAppStore.setState({ channels: updatedChannels });
+      }
+
       console.log("Channel Message Recieved: ", message);
     };
 

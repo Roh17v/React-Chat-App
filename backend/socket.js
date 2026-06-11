@@ -698,30 +698,38 @@ const setupSocket = (server) => {
       const channel = await Channel.findById(channelId).populate("members");
 
 
-
       const finalData = { ...messageData._doc, channelId: channel._id };
 
       if (channel && channel.members) {
         const offlineMemberIds = [];
         channel.members.forEach((contact) => {
+          const contactIdStr = contact._id.toString();
           const memberSocketId =
-            userSocketMap.get(contact._id.toString()) || new Set();
+            userSocketMap.get(contactIdStr) || new Set();
           if (memberSocketId.size > 0) {
             memberSocketId.forEach((socketId) => {
-              io.to(socketId).emit("receive-channel-message", finalData);
+              const payload = contactIdStr === sender 
+                ? { ...finalData, clientTempId: message.clientTempId || null }
+                : finalData;
+              io.to(socketId).emit("receive-channel-message", payload);
             });
           } else {
-            offlineMemberIds.push(contact._id.toString());
+            offlineMemberIds.push(contactIdStr);
           }
         });
+        
+        const adminIdStr = channel.admin?.toString();
         const adminSocketId =
-          userSocketMap.get(channel.admin.toString()) || new Set();
+          adminIdStr ? (userSocketMap.get(adminIdStr) || new Set()) : new Set();
         if (adminSocketId.size > 0) {
           adminSocketId.forEach((socketId) => {
-            io.to(socketId).emit("receive-channel-message", finalData);
+            const payload = adminIdStr === sender 
+              ? { ...finalData, clientTempId: message.clientTempId || null }
+              : finalData;
+            io.to(socketId).emit("receive-channel-message", payload);
           });
-        } else if (channel.admin?.toString() !== sender) {
-          offlineMemberIds.push(channel.admin.toString());
+        } else if (adminIdStr && adminIdStr !== sender) {
+          offlineMemberIds.push(adminIdStr);
         }
 
         const uniqueOfflineIds = Array.from(

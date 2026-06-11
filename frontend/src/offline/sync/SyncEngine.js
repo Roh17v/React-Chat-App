@@ -1155,6 +1155,18 @@ export function createSyncEngine(options) {
           return;
         }
 
+        case "new-channel-contact": {
+          if (typeof repository.applyChannels === "function") {
+            await repository.applyChannels([payload]);
+          }
+          diagnostics.log({
+            category: "live",
+            code: "LIVE_CHANNEL_CONTACT_APPLIED",
+            outcome: "ok",
+          });
+          return;
+        }
+
         case "messageSendFailed": {
           const clientTempId =
             typeof payload.clientTempId === "string" && payload.clientTempId.length > 0
