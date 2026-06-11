@@ -215,43 +215,77 @@ export const searchUsers = async (req, res, next) => {
 export const dmContacts = async (req, res, next) => {
   try {
     const userId = req.user._id;
-    const messages = await Message.find({
-      $or: [{ sender: userId }, { receiver: userId }],
-      receiver: { $ne: null },
-    })
-      .populate(
-        "sender receiver",
-        "firstName lastName email image color lastSeen _id",
-      )
-      .sort({ createdAt: -1 });
+    const userIdObj = new mongoose.Types.ObjectId(userId);
+
+    const aggregatedMessages = await Message.aggregate([
+      {
+        $match: {
+          $or: [{ sender: userIdObj }, { receiver: userIdObj }],
+          receiver: { $ne: null },
+        },
+      },
+      {
+        $sort: { createdAt: -1 },
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $eq: ["$sender", userIdObj] },
+              "$receiver",
+              "$sender"
+            ]
+          },
+          lastMessageDoc: { $first: "$$ROOT" },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ["$receiver", userIdObj] },
+                    { $ne: ["$status", "read"] }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "contactInfo"
+        }
+      },
+      {
+        $unwind: "$contactInfo"
+      }
+    ]);
 
     const contactsMap = new Map();
 
-    for (const msg of messages) {
-      if (!msg.sender || !msg.receiver) continue; // Skip messages where sender or receiver was deleted
+    for (const agg of aggregatedMessages) {
+      if (!agg.lastMessageDoc.sender || !agg.lastMessageDoc.receiver) continue;
 
-      const contact =
-        msg.sender._id.toString() === userId.toString()
-          ? msg.receiver
-          : msg.sender;
-
+      const contact = agg.contactInfo;
       const contactId = contact._id.toString();
 
-      if (!contactsMap.has(contactId)) {
-        contactsMap.set(contactId, {
-          ...contact._doc,
-          unreadCount: 0,
-          lastMessage: getMessagePreview(msg),
-          lastMessageAt: msg.createdAt || null,
-        });
-      }
-
-      if (
-        msg.receiver._id.toString() === userId.toString() &&
-        msg.status !== "read"
-      ) {
-        contactsMap.get(contactId).unreadCount += 1;
-      }
+      contactsMap.set(contactId, {
+        _id: contact._id,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        email: contact.email,
+        image: contact.image,
+        color: contact.color,
+        lastSeen: contact.lastSeen,
+        unreadCount: agg.unreadCount,
+        lastMessage: getMessagePreview(agg.lastMessageDoc),
+        lastMessageAt: agg.lastMessageDoc.createdAt || null,
+      });
     }
 
     // Fetch the user's contacts array to include friends with no messages yet
@@ -278,6 +312,12 @@ export const dmContacts = async (req, res, next) => {
     }
 
     const sidebarData = Array.from(contactsMap.values());
+
+    sidebarData.sort((a, b) => {
+      const dateA = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+      const dateB = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+      return dateB - dateA;
+    });
 
     res.status(200).json(sidebarData);
   } catch (error) {
