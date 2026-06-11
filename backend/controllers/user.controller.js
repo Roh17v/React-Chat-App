@@ -23,6 +23,10 @@ const getFileNameFromUrl = (url) => {
 const getMessagePreview = (message) => {
   if (!message) return "No messages yet";
 
+  if (message.deletedForEveryone) {
+    return "This message was deleted";
+  }
+
   if (message.messageType === "text") {
     const trimmed = (message.content || "").trim();
     return trimmed || "Message";
@@ -222,6 +226,7 @@ export const dmContacts = async (req, res, next) => {
         $match: {
           $or: [{ sender: userIdObj }, { receiver: userIdObj }],
           receiver: { $ne: null },
+          deletedFor: { $ne: userIdObj },
         },
       },
       {
