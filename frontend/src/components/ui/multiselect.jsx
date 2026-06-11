@@ -59,9 +59,28 @@ const MultipleSelector = React.forwardRef(
     ref
   ) => {
     const inputRef = React.useRef(null);
+    const dropdownRef = React.useRef(null);
     const [open, setOpen] = React.useState(false);
     const mouseOn = React.useRef(false);
     const [isLoading, setIsLoading] = React.useState(false);
+
+    useEffect(() => {
+      const handleOutsideClick = (e) => {
+        if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+          setOpen(false);
+          mouseOn.current = false;
+        } else {
+          // Prevent premature blur closing when interacting with dropdown on touch devices
+          mouseOn.current = true;
+        }
+      };
+      document.addEventListener("mousedown", handleOutsideClick);
+      document.addEventListener("touchstart", handleOutsideClick);
+      return () => {
+        document.removeEventListener("mousedown", handleOutsideClick);
+        document.removeEventListener("touchstart", handleOutsideClick);
+      };
+    }, []);
 
     const [selected, setSelected] = React.useState(value || []);
     const [options, setOptions] = React.useState(
@@ -234,6 +253,7 @@ const MultipleSelector = React.forwardRef(
 
     return (
       <Command
+        ref={dropdownRef}
         {...commandProps}
         onKeyDown={(e) => {
           handleKeyDown(e);

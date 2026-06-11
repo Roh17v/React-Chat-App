@@ -32,19 +32,18 @@ const CreateChannel = () => {
   const [channelName, setChannelName] = useState("");
 
   useEffect(() => {
-    const getData = async () => {
-      try {
-        const response = await axios.get(GET_ALL_CONTACTS_ROUTE, {
-          withCredentials: true,
-        });
-        setAllContacts(response.data.contacts);
-      } catch (error) {
-        console.error("Error fetching contacts:", error);
-      }
-    };
-
-    getData();
-  }, [directMessagesContacts, channels]);
+    if (directMessagesContacts && directMessagesContacts.length > 0) {
+      const mappedContacts = directMessagesContacts.map((contact) => ({
+        label: contact.firstName
+          ? `${contact.firstName} ${contact.lastName}`
+          : contact.email,
+        value: contact._id,
+      }));
+      setAllContacts(mappedContacts);
+    } else {
+      setAllContacts([]);
+    }
+  }, [directMessagesContacts]);
 
   const createChannel = async () => {
     if (!channelName.trim()) return toast.error("Enter a valid Channel Name.");
