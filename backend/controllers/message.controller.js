@@ -417,7 +417,6 @@ export const getUnifiedUpdates = async (req, res, next) => {
     const serverTimestamp = new Date().toISOString();
     const messages = await Message.find({
       updatedAt: { $gt: sinceDate },
-      deletedFor: { $ne: userId },
       $or: [
         { sender: userId },
         { receiver: userId },
@@ -429,7 +428,7 @@ export const getUnifiedUpdates = async (req, res, next) => {
       .populate("sender", "_id email color firstName lastName image lastSeen")
       .lean();
 
-    const sanitized = messages.map(sanitizeDeleted);
+    const sanitized = messages.map(sanitizeDeleted(userId));
 
     // `syncedUpTo` lets the client advance `since` on the next page
     // without re-reading its own state.
