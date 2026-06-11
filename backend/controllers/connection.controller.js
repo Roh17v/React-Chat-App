@@ -112,7 +112,7 @@ export const getPendingRequests = async (req, res, next) => {
     const requests = await Connection.find({
       receiver_id: userId,
       status: "pending"
-    }).populate("requester_id", "firstName lastName email username image color");
+    }).populate("requester_id", "firstName lastName email username image color").lean();
 
     return res.status(200).json(requests);
   } catch (error) {

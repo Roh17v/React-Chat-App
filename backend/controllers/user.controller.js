@@ -59,7 +59,7 @@ export const updateProfile = async (req, res, next) => {
 
     if (username) {
       // Check if username is already taken by another user
-      const existingUser = await User.findOne({
+      const existingUser = await User.exists({
         username: username.toLowerCase(),
         _id: { $ne: userId },
       });
@@ -188,7 +188,7 @@ export const searchUsers = async (req, res, next) => {
         { requester_id: currUserId, receiver_id: { $in: userIds } },
         { requester_id: { $in: userIds }, receiver_id: currUserId },
       ],
-    });
+    }).lean();
 
     // Map connection status to users
     const usersWithStatus = users.map((u) => {

@@ -28,4 +28,7 @@ const connectionSchema = new mongoose.Schema({
 // Prevent duplicate requests between the same two users in the same direction
 connectionSchema.index({ requester_id: 1, receiver_id: 1 }, { unique: true });
 
+// Optimize querying pending requests for a user
+connectionSchema.index({ receiver_id: 1, status: 1 });
+
 export const Connection = mongoose.model("Connection", connectionSchema);
