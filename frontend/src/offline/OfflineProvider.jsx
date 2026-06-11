@@ -375,12 +375,6 @@ export function OfflineProvider({ children }) {
       });
     }
 
-    try {
-      setIsInitialized(true);
-    } catch {
-      // Swallow.
-    }
-
     // 4. MediaCache singleton. Construction needs the repo on the very
     //    first call; subsequent calls receive the same instance regardless
     //    of the arg. We hold the reference in a ref so teardown can call
@@ -519,6 +513,18 @@ export function OfflineProvider({ children }) {
           meta: { reason: describeError(err) },
         });
       }
+    }
+
+    // Mark the offline layer "interactive" only after the initial
+    // warm-start sync decision has completed. On a warm boot this means
+    // the first incremental pass has already had a chance to write newer
+    // messages into SQLite before the chat UI becomes tappable; on a cold
+    // boot `syncEngine.start()` returns quickly after scheduling bootstrap
+    // in the background, so we still avoid holding the shell unnecessarily.
+    try {
+      setIsInitialized(true);
+    } catch {
+      // Swallow.
     }
 
     // 11. Status / queue-length poll loops. Both are timer-based because

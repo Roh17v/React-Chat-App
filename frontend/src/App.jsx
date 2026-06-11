@@ -53,6 +53,7 @@ function App() {
   const connectivity = useAppStore((state) => state.connectivity);
   const bootstrapStatus = useAppStore((state) => state.bootstrapStatus);
   const offlineMode = useAppStore((state) => state.offlineMode);
+  const isInitialized = useAppStore((state) => state.isInitialized);
   const setSelectedChatType = useAppStore((state) => state.setSelectedChatType);
   const setSelectedChatData = useAppStore((state) => state.setSelectedChatData);
   const pendingNotification = useAppStore(
@@ -75,6 +76,9 @@ function App() {
   const closeChat = useAppStore((state) => state.closeChat);
   const selectedChatData = useAppStore((state) => state.selectedChatData);
   const chatHistoryPushedRef = useRef(false);
+  const hasHydratedChatLists =
+    (Array.isArray(directMessagesContacts) && directMessagesContacts.length > 0) ||
+    (Array.isArray(channels) && channels.length > 0);
 
   // Push/pop browser history entry when chat opens/closes
   // so that the back button (hardware or browser) can close the chat
@@ -589,11 +593,16 @@ function App() {
             (
               !user || // logged out → straight to /auth
               offlineMode === "unavailable" || // web build, no offline layer
-              bootstrapStatus === "ready" ||
-              bootstrapStatus === "partial" ||
-              (Array.isArray(directMessagesContacts) &&
-                directMessagesContacts.length > 0) ||
-              splashSafetyElapsed
+              !Capacitor.isNativePlatform() ||
+              splashSafetyElapsed ||
+              (
+                isInitialized &&
+                (
+                  hasHydratedChatLists ||
+                  bootstrapStatus === "ready" ||
+                  bootstrapStatus === "partial"
+                )
+              )
             )
           }
           onDone={() => setShowSplash(false)}

@@ -44,6 +44,8 @@ const tryGetSyncEngine = () => {
 };
 
 const URL_REGEX = /\b((?:https?:\/\/|www\.)[^\s<]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<]*)?)/gi;
+const NATIVE_NETWORK_PAGE_LIMIT = 50;
+const WEB_NETWORK_PAGE_LIMIT = 20;
 
 /**
  * Convert a `LocalMessage` row produced by the offline repository into the
@@ -482,6 +484,9 @@ const MessageContainer = () => {
       let newCount = 0;
       let responseData = [];
       const sizeBefore = selectedChatMessages.length;
+      const networkPageLimit = Capacitor.isNativePlatform()
+        ? NATIVE_NETWORK_PAGE_LIMIT
+        : WEB_NETWORK_PAGE_LIMIT;
 
       while (newCount === 0) {
         if (lastServerPageRef.current === 0) {
@@ -490,7 +495,7 @@ const MessageContainer = () => {
           // message we already have.
           serverPage = Math.max(
             1,
-            Math.floor(sizeBefore / 20) + 1,
+            Math.floor(sizeBefore / networkPageLimit) + 1,
           );
         } else {
           serverPage = lastServerPageRef.current + 1;
@@ -504,7 +509,7 @@ const MessageContainer = () => {
         }
 
         const response = await axios.get(
-          `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
+          `${HOST}${PRIVATE_CONTACT_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=${networkPageLimit}`,
           {
             withCredentials: true,
             timeout: 15_000,
@@ -641,12 +646,15 @@ const MessageContainer = () => {
       let newCount = 0;
       let responseData = [];
       const sizeBefore = selectedChatMessages.length;
+      const networkPageLimit = Capacitor.isNativePlatform()
+        ? NATIVE_NETWORK_PAGE_LIMIT
+        : WEB_NETWORK_PAGE_LIMIT;
 
       while (newCount === 0) {
         if (lastServerPageRef.current === 0) {
           serverPage = Math.max(
             1,
-            Math.floor(sizeBefore / 20) + 1,
+            Math.floor(sizeBefore / networkPageLimit) + 1,
           );
         } else {
           serverPage = lastServerPageRef.current + 1;
@@ -659,7 +667,7 @@ const MessageContainer = () => {
         }
 
         const response = await axios.get(
-          `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=20`,
+          `${HOST}${CHANNEL_MESSAGES_ROUTE}/${selectedChatId}?page=${serverPage}&limit=${networkPageLimit}`,
           {
             withCredentials: true,
             timeout: 15_000,
@@ -752,35 +760,24 @@ const MessageContainer = () => {
         setPage(1);
         setHasMore(true);
         setSelectedChatMessages([], true);
-        // On native, block the first read on the per-conversation refresh
-        // so the user does not see "old window for a moment, then new
-        // messages flash in" when they were offline and now have unread
-        // messages. We race the refresh against a 2 s safety timeout so
-        // a slow network cannot leave the user staring at an empty chat;
-        // if the timeout wins, `getMessages(1)` reads whatever is in the
-        // local DB and the in-flight refresh commits append via
-        // `subscribeMessages` when it lands. The refresh's own `.catch`
-        // absorbs network errors, the timeout's race never throws, so
-        // the await always resolves and `getMessages(1)` always runs.
-        void (async () => {
-          if (Capacitor.isNativePlatform()) {
-            const engine = tryGetSyncEngine();
-            if (engine && typeof engine.refreshConversation === "function") {
-              const refresh = engine
-                .refreshConversation({
-                  conversationId: selectedChatId,
-                  conversationType: "dm",
-                })
-                .catch(() => {});
-              const CHAT_OPEN_REFRESH_TIMEOUT_MS = 2000;
-              const timeout = new Promise((resolve) =>
-                setTimeout(resolve, CHAT_OPEN_REFRESH_TIMEOUT_MS),
-              );
-              await Promise.race([refresh, timeout]);
-            }
+        // Show the local window immediately, then top it up in the
+        // background. Blocking on refresh here makes the chat appear to
+        // "wake up" 1-2 seconds after tap on native even when SQLite
+        // already has most of the conversation cached.
+        getMessages(1);
+        if (Capacitor.isNativePlatform()) {
+          const engine = tryGetSyncEngine();
+          if (engine && typeof engine.refreshConversation === "function") {
+            engine
+              .refreshConversation({
+                conversationId: selectedChatId,
+                conversationType: "dm",
+              })
+              .catch(() => {
+                // Silently ignore.
+              });
           }
-          getMessages(1);
-        })();
+        }
         // Mark-read is sent through THREE channels for durability:
         //   1. Socket emit — instant, but lost if the socket is mid-
         //      reconnect when we fire.
