@@ -205,6 +205,11 @@ export const deleteForMe = async (req, res, next) => {
       $set: { updatedAt: new Date() }
     });
 
+    // Notify all active sessions for this user so other devices (like the web app) update instantly
+    const userSockets = userSocketMap.get(userId.toString()) || new Set();
+    userSockets.forEach((socketId) => {
+      io.to(socketId).emit("message-deleted-for-me", { messageId });
+    });
 
     res.status(200).json({ success: true, messageId });
   } catch (error) {

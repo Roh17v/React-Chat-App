@@ -134,9 +134,9 @@ export const createChatSlice = (set, get) => ({
             ? snap.status
             : m.status;
         const nextDeleted =
-          snap.deletedForEveryone === true
+          snap.deletedForEveryone === true || snap.deletedForEveryone === 1
             ? true
-            : snap.deletedForEveryone === false
+            : snap.deletedForEveryone === false || snap.deletedForEveryone === 0
               ? false
               : m.deletedForEveryone;
         const nextContent =
@@ -144,14 +144,19 @@ export const createChatSlice = (set, get) => ({
             ? snap.content
             : m.content;
         const nextDeletedForMe =
-          snap.deletedForMe === true
+          snap.deletedForMe === true || snap.deletedForMe === 1
             ? true
-            : m.deletedForMe;
+            : snap.deletedForMe === false || snap.deletedForMe === 0
+              ? false
+              : m.deletedForMe;
+        const nextServerId = snap.serverId !== undefined ? snap.serverId : m.serverId;
+        
         if (
           nextStatus !== m.status ||
           nextDeleted !== m.deletedForEveryone ||
           nextContent !== m.content ||
-          nextDeletedForMe !== m.deletedForMe
+          nextDeletedForMe !== m.deletedForMe ||
+          nextServerId !== m.serverId
         ) {
           hasUpdates = true;
           return {
@@ -160,6 +165,7 @@ export const createChatSlice = (set, get) => ({
             deletedForEveryone: nextDeleted,
             deletedForMe: nextDeletedForMe,
             content: nextContent,
+            serverId: nextServerId,
           };
         }
         return m;

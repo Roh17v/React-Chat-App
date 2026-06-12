@@ -117,7 +117,7 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  * @property {() => boolean} isReady
  * @property {(args: { conversationId: string, conversationType: "dm"|"channel", messages: unknown[], sourceCursor?: { lastServerId?: string, lastCreatedAt?: string, lastSyncedAt?: string } }) => Promise<{ inserted: number, updated: number, ignored: number }>} applyServerMessages
  * @property {(serverMessage: unknown) => Promise<void>} applyLiveMessage
- * @property {(args: { serverId: string, deletedForEveryone: boolean }) => Promise<void>} applyDeletion
+ * @property {(args: { serverId: string, deletedForEveryone?: boolean, deletedForMe?: boolean }) => Promise<void>} applyDeletion
  * @property {(args: { conversationId: string, fromUserId: string, status: string }) => Promise<void>} applyStatusUpdate
  * @property {(contacts: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyContacts]
  * @property {(channels: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyChannels]
@@ -174,6 +174,7 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  *   | { kind: "receive-channel-message", payload: Record<string, unknown> }
  *   | { kind: "messageSendFailed", payload: Record<string, unknown> }
  *   | { kind: "message-deleted", payload: Record<string, unknown> }
+ *   | { kind: "message-deleted-for-me", payload: Record<string, unknown> }
  *   | { kind: "message-status-update", payload: Record<string, unknown> }
  * )} LiveEvent
  */
@@ -1219,6 +1220,39 @@ export function createSyncEngine(options) {
           diagnostics.log({
             category: "live",
             code: "LIVE_DELETION_APPLIED",
+            outcome: "ok",
+            durationMs: now() - startedAt,
+            meta: { serverId },
+          });
+          return;
+        }
+
+        case "message-deleted-for-me": {
+          const serverId =
+            typeof payload.messageId === "string" && payload.messageId.length > 0
+              ? payload.messageId
+              : typeof payload.serverId === "string" && payload.serverId.length > 0
+                ? payload.serverId
+                : typeof payload._id === "string" && payload._id.length > 0
+                  ? payload._id
+                  : null;
+          if (serverId == null) {
+            diagnostics.log({
+              category: "live",
+              code: "LIVE_DELETION_DROPPED",
+              outcome: "warn",
+              durationMs: now() - startedAt,
+              meta: { reason: "missing serverId" },
+            });
+            return;
+          }
+          await repository.applyDeletion({
+            serverId,
+            deletedForMe: true,
+          });
+          diagnostics.log({
+            category: "live",
+            code: "LIVE_DELETION_FOR_ME_APPLIED",
             outcome: "ok",
             durationMs: now() - startedAt,
             meta: { serverId },

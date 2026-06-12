@@ -1152,12 +1152,22 @@ const MessageContainer = () => {
       if (Capacitor.isNativePlatform()) {
         const repo = getRepository();
         if (repo.isReady()) {
-          await repo.enqueueOutbound({
-            kind: "delete_for_me",
-            conversationId: selectedChatData._id,
-            conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
-            payload: { messageId }
-          });
+          const queue = getOutboundQueue();
+          if (queue && typeof queue.enqueue === "function") {
+            await queue.enqueue({
+              kind: "delete_for_me",
+              conversationId: selectedChatData._id,
+              conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
+              payload: { messageId }
+            });
+          } else {
+            await repo.enqueueOutbound({
+              kind: "delete_for_me",
+              conversationId: selectedChatData._id,
+              conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
+              payload: { messageId }
+            });
+          }
         }
       } else {
         await axios.patch(
@@ -1179,12 +1189,22 @@ const MessageContainer = () => {
       if (Capacitor.isNativePlatform()) {
         const repo = getRepository();
         if (repo.isReady()) {
-          await repo.enqueueOutbound({
-            kind: "delete_for_everyone",
-            conversationId: selectedChatData._id,
-            conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
-            payload: { messageId }
-          });
+          const queue = getOutboundQueue();
+          if (queue && typeof queue.enqueue === "function") {
+            await queue.enqueue({
+              kind: "delete_for_everyone",
+              conversationId: selectedChatData._id,
+              conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
+              payload: { messageId }
+            });
+          } else {
+            await repo.enqueueOutbound({
+              kind: "delete_for_everyone",
+              conversationId: selectedChatData._id,
+              conversationType: selectedChatType === "contact" ? "dm" : selectedChatType,
+              payload: { messageId }
+            });
+          }
         }
       } else {
         await axios.patch(

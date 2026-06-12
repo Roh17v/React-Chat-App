@@ -2047,7 +2047,7 @@ export function createRepository(options = {}) {
    * Internal — runs under the conversation mutex acquired by the public
    * {@link applyDeletion} wrapper below.
    *
-   * @param {{ serverId: string, deletedForEveryone: boolean }} args
+   * @param {{ serverId: string, deletedForEveryone?: boolean, deletedForMe?: boolean }} args
    * @returns {Promise<void>}
    */
   async function applyDeletionLocked(args) {
@@ -2094,16 +2094,26 @@ export function createRepository(options = {}) {
     }
 
     await driver.withTransaction(async (tx) => {
-      await tx.run(
-        `UPDATE messages SET
-           deleted_for_everyone = ?,
-           content = NULL,
-           file_url = NULL,
-           file_name = NULL,
-           updated_at = ?
-         WHERE server_id = ?`,
-        [args.deletedForEveryone ? 1 : 0, nextUpdatedAt, args.serverId],
-      );
+      if (args.deletedForMe) {
+        await tx.run(
+          `UPDATE messages SET
+             deleted_for_me = 1,
+             updated_at = ?
+           WHERE server_id = ?`,
+          [nextUpdatedAt, args.serverId],
+        );
+      } else {
+        await tx.run(
+          `UPDATE messages SET
+             deleted_for_everyone = ?,
+             content = NULL,
+             file_url = NULL,
+             file_name = NULL,
+             updated_at = ?
+           WHERE server_id = ?`,
+          [args.deletedForEveryone ? 1 : 0, nextUpdatedAt, args.serverId],
+        );
+      }
       if (conversationId != null) {
         await pruneRetention(conversationId, { driver: tx });
       }
@@ -2134,7 +2144,7 @@ export function createRepository(options = {}) {
    * returns nothing) but we still acquire a lock to keep the contract
    * "every write goes through the mutex" honest.
    *
-   * @param {{ serverId: string, deletedForEveryone: boolean }} args
+   * @param {{ serverId: string, deletedForEveryone?: boolean, deletedForMe?: boolean }} args
    * @returns {Promise<void>}
    */
   async function applyDeletion(args) {

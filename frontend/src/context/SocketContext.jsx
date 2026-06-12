@@ -137,6 +137,7 @@ export const SocketProvider = ({ children }) => {
     setTypingIndicator,
     updateContactLastSeen,
     replaceWithDeletedPlaceholder,
+    deleteMessageForMe,
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
@@ -616,6 +617,19 @@ export const SocketProvider = ({ children }) => {
         }
       });
 
+      socket.current.on("message-deleted-for-me", ({ messageId }) => {
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "message-deleted-for-me",
+            payload: { messageId },
+          });
+        } else {
+          if (messageId) {
+            deleteMessageForMe(messageId);
+          }
+        }
+      });
+
       return () => {
         if (socket.current) {
           // Clear all pending auto-expire timers to avoid memory leaks.
@@ -637,6 +651,7 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("stop-typing");
           socket.current.off("user-last-seen");
           socket.current.off("message-deleted");
+          socket.current.off("message-deleted-for-me");
           socket.current.off("connection-request-received");
           socket.current.off("connection-accepted");
 
