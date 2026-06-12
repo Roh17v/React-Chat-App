@@ -222,6 +222,7 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  * @property {() => Promise<IncrementalResult>} incremental
  * @property {(event: LiveEvent) => Promise<void>} applyLiveEvent
  * @property {(state: "online"|"offline"|"reconnecting") => void} onConnectivityChange
+ * @property {() => Promise<void>} onForegroundResume
  * @property {() => SyncStatus} getStatus
  * @property {(args: { conversationId: string, conversationType: "dm"|"channel" }) => Promise<{ ok: boolean, batchesApplied: number, messagesApplied: number }>} refreshConversation
  */
@@ -1461,6 +1462,37 @@ export function createSyncEngine(options) {
   }
 
   /**
+   * Shared catch-up path for connectivity `online` transitions and app
+   * foreground resume. REST incremental sync is allowed while
+   * `reconnecting` (network up, socket still handshaking); only true
+   * `offline` is a no-op.
+   *
+   * @param {"connectivity"|"foreground"} trigger
+   * @returns {Promise<void>}
+   */
+  async function runCatchUpSync(trigger) {
+    if (userId == null || !repository.isReady()) return;
+    if (connectivity === "offline") return;
+    try {
+      if (await shouldBootstrap()) {
+        await bootstrap();
+      } else {
+        await incremental();
+      }
+    } catch (err) {
+      diagnostics.log({
+        category: "incremental",
+        code:
+          trigger === "foreground"
+            ? "FOREGROUND_SYNC_FAILED"
+            : "INCREMENTAL_TRIGGER_FAILED",
+        outcome: "warn",
+        meta: { reason: describeError(err) },
+      });
+    }
+  }
+
+  /**
    * React to connectivity transitions. The OutboundQueue (task 10.1) owns
    * its own draining trigger; this engine handles the sync side.
    *
@@ -1482,23 +1514,20 @@ export function createSyncEngine(options) {
     const previous = connectivity;
     connectivity = state;
     if (state === "online" && previous !== "online" && userId != null && repository.isReady()) {
-      void (async () => {
-        try {
-          if (await shouldBootstrap()) {
-            await bootstrap();
-          } else {
-            await incremental();
-          }
-        } catch (err) {
-          diagnostics.log({
-            category: "incremental",
-            code: "INCREMENTAL_TRIGGER_FAILED",
-            outcome: "warn",
-            meta: { reason: describeError(err) },
-          });
-        }
-      })();
+      void runCatchUpSync("connectivity");
     }
+  }
+
+  /**
+   * Run incremental (or bootstrap) sync when the app returns to the
+   * foreground. Called by {@link OfflineProvider} on Capacitor
+   * `appStateChange` so backgrounded sessions catch up immediately on
+   * resume without waiting for another connectivity edge.
+   *
+   * @returns {Promise<void>}
+   */
+  function onForegroundResume() {
+    return runCatchUpSync("foreground");
   }
 
   /**
@@ -1519,6 +1548,7 @@ export function createSyncEngine(options) {
     incremental,
     applyLiveEvent,
     onConnectivityChange,
+    onForegroundResume,
     getStatus,
     /**
      * Run an incremental sync for a single conversation. Used by the

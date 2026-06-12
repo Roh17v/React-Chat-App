@@ -470,6 +470,91 @@ describe("repository.applyStatusUpdate", () => {
     expect(ignored).toBeDefined();
   });
 
+  it("retryFailedOutbound re-queues a failed send with the same clientTempId", async () => {
+    const ctx = await makeRepository();
+    const clientTempId = "tmp-retry-1";
+    const queueId = "queue-retry-1";
+
+    await ctx.driver.run(
+      `INSERT INTO messages (
+         id, server_id, client_temp_id, conversation_id, conversation_type,
+         sender_id, receiver_id, channel_id, message_type, content,
+         file_url, file_name, file_metadata_json, reply_to_json, status,
+         deleted_for_everyone, deleted_for_me, deleted_at, created_at,
+         updated_at, sync_state, queue_seq, local_file_path
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        "local-retry",
+        null,
+        clientTempId,
+        "user-other",
+        "dm",
+        "user-self",
+        "user-other",
+        null,
+        "text",
+        "retry me",
+        null,
+        null,
+        "{}",
+        null,
+        "failed",
+        0,
+        0,
+        null,
+        "2024-01-01T00:00:00.000Z",
+        "2024-01-01T00:00:00.000Z",
+        "local_only",
+        1,
+        null,
+      ],
+    );
+
+    await ctx.driver.run(
+      `INSERT INTO outbound_queue (
+         id, queue_seq, kind, conversation_id, conversation_type,
+         payload_json, local_file_path, client_temp_id,
+         attempts, next_attempt_at, last_error, status, created_at, updated_at
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        queueId,
+        1,
+        "send_text",
+        "user-other",
+        "dm",
+        JSON.stringify({ content: "retry me" }),
+        null,
+        clientTempId,
+        5,
+        "2024-01-02T00:00:00.000Z",
+        "socket timeout",
+        "failed",
+        "2024-01-01T00:00:00.000Z",
+        "2024-01-02T00:00:00.000Z",
+      ],
+    );
+
+    const result = await ctx.repository.retryFailedOutbound({
+      messageId: clientTempId,
+    });
+    expect(result).toEqual({ ok: true });
+
+    const msgRows = await ctx.driver.query(
+      "SELECT status FROM messages WHERE client_temp_id = ?",
+      [clientTempId],
+    );
+    expect(msgRows[0].status).toBe("pending");
+
+    const queueRows = await ctx.driver.query(
+      "SELECT status, attempts, next_attempt_at, last_error FROM outbound_queue WHERE id = ?",
+      [queueId],
+    );
+    expect(queueRows[0].status).toBe("queued");
+    expect(queueRows[0].attempts).toBe(0);
+    expect(queueRows[0].next_attempt_at).toBeNull();
+    expect(queueRows[0].last_error).toBeNull();
+  });
+
   it("allows the failed → pending sanctioned retry transition", async () => {
     const ctx = await makeRepository();
     // Seed a failed row directly so we can drive the retry path.

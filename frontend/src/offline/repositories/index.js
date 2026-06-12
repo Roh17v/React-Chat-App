@@ -2964,6 +2964,157 @@ export function createRepository(options = {}) {
   }
 
   /**
+   * Re-enqueue a user-failed outbound message for delivery (Req 6.6).
+   * Resets the bound `outbound_queue` row to `queued` (attempts cleared)
+   * and flips the optimistic `messages` row `failed → pending` while
+   * preserving `client_temp_id`.
+   *
+   * @param {{ messageId: string }} args UI message `_id` (local id,
+   *   `clientTempId`, or `serverId`).
+   * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+   */
+  async function retryFailedOutboundLocked(args) {
+    requireReady("retryFailedOutbound");
+    if (
+      args == null ||
+      typeof args.messageId !== "string" ||
+      args.messageId.length === 0
+    ) {
+      return { ok: false, reason: "INVALID_MESSAGE_ID" };
+    }
+    const messageId = args.messageId;
+    const now = new Date().toISOString();
+
+    const msgRows = /** @type {{ id?: unknown, client_temp_id?: unknown, conversation_id?: unknown, conversation_type?: unknown, status?: unknown }[]} */ (
+      await driver.query(
+        "SELECT id, client_temp_id, conversation_id, conversation_type, status " +
+          "FROM messages WHERE id = ? OR client_temp_id = ? OR server_id = ? LIMIT 1",
+        [messageId, messageId, messageId],
+      )
+    );
+    if (!Array.isArray(msgRows) || msgRows.length === 0) {
+      return { ok: false, reason: "MESSAGE_NOT_FOUND" };
+    }
+    const msgRow = msgRows[0];
+    if (msgRow.status !== "failed") {
+      return { ok: false, reason: "NOT_FAILED" };
+    }
+    const clientTempId =
+      typeof msgRow.client_temp_id === "string" && msgRow.client_temp_id.length > 0
+        ? msgRow.client_temp_id
+        : null;
+    if (clientTempId == null) {
+      return { ok: false, reason: "NOT_RETRYABLE" };
+    }
+    const conversationId =
+      typeof msgRow.conversation_id === "string" ? msgRow.conversation_id : null;
+    const conversationType =
+      msgRow.conversation_type === "dm" || msgRow.conversation_type === "channel"
+        ? /** @type {ConversationType} */ (msgRow.conversation_type)
+        : null;
+
+    try {
+      await driver.withTransaction(async (tx) => {
+        const queueRows = /** @type {{ id?: unknown }[]} */ (
+          await tx.query(
+            "SELECT id FROM outbound_queue " +
+              "WHERE client_temp_id = ? AND status = 'failed' " +
+              "AND kind IN ('send_text', 'send_file') " +
+              "ORDER BY queue_seq ASC LIMIT 1",
+            [clientTempId],
+          )
+        );
+        if (!Array.isArray(queueRows) || queueRows.length === 0) {
+          throw Object.assign(new Error("NO_QUEUE_ROW"), { code: "NO_QUEUE_ROW" });
+        }
+        const queueId = queueRows[0].id;
+        await tx.run(
+          "UPDATE outbound_queue SET status = 'queued', attempts = 0, " +
+            "next_attempt_at = NULL, last_error = NULL, updated_at = ? " +
+            "WHERE id = ? AND status = 'failed'",
+          [now, queueId],
+        );
+        await tx.run(
+          "UPDATE messages SET status = 'pending', updated_at = ? " +
+            "WHERE client_temp_id = ? AND status = 'failed'",
+          [now, clientTempId],
+        );
+      });
+    } catch (err) {
+      const code =
+        err != null &&
+        typeof err === "object" &&
+        /** @type {{ code?: unknown }} */ (err).code === "NO_QUEUE_ROW"
+          ? "NO_QUEUE_ROW"
+          : "RETRY_FAILED";
+      diagnostics.log({
+        category: "outbound",
+        code: "OUTBOUND_RETRY_FAILED",
+        outcome: "warn",
+        meta: { messageId, reason: code },
+      });
+      return { ok: false, reason: code };
+    }
+
+    diagnostics.log({
+      category: "outbound",
+      code: "OUTBOUND_RETRY_ENQUEUED",
+      outcome: "ok",
+      meta: { messageId, clientTempId },
+    });
+
+    if (conversationId != null) {
+      await emitMessages(conversationId);
+      if (conversationType === "channel") {
+        await emitChannels();
+      } else {
+        await emitContacts();
+      }
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Public, mutex-serialized {@link retryFailedOutboundLocked}.
+   *
+   * @param {{ messageId: string }} args
+   * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+   */
+  async function retryFailedOutbound(args) {
+    /** @type {string} */
+    let key = GLOBAL_MUTEX_KEY;
+    if (
+      ready &&
+      args != null &&
+      typeof args.messageId === "string" &&
+      args.messageId.length > 0
+    ) {
+      try {
+        const rows = /** @type {{ conversation_id?: unknown }[]} */ (
+          await driver.query(
+            "SELECT conversation_id FROM messages " +
+              "WHERE id = ? OR client_temp_id = ? OR server_id = ? LIMIT 1",
+            [args.messageId, args.messageId, args.messageId],
+          )
+        );
+        if (
+          Array.isArray(rows) &&
+          rows.length > 0 &&
+          typeof rows[0].conversation_id === "string" &&
+          rows[0].conversation_id.length > 0
+        ) {
+          key = rows[0].conversation_id;
+        }
+      } catch {
+        // Driver hiccup — fall through to the global key.
+      }
+    }
+    return mutex.withLock(key, () =>
+      retryFailedOutboundLocked(/** @type {any} */ (args)),
+    );
+  }
+
+  /**
    * Public, mutex-serialized {@link markOutboundFailedLocked}.
    *
    * Same conversationId lookup pattern as {@link markOutboundConfirmed}.
@@ -3247,6 +3398,7 @@ export function createRepository(options = {}) {
     enqueueOutbound,
     markOutboundConfirmed,
     markOutboundFailed,
+    retryFailedOutbound,
 
     // subscriptions (task 7.4)
     subscribeMessages,

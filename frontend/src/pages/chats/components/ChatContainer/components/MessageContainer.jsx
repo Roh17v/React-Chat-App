@@ -43,6 +43,15 @@ const tryGetSyncEngine = () => {
   }
 };
 
+const kickOutboundDrain = () => {
+  try {
+    const q = getOutboundQueue();
+    if (q && typeof q.triggerDrain === "function") q.triggerDrain();
+  } catch {
+    // Singleton not initialized yet — periodic timer will handle it.
+  }
+};
+
 const URL_REGEX = /\b((?:https?:\/\/|www\.)[^\s<]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s<]*)?)/gi;
 const NATIVE_NETWORK_PAGE_LIMIT = 50;
 const WEB_NETWORK_PAGE_LIMIT = 20;
@@ -1084,8 +1093,27 @@ const MessageContainer = () => {
     }
   };
 
+  const handleRetryFailedMessage = useCallback(async (message) => {
+    if (!message || message.status !== "failed") return;
+    if (!Capacitor.isNativePlatform()) return;
+
+    const repo = getRepository();
+    if (!repo.isReady() || typeof repo.retryFailedOutbound !== "function") return;
+
+    try {
+      const result = await repo.retryFailedOutbound({ messageId: message._id });
+      if (result == null || result.ok !== true) {
+        toast.error("Couldn't resend message. Please try again.");
+        return;
+      }
+      kickOutboundDrain();
+    } catch {
+      toast.error("Couldn't resend message. Please try again.");
+    }
+  }, []);
+
   // Message status indicator component - bright sky-blue for read visibility
-  const MessageStatus = ({ status }) => (
+  const MessageStatus = ({ status, onRetry }) => (
     <span className="inline-flex items-center ml-1.5">
       {(status === "sending" || status === "pending") && (
         <svg className="w-3.5 h-3.5 text-white/50 animate-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1094,7 +1122,18 @@ const MessageContainer = () => {
         </svg>
       )}
       {status === "failed" && (
-        <span className="text-red-400 text-[10px] font-bold">!</span>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRetry?.();
+          }}
+          className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500/20 px-1 text-red-300 hover:bg-red-500/30 transition-colors"
+          aria-label="Retry sending message"
+          title="Tap to retry"
+        >
+          <span className="text-[10px] font-bold leading-none">!</span>
+        </button>
       )}
       {status === "sent" && (
         <MdDone className="w-4 h-4 text-white/70" />
@@ -1538,7 +1577,16 @@ const MessageContainer = () => {
                 )}>
                   {moment(message.createdAt).format("LT")}
                 </span>
-                {isSent && <MessageStatus status={message.status} isSent={isSent} />}
+                {isSent && (
+                  <MessageStatus
+                    status={message.status}
+                    onRetry={
+                      message.status === "failed"
+                        ? () => handleRetryFailedMessage(message)
+                        : undefined
+                    }
+                  />
+                )}
               </div>
               {/* Still sending indicator — Req 11.4 */}
               {isSent &&
@@ -1548,6 +1596,18 @@ const MessageContainer = () => {
                   <span className="mt-0.5 self-end text-[10px] font-medium text-amber-500">
                     Still sending…
                   </span>
+              )}
+              {isSent && message.status === "failed" && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRetryFailedMessage(message);
+                  }}
+                  className="mt-0.5 self-end text-[10px] font-medium text-red-300 hover:text-red-200 transition-colors"
+                >
+                  Tap to retry
+                </button>
               )}
             </div>
           )}
@@ -1619,7 +1679,16 @@ const MessageContainer = () => {
                 )}>
                   {moment(message.createdAt).format("LT")}
                 </span>
-                {isSent && <MessageStatus status={message.status} isSent={isSent} />}
+                {isSent && (
+                  <MessageStatus
+                    status={message.status}
+                    onRetry={
+                      message.status === "failed"
+                        ? () => handleRetryFailedMessage(message)
+                        : undefined
+                    }
+                  />
+                )}
               </div>
               {/* Still sending indicator — Req 11.4 */}
               {isSent &&
@@ -1629,6 +1698,18 @@ const MessageContainer = () => {
                   <span className="mt-0.5 self-end text-[10px] font-medium text-amber-500">
                     Still sending…
                   </span>
+              )}
+              {isSent && message.status === "failed" && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRetryFailedMessage(message);
+                  }}
+                  className="mt-0.5 self-end text-[10px] font-medium text-red-300 hover:text-red-200 transition-colors"
+                >
+                  Tap to retry
+                </button>
               )}
             </div>
           )}

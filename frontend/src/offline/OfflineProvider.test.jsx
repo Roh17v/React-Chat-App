@@ -42,6 +42,22 @@ vi.mock("@capacitor/core", () => ({
   },
 }));
 
+let appStateHandler = null;
+vi.mock("@capacitor/app", () => ({
+  App: {
+    addListener: vi.fn(async (event, handler) => {
+      if (event === "appStateChange") {
+        appStateHandler = handler;
+      }
+      return {
+        remove: vi.fn(async () => {
+          if (event === "appStateChange") appStateHandler = null;
+        }),
+      };
+    }),
+  },
+}));
+
 // The component imports `axios` and forwards it to the SyncEngine /
 // OutboundQueue singletons. Since both singletons are stubbed below we
 // don't need axios to do anything — but the import has to resolve.
@@ -185,6 +201,9 @@ function buildSyncEngineStub() {
     incremental: vi.fn(async () => ({})),
     applyLiveEvent: vi.fn(async () => undefined),
     onConnectivityChange: vi.fn(),
+    onForegroundResume: vi.fn(async () => {
+      record("sync", "onForegroundResume");
+    }),
     getStatus: vi.fn(() => ({
       phase: "ready",
       lastIncrementalSyncAt: null,
@@ -338,6 +357,7 @@ beforeEach(() => {
   calls = [];
   nativePlatform = true;
   mockSocket = null;
+  appStateHandler = null;
   repoStub = buildRepoStub();
   syncEngineStub = buildSyncEngineStub();
   outboundQueueStub = buildOutboundQueueStub();
@@ -448,6 +468,26 @@ describe("OfflineProvider — boot success path", () => {
     handle.unmount();
     await flush();
     expect(useAppStore.getState().isInitialized).toBe(false);
+  });
+
+  it("runs catch-up sync and drains the outbound queue on foreground resume", async () => {
+    const sock = buildSocketStub();
+    const handle = mountProvider({ user: { id: "u1" }, socket: sock });
+    await flush();
+
+    expect(typeof appStateHandler).toBe("function");
+
+    appStateHandler({ isActive: false });
+    syncEngineStub.onForegroundResume.mockClear();
+    outboundQueueStub.triggerDrain.mockClear();
+
+    appStateHandler({ isActive: true });
+    await flush();
+
+    expect(syncEngineStub.onForegroundResume).toHaveBeenCalledTimes(1);
+    expect(outboundQueueStub.triggerDrain).toHaveBeenCalledTimes(1);
+
+    handle.unmount();
   });
 
   it("sets localEncryption to 'none' when the secure store is unavailable", async () => {

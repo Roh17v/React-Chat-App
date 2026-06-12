@@ -39,6 +39,7 @@
 import { useEffect, useRef } from "react";
 import axios from "axios";
 import { Capacitor } from "@capacitor/core";
+import { App as CapacitorApp } from "@capacitor/app";
 
 import useAppStore from "../store/index.js";
 import { useSocket } from "../context/SocketContext.jsx";
@@ -170,6 +171,7 @@ export function OfflineProvider({ children }) {
    *   mediaCache: ReturnType<typeof getMediaCache> | null,
    *   encryption: ReturnType<typeof getEncryptionLayer> | null,
    *   connectivityUnsub: (() => void) | null,
+   *   appStateListener: { remove: () => Promise<void> } | null,
    *   statusInterval: ReturnType<typeof setInterval> | null,
    *   queueInterval: ReturnType<typeof setInterval> | null,
    * }>}
@@ -183,6 +185,7 @@ export function OfflineProvider({ children }) {
     mediaCache: null,
     encryption: null,
     connectivityUnsub: null,
+    appStateListener: null,
     statusInterval: null,
     queueInterval: null,
   });
@@ -575,6 +578,51 @@ export function OfflineProvider({ children }) {
       })();
     }, QUEUE_POLL_MS);
 
+    // 12. Foreground resume — catch up inbound messages and drain any
+    //     queued outbound work the moment the user returns to the app.
+    //     REST incremental sync runs while `reconnecting`; the outbound
+    //     queue's own `triggerDrain` no-ops until socket `online`.
+    try {
+      const listener = await CapacitorApp.addListener(
+        "appStateChange",
+        ({ isActive }) => {
+          if (isActive !== true) return;
+          const conn = refs.current.connectivity;
+          let state = "offline";
+          try {
+            state = conn != null && typeof conn.current === "function"
+              ? conn.current()
+              : "offline";
+          } catch {
+            // Swallow — treat as offline.
+          }
+          if (state === "offline") return;
+
+          const engine = refs.current.syncEngine;
+          if (engine != null && typeof engine.onForegroundResume === "function") {
+            void engine.onForegroundResume().catch(() => {});
+          }
+
+          const queue = refs.current.outboundQueue;
+          if (queue != null && typeof queue.triggerDrain === "function") {
+            try {
+              queue.triggerDrain();
+            } catch {
+              // Swallow.
+            }
+          }
+        },
+      );
+      refs.current.appStateListener = listener;
+    } catch (err) {
+      diagnostics.log({
+        category: "live",
+        code: "OFFLINE_PROVIDER_APP_STATE_LISTENER_FAILED",
+        outcome: "warn",
+        meta: { reason: describeError(err) },
+      });
+    }
+
     diagnostics.log({
       category: "boot",
       code: "OFFLINE_PROVIDER_BOOTED",
@@ -620,6 +668,15 @@ export function OfflineProvider({ children }) {
         // Swallow.
       }
       refs.current.queueInterval = null;
+    }
+
+    if (refs.current.appStateListener != null) {
+      try {
+        void refs.current.appStateListener.remove();
+      } catch {
+        // Swallow.
+      }
+      refs.current.appStateListener = null;
     }
 
     // 1. SyncEngine — owns the in-flight sync promises; stop first so
