@@ -231,6 +231,7 @@ const MessageContainer = () => {
   const newTailMessageCountRef = useRef(0);
   const containerRef = useRef(null);
   const newMessageRef = useRef(null);
+  const currentChatIdRef = useRef(selectedChatData?._id);
   const isInitialLoad = useRef(true);
   const lastMessageCountRef = useRef(0);
   // The id of the most recent message we've already reacted to. Used to
@@ -424,6 +425,10 @@ const MessageContainer = () => {
             if (oldest != null) args.before = oldest;
           }
           const localMessages = await repo.getMessages(args);
+          if (currentChatIdRef.current !== selectedChatId) {
+            console.log(`[MessageContainer] Chat changed during local getMessages for ${selectedChatId}, dropping response`);
+            return;
+          }
           if (localMessages.length > 0) {
             // Repository returns rows in descending `created_at` order
             // (newest first). The chat UI renders top-to-bottom and
@@ -525,6 +530,11 @@ const MessageContainer = () => {
           }
         );
 
+        if (currentChatIdRef.current !== selectedChatId) {
+          console.log(`[MessageContainer] Chat changed during getMessages for ${selectedChatId}, dropping response`);
+          return;
+        }
+
         lastServerPageRef.current = serverPage;
 
         console.log(
@@ -554,7 +564,13 @@ const MessageContainer = () => {
           );
           // Loop continues to fetch the next page synchronously
         } else {
-          responseData = response.data;
+          responseData = response.data.filter(
+            (m) =>
+              String(m.sender) === String(selectedChatId) ||
+              (m.sender && String(m.sender._id) === String(selectedChatId)) ||
+              String(m.receiver) === String(selectedChatId) ||
+              String(m.channelId) === String(selectedChatId)
+          );
         }
       }
 
@@ -613,6 +629,10 @@ const MessageContainer = () => {
             if (oldest != null) args.before = oldest;
           }
           const localMessages = await repo.getMessages(args);
+          if (currentChatIdRef.current !== selectedChatId) {
+            console.log(`[MessageContainer] Chat changed during local getChannelMessages for ${selectedChatId}, dropping response`);
+            return;
+          }
           if (localMessages.length > 0) {
             const uiMessages = localMessages
               .slice()
@@ -683,6 +703,11 @@ const MessageContainer = () => {
           }
         );
 
+        if (currentChatIdRef.current !== selectedChatId) {
+          console.log(`[MessageContainer] Chat changed during getChannelMessages for ${selectedChatId}, dropping response`);
+          return;
+        }
+
         lastServerPageRef.current = serverPage;
 
         console.log(
@@ -734,7 +759,71 @@ const MessageContainer = () => {
     }
   };
 
+  const markChatAsRead = useCallback(() => {
+    if (!selectedChatId) return;
+
+    // Fast path: avoid spamming REST/socket if there's nothing to read.
+    // The source of truth for the badge is the contact's unreadCount in Zustand.
+    const state = useAppStore.getState();
+    const isContact = state.selectedChatType === "contact";
+    const contact = isContact
+      ? state.directMessagesContacts?.find((c) => c._id === selectedChatId)
+      : state.channels?.find((c) => c._id === selectedChatId);
+
+    // If explicitly 0, we're already caught up.
+    if (contact && contact.unreadCount === 0) {
+      return;
+    }
+
+    if (isContact) {
+      if (socket && user?.id) {
+        socket.emit("confirm-read", {
+          userId: user.id,
+          senderId: selectedChatId,
+        });
+      }
+      axios
+        .post(
+          `${HOST}${MARK_READ_ROUTE}/${selectedChatId}`,
+          {},
+          { withCredentials: true, timeout: 10_000 },
+        )
+        .catch(() => {});
+
+      if (Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          if (typeof repo.resetUnreadCount === "function") {
+            repo.resetUnreadCount(selectedChatId).catch(() => {});
+          }
+          if (typeof repo.applyStatusUpdate === "function") {
+            repo.applyStatusUpdate({
+              conversationId: selectedChatId,
+              fromUserId: selectedChatId,
+              status: "read",
+            }).catch(() => {});
+          }
+          try {
+            const queue = getOutboundQueue();
+            if (queue && typeof queue.enqueue === "function" && user?.id) {
+              queue
+                .enqueue({
+                  kind: "mark_read",
+                  conversationId: selectedChatId,
+                  conversationType: "dm",
+                  payload: { senderId: selectedChatId, userId: user.id },
+                })
+                .catch(() => {});
+            }
+          } catch {}
+        }
+      }
+      resetUnreadCount(selectedChatId);
+    }
+  }, [selectedChatId, socket, user?.id, resetUnreadCount]);
+
   useEffect(() => {
+    currentChatIdRef.current = selectedChatId;
     if (selectedChatId) {
       // Reset the network pagination cursor — each conversation has its
       // own server-side page sequence.
@@ -787,73 +876,7 @@ const MessageContainer = () => {
               });
           }
         }
-        // Mark-read is sent through THREE channels for durability:
-        //   1. Socket emit — instant, but lost if the socket is mid-
-        //      reconnect when we fire.
-        //   2. REST POST — durable, succeeds even if socket is dead.
-        //   3. OutboundQueue (native only) — survives offline + app
-        //      close, retries automatically when connectivity returns.
-        // Without all three, the unread count gets stuck at the
-        // previous value because the server never learned the user
-        // opened the chat.
-        if (socket && user?.id) {
-          socket.emit("confirm-read", {
-            userId: user.id,
-            senderId: selectedChatId,
-          });
-        }
-        // Fire the REST call regardless of platform. Errors are
-        // swallowed: the queue (on native) or a future chat-open will
-        // retry. Using a relative path so axios picks up the configured
-        // baseURL / withCredentials cookie.
-        axios
-          .post(
-            `${HOST}${MARK_READ_ROUTE}/${selectedChatId}`,
-            {},
-            { withCredentials: true, timeout: 10_000 },
-          )
-          .catch(() => {
-            // Network/HTTP failure — fall through to the queue (native)
-            // or accept that the next /dm-contacts will resync.
-          });
-        if (Capacitor.isNativePlatform()) {
-          const repo = getRepository();
-          if (repo.isReady()) {
-            if (typeof repo.resetUnreadCount === "function") {
-              repo.resetUnreadCount(selectedChatId).catch(() => {});
-            }
-            if (typeof repo.applyStatusUpdate === "function") {
-              repo.applyStatusUpdate({
-                conversationId: selectedChatId,
-                fromUserId: selectedChatId,
-                status: "read",
-              }).catch(() => {});
-            }
-            // Durable queue entry — drains via socket once connected.
-            // Idempotent: server-side mark-read is a no-op if already
-            // read, so a double-fire (socket + queue) is harmless.
-            try {
-              const queue = getOutboundQueue();
-              if (queue && typeof queue.enqueue === "function" && user?.id) {
-                queue
-                  .enqueue({
-                    kind: "mark_read",
-                    conversationId: selectedChatId,
-                    conversationType: "dm",
-                    payload: {
-                      senderId: selectedChatId,
-                      userId: user.id,
-                    },
-                  })
-                  .catch(() => {});
-              }
-            } catch {
-              // OutboundQueue not initialised yet — fine, the live
-              // socket emit + REST call above already covered it.
-            }
-          }
-        }
-        resetUnreadCount(selectedChatId);
+        markChatAsRead();
       }
       if (selectedChatType === "channel") {
         setPage(1);
@@ -901,17 +924,45 @@ const MessageContainer = () => {
     const repo = getRepository();
     if (!repo.isReady()) return;
 
+    // Capture the conversationId at subscription time so the callback
+    // can reject any emit that races a chat switch. `currentChatIdRef`
+    // is updated synchronously at the top of the chat-open useEffect so
+    // it always reflects the currently rendered chat.
+    const subscribedChatId = selectedChatId;
+
     const unsubscribe = repo.subscribeMessages(selectedChatId, (messages) => {
+      // Drop the snapshot if the user switched to a different chat
+      // between the DB write and this callback firing. Without this guard
+      // a background SyncEngine sync for Chat B can land in Chat A's view
+      // because React's effect cleanup is async and the old listener
+      // bucket may still be live for a few ms after navigation.
+      if (currentChatIdRef.current !== subscribedChatId) {
+        return;
+      }
+
       const uiMessages = Array.isArray(messages)
         ? messages.slice().reverse().map(toUiMessage)
         : [];
       applySubscriptionSnapshot(uiMessages);
+
+      const hasUnread = uiMessages.some(
+        (m) => String(m.senderId) !== String(user?.id) && m.status !== "read"
+      );
+      if (hasUnread) {
+        markChatAsRead();
+      }
     });
 
     return () => {
       unsubscribe();
     };
-  }, [selectedChatId, applySubscriptionSnapshot, isInitialized]);
+  }, [
+    selectedChatId,
+    isInitialized,
+    applySubscriptionSnapshot,
+    user?.id,
+    markChatAsRead,
+  ]);
 
   // Clear typing indicators when leaving chat
   useEffect(() => {
@@ -2018,6 +2069,9 @@ const MessageContainer = () => {
     if (badgeMode === "reset") {
       newTailMessageCountRef.current = 0;
       setNewTailMessageCount(0);
+      if (tailChanged && !isOwnMessage) {
+        markChatAsRead();
+      }
     } else if (badgeMode === "increment") {
       newTailMessageCountRef.current += 1;
       setNewTailMessageCount(newTailMessageCountRef.current);
@@ -2025,8 +2079,12 @@ const MessageContainer = () => {
 
     // First commit of this chat session has fired; subsequent
     // commits fall through to the `arrayGrew` branch of the policy.
+    // Also exit the `isInitialLoad` window so background SyncEngine
+    // writes (incremental sync pages) never force a scroll-to-bottom
+    // while the user is scrolled up reading older messages.
     if (!initialScrollDoneRef.current) {
       initialScrollDoneRef.current = true;
+      isInitialLoad.current = false;
     }
 
     lastMessageCountRef.current = currentMessageCount;
@@ -2042,6 +2100,13 @@ const MessageContainer = () => {
     const trackPosition = () => {
       const nearBottom = isNearBottom();
       wasNearBottomRef.current = nearBottom;
+      
+      if (nearBottom && newTailMessageCountRef.current > 0) {
+        newTailMessageCountRef.current = 0;
+        setNewTailMessageCount(0);
+        markChatAsRead();
+      }
+      
       // The user actively scrolled away from the bottom — we're past
       // the "initial load" phase, so subsequent message commits should
       // respect the user's scroll position instead of jumping back to
@@ -2150,6 +2215,7 @@ const MessageContainer = () => {
         onClick={() => {
           newTailMessageCountRef.current = 0;
           setNewTailMessageCount(0);
+          markChatAsRead();
           scrollToBottom(true);
         }}
         className={cn(

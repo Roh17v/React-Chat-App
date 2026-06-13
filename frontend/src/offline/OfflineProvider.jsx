@@ -164,6 +164,7 @@ export function OfflineProvider({ children }) {
    *
    * @type {React.MutableRefObject<{
    *   started: boolean,
+   *   teardownPromise: Promise<void> | null,
    *   repo: ReturnType<typeof getRepository> | null,
    *   syncEngine: ReturnType<typeof getSyncEngine> | null,
    *   outboundQueue: ReturnType<typeof getOutboundQueue> | null,
@@ -178,6 +179,7 @@ export function OfflineProvider({ children }) {
    */
   const refs = useRef({
     started: false,
+    teardownPromise: null,
     repo: null,
     syncEngine: null,
     outboundQueue: null,
@@ -270,8 +272,11 @@ export function OfflineProvider({ children }) {
    * @returns {Promise<boolean>}
    */
   async function boot(userId, liveSocket) {
+    // Idempotent — a second boot for the same user is a no-op.
+    if (refs.current.teardownPromise) {
+      await refs.current.teardownPromise;
+    }
     if (refs.current.started) {
-      // Idempotent — a second boot for the same user is a no-op.
       return true;
     }
     refs.current.started = true;
@@ -284,6 +289,7 @@ export function OfflineProvider({ children }) {
     //    online-only (Req 2.5).
     const repo = getRepository();
     refs.current.repo = repo;
+    
     let initResult;
     try {
       initResult = await repo.init({ userId });
@@ -649,7 +655,14 @@ export function OfflineProvider({ children }) {
   async function teardown() {
     if (!refs.current.started) return;
     refs.current.started = false;
-    const diagnostics = getDiagnostics();
+    
+    let resolveTeardown;
+    refs.current.teardownPromise = new Promise((resolve) => {
+      resolveTeardown = resolve;
+    });
+
+    try {
+      const diagnostics = getDiagnostics();
 
     // Cancel the polling timers first so a tick mid-teardown doesn't
     // touch an instance we're about to stop.
@@ -795,6 +808,11 @@ export function OfflineProvider({ children }) {
       code: "OFFLINE_PROVIDER_TORN_DOWN",
       outcome: "ok",
     });
+
+    } finally {
+      refs.current.teardownPromise = null;
+      if (resolveTeardown) resolveTeardown();
+    }
   }
 }
 

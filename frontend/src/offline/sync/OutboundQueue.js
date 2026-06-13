@@ -626,9 +626,9 @@ export function createOutboundQueue(options) {
    * @param {ReturnType<typeof decodeRow>} item
    */
   async function processMarkRead(item) {
-    if (socket == null || socket.connected === false) {
-      throw Object.assign(new Error("SOCKET_NOT_CONNECTED"), {
-        code: "SOCKET_NOT_CONNECTED",
+    if (apiClient == null) {
+      throw Object.assign(new Error("API_CLIENT_MISSING"), {
+        code: "API_CLIENT_MISSING",
       });
     }
     const senderId =
@@ -642,10 +642,20 @@ export function createOutboundQueue(options) {
         code: "MARK_READ_INVALID",
       });
     }
-    socket.emit("confirm-read", {
-      senderId,
-      userId: userIdFromPayload,
-    });
+
+    // Durable REST call. Throws on network failure, keeping the job in the queue.
+    const url = `${messagesRoute}/mark-read/${senderId}`;
+    await apiClient.post(url, {}, { withCredentials: true });
+
+    // Best-effort socket emit for instant UI update on the other client.
+    // The controller already emits `message-status-update` on success,
+    // but this ensures maximum responsiveness if the socket is up.
+    if (socket && socket.connected) {
+      socket.emit("confirm-read", {
+        senderId,
+        userId: userIdFromPayload,
+      });
+    }
   }
 
   /**
@@ -878,7 +888,7 @@ export function createOutboundQueue(options) {
     }
     connectivityUnsub = () => {};
     if (timerHandle != null) {
-      clearIntervalFn(timerHandle);
+      clearIntervalFn(/** @type {any} */ (timerHandle));
       timerHandle = null;
     }
     drainPending = false;
