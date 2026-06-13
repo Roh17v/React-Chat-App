@@ -73,8 +73,7 @@ export const getMessages = async (req, res, next) => {
       // Incremental-sync path: ascending by updatedAt, no skip/page semantics
       // (the client paginates by advancing `since`). Req 13.1, 13.3, 13.4.
       messages = await Message.find({
-        ...baseQuery,
-        ...syncQuery,
+        $and: [baseQuery, syncQuery]
       })
         .sort({ updatedAt: 1, _id: 1 })
         .limit(limit)
