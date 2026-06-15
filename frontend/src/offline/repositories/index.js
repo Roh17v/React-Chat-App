@@ -1736,6 +1736,25 @@ export function createRepository(options = {}) {
     return mutex.withLock(GLOBAL_MUTEX_KEY, () => resetUnreadCountLocked(contactId));
   }
 
+  async function applyUserLastSeenLocked(userId, lastSeen) {
+    requireReady("applyUserLastSeen");
+    if (typeof userId !== "string" || userId.length === 0 || typeof lastSeen !== "string") {
+      return;
+    }
+    const updatedAt = new Date().toISOString();
+    await driver.withTransaction(async (tx) => {
+      await tx.run(
+        "UPDATE users SET last_seen = ?, updated_at = ? WHERE user_id = ?",
+        [lastSeen, updatedAt, userId]
+      );
+    });
+    await emitContacts();
+  }
+
+  async function applyUserLastSeen(userId, lastSeen) {
+    return mutex.withLock(GLOBAL_MUTEX_KEY, () => applyUserLastSeenLocked(userId, lastSeen));
+  }
+
   /**
    * Upsert the channel list returned by `GET /api/channels`. Members are
    * stored both as a JSON blob on the channel row (for fast read) and as
@@ -3401,6 +3420,7 @@ export function createRepository(options = {}) {
     applyDeletion,
     applyStatusUpdate,
     applyContacts,
+    applyUserLastSeen,
     applyChannels,
     resetUnreadCount,
 

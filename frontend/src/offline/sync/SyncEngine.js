@@ -48,6 +48,7 @@
 import {
   HOST,
   DM_CONTACTS_ROUTE,
+  USER_UPDATES_ROUTE,
   GET_USER_CHANNELS_ROUTE,
   PRIVATE_CONTACT_MESSAGES_ROUTE,
   CHANNEL_MESSAGES_ROUTE,
@@ -120,6 +121,7 @@ export const INCREMENTAL_PAGE_CAP = HELPER_INCREMENTAL_PAGE_CAP;
  * @property {(args: { serverId: string, deletedForEveryone?: boolean, deletedForMe?: boolean }) => Promise<void>} applyDeletion
  * @property {(args: { conversationId: string, fromUserId: string, status: string }) => Promise<void>} applyStatusUpdate
  * @property {(contacts: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyContacts]
+ * @property {(userId: string, lastSeen: string) => Promise<void>} [applyUserLastSeen]
  * @property {(channels: unknown[]) => Promise<{ upserted: number, ignored: number }>} [applyChannels]
  * @property {() => unknown} getDriver
  * @property {{ withLock: <T>(key: string, work: () => Promise<T> | T) => Promise<T> } | (() => { withLock: <T>(key: string, work: () => Promise<T> | T) => Promise<T> })} [getMutex]
@@ -882,6 +884,9 @@ export function createSyncEngine(options) {
     //     time the sidebar shows unread badges (driven by subscribeContacts
     //     firing after the SQLite write), the messages are already there.
     if (lastIncrementalSyncAt != null) {
+      // Capture the current cursor BEFORE runUnifiedIncremental mutates it
+      const currentSyncCursor = lastIncrementalSyncAt;
+
       // Step 1: unified message fetch — one call for everything.
       // We do this BEFORE the contacts/channels fetch so that all new messages
       // are written to SQLite before the sidebar updates its unread counts.
@@ -891,13 +896,47 @@ export function createSyncEngine(options) {
         apiClient,
         diagnostics,
         buildUrl,
-        lastSyncAt: lastIncrementalSyncAt,
+        lastSyncAt: currentSyncCursor,
         userId,
         setLastIncrementalSyncAt,
         pageLimit,
         incrementalPageCap,
         now,
       });
+
+      // Step 1.5: Fetch incremental user profile and presence updates
+      try {
+        const userUpdates = await httpGet(`${USER_UPDATES_ROUTE}?since=${currentSyncCursor}`);
+        if (Array.isArray(userUpdates) && userUpdates.length > 0 && typeof repository.applyContacts === "function") {
+          try {
+            const r = await repository.applyContacts(userUpdates);
+            diagnostics.log({
+              category: "incremental",
+              code: "INCREMENTAL_USER_UPDATES_APPLIED",
+              outcome: "ok",
+              meta: {
+                received: userUpdates.length,
+                upserted: r.upserted,
+                ignored: r.ignored,
+              },
+            });
+          } catch (err) {
+            diagnostics.log({
+              category: "incremental",
+              code: "INCREMENTAL_USER_UPDATES_APPLY_FAILED",
+              outcome: "warn",
+              meta: { reason: describeError(err) },
+            });
+          }
+        }
+      } catch (err) {
+        diagnostics.log({
+          category: "incremental",
+          code: "INCREMENTAL_USER_UPDATES_FETCH_FAILED",
+          outcome: "warn",
+          meta: { reason: describeError(err) },
+        });
+      }
 
       // Step 2: refresh contacts + channels so the sidebar stays in sync.
       try {
@@ -1164,6 +1203,22 @@ export function createSyncEngine(options) {
           diagnostics.log({
             category: "live",
             code: "LIVE_CHANNEL_CONTACT_APPLIED",
+            outcome: "ok",
+          });
+          return;
+        }
+
+        case "user-last-seen": {
+          if (typeof repository.applyUserLastSeen === "function") {
+            const userId = typeof payload.userId === "string" ? payload.userId : null;
+            const lastSeen = typeof payload.lastSeen === "string" ? payload.lastSeen : null;
+            if (userId != null && lastSeen != null) {
+              await repository.applyUserLastSeen(userId, lastSeen);
+            }
+          }
+          diagnostics.log({
+            category: "live",
+            code: "LIVE_USER_LAST_SEEN_APPLIED",
             outcome: "ok",
           });
           return;

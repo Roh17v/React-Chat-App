@@ -382,3 +382,35 @@ export const registerPushToken = async (req, res, next) => {
     next(error);
   }
 };
+
+export const getContactsUpdates = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { since } = req.query;
+
+    if (!since || since === "") {
+      return next(createError(400, "`since` query parameter is required."));
+    }
+    const sinceDate = new Date(since);
+    if (Number.isNaN(sinceDate.getTime())) {
+      return next(createError(400, "Invalid `since` timestamp."));
+    }
+
+    const currentUser = await User.findById(userId).select("contacts");
+    if (!currentUser || !currentUser.contacts || currentUser.contacts.length === 0) {
+      return res.status(200).json([]);
+    }
+
+    const updatedContacts = await User.find({
+      _id: { $in: currentUser.contacts },
+      updatedAt: { $gt: sinceDate },
+    })
+      .select("_id firstName lastName email username image color lastSeen updatedAt")
+      .lean();
+
+    return res.status(200).json(updatedContacts);
+  } catch (error) {
+    next(error);
+  }
+};
+

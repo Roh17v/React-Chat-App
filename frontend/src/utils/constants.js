@@ -29,6 +29,7 @@ export const CHANNEL_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/channel`;
 export const SYNC_UPDATES_ROUTE = `${MESSAGES_ROUTE}/updates`;
 
 export const DM_CONTACTS_ROUTE = `${USER_ROUTES}/dm-contacts`;
+export const USER_UPDATES_ROUTE = `${USER_ROUTES}/updates`;
 
 export const REGISTER_PUSH_TOKEN_ROUTE = `${HOST}${USER_ROUTES}/push-token`;
 

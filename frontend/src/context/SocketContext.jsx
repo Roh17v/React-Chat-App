@@ -601,6 +601,12 @@ export const SocketProvider = ({ children }) => {
       });
 
       socket.current.on("user-last-seen", ({ userId, lastSeen }) => {
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "user-last-seen",
+            payload: { userId, lastSeen },
+          });
+        }
         updateContactLastSeen(userId, lastSeen);
       });
 
