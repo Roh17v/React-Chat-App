@@ -759,67 +759,92 @@ const MessageContainer = () => {
     }
   };
 
+  // Debounce timer ref — coalesces rapid-fire read receipts (e.g. 50
+  // messages arriving in 3 seconds) into a single network call once
+  // activity settles. This is the WhatsApp / Telegram pattern.
+  const markReadTimerRef = useRef(null);
+
   const markChatAsRead = useCallback(() => {
     if (!selectedChatId) return;
 
     // Fast path: avoid spamming REST/socket if there's nothing to read.
-    // The source of truth for the badge is the contact's unreadCount in Zustand.
     const state = useAppStore.getState();
     const isContact = state.selectedChatType === "contact";
     const contact = isContact
       ? state.directMessagesContacts?.find((c) => c._id === selectedChatId)
       : state.channels?.find((c) => c._id === selectedChatId);
 
-    // If explicitly 0, we're already caught up.
+    // If explicitly 0, we're already caught up — skip everything.
     if (contact && contact.unreadCount === 0) {
       return;
     }
 
-    if (isContact) {
+    if (!isContact) return;
+
+    // Optimistic: clear the badge immediately so the UI feels instant.
+    resetUnreadCount(selectedChatId);
+
+    if (Capacitor.isNativePlatform()) {
+      const repo = getRepository();
+      if (repo.isReady()) {
+        if (typeof repo.resetUnreadCount === "function") {
+          repo.resetUnreadCount(selectedChatId).catch(() => {});
+        }
+        if (typeof repo.applyStatusUpdate === "function") {
+          repo.applyStatusUpdate({
+            conversationId: selectedChatId,
+            fromUserId: selectedChatId,
+            status: "read",
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // Debounce the network calls — if another message arrives within
+    // 1.5s, the timer resets so we send ONE call after activity settles.
+    if (markReadTimerRef.current) {
+      clearTimeout(markReadTimerRef.current);
+    }
+    const chatId = selectedChatId;
+    markReadTimerRef.current = setTimeout(() => {
+      markReadTimerRef.current = null;
+
+      // 1) Socket emit — nearly free, piggybacks on existing TCP conn.
+      //    This is the primary path (like WhatsApp).
       if (socket && user?.id) {
         socket.emit("confirm-read", {
           userId: user.id,
-          senderId: selectedChatId,
+          senderId: chatId,
         });
       }
-      axios
-        .post(
-          `${HOST}${MARK_READ_ROUTE}/${selectedChatId}`,
-          {},
-          { withCredentials: true, timeout: 10_000 },
-        )
-        .catch(() => {});
 
+      // 2) Durable REST fallback — only needed when socket is down.
+      //    On native, the OutboundQueue handles this automatically.
       if (Capacitor.isNativePlatform()) {
-        const repo = getRepository();
-        if (repo.isReady()) {
-          if (typeof repo.resetUnreadCount === "function") {
-            repo.resetUnreadCount(selectedChatId).catch(() => {});
+        try {
+          const queue = getOutboundQueue();
+          if (queue && typeof queue.enqueue === "function" && user?.id) {
+            queue
+              .enqueue({
+                kind: "mark_read",
+                conversationId: chatId,
+                conversationType: "dm",
+                payload: { senderId: chatId, userId: user.id },
+              })
+              .catch(() => {});
           }
-          if (typeof repo.applyStatusUpdate === "function") {
-            repo.applyStatusUpdate({
-              conversationId: selectedChatId,
-              fromUserId: selectedChatId,
-              status: "read",
-            }).catch(() => {});
-          }
-          try {
-            const queue = getOutboundQueue();
-            if (queue && typeof queue.enqueue === "function" && user?.id) {
-              queue
-                .enqueue({
-                  kind: "mark_read",
-                  conversationId: selectedChatId,
-                  conversationType: "dm",
-                  payload: { senderId: selectedChatId, userId: user.id },
-                })
-                .catch(() => {});
-            }
-          } catch {}
-        }
+        } catch {}
+      } else {
+        // Web: fire-and-forget REST call as durable backup.
+        axios
+          .post(
+            `${HOST}${MARK_READ_ROUTE}/${chatId}`,
+            {},
+            { withCredentials: true, timeout: 10_000 },
+          )
+          .catch(() => {});
       }
-      resetUnreadCount(selectedChatId);
-    }
+    }, 1500);
   }, [selectedChatId, socket, user?.id, resetUnreadCount]);
 
   useEffect(() => {
@@ -907,6 +932,18 @@ const MessageContainer = () => {
     resetUnreadCount,
     isInitialized,
   ]);
+
+  // Clean up the read-receipt debounce timer when the user switches
+  // chats or the component unmounts. Without this, a pending timer
+  // from Chat A could fire after we've already moved to Chat B.
+  useEffect(() => {
+    return () => {
+      if (markReadTimerRef.current) {
+        clearTimeout(markReadTimerRef.current);
+        markReadTimerRef.current = null;
+      }
+    };
+  }, [selectedChatId]);
 
   // Subscribe to live repository updates for the current conversation (Req 1.2, 5.5).
   // Fires whenever the SyncEngine or OutboundQueue commits a write to the
