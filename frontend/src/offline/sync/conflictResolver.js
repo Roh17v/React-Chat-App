@@ -13,8 +13,10 @@
  *
  *   1. Look up an existing local row by `server_id` first; if absent and the
  *      server payload carries a `clientTempId`, look up by
- *      `client_temp_id WHERE server_id IS NULL` to merge an optimistic local
- *      row with its server confirmation.
+ *      `client_temp_id` (regardless of whether `server_id` is already set)
+ *      to merge an optimistic local row with its server confirmation, or
+ *      to absorb a duplicate echo that carries a different `server_id`
+ *      (caused by a retried send where the server created a second copy).
  *   2. No local row → INSERT with `sync_state = "confirmed"`. We generate a
  *      fresh local UUID for `id`. `client_temp_id`, `queue_seq`, and
  *      `local_file_path` are left null (server-originated rows never enter
@@ -145,7 +147,7 @@ export async function resolveAndApply(tx, serverMessage, ctx) {
   if (local == null && typeof incoming.clientTempId === "string" && incoming.clientTempId.length > 0) {
     const byTemp = /** @type {Record<string, unknown>[]} */ (
       await tx.query(
-        "SELECT * FROM messages WHERE client_temp_id = ? AND server_id IS NULL LIMIT 1",
+        "SELECT * FROM messages WHERE client_temp_id = ? LIMIT 1",
         [incoming.clientTempId],
       )
     );

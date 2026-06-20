@@ -555,6 +555,43 @@ const setupSocket = (server) => {
       const isReceiverOnline = receiverSockets.size > 0;
       const deliveryStatus = isReceiverOnline ? "delivered" : "sent";
 
+      // Deduplication: if the sender's OutboundQueue retried a send
+      // (e.g. socket dropped before the echo arrived), the same
+      // clientTempId will arrive again. Check for an existing message
+      // with this clientTempId + sender and short-circuit — return the
+      // existing message as the echo so the client's deferred resolves
+      // without creating a duplicate on the receiver's side.
+      if (clientTempId && typeof clientTempId === "string" && clientTempId.length > 0) {
+        const existing = await Message.findOne({
+          clientTempId,
+          sender: messageFields.sender,
+        }).lean();
+
+        if (existing) {
+          console.log(`[Dedup] Duplicate sendMessage with clientTempId=${clientTempId}, returning existing message ${existing._id}`);
+          const dedupPayload = {
+            _id: existing._id,
+            sender: existing.sender,
+            receiver: existing.receiver,
+            content: existing.content,
+            messageType: existing.messageType,
+            fileUrl: existing.fileUrl || null,
+            fileName: existing.fileName || null,
+            fileMetadata: existing.fileMetadata || {},
+            replyTo: existing.replyTo || null,
+            status: existing.status,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+            clientTempId: clientTempId,
+          };
+          senderSockets.forEach((socketId) =>
+            io.to(socketId).emit("receiveMessage", dedupPayload),
+          );
+          // Do NOT re-emit to the receiver — they already got it.
+          return;
+        }
+      }
+
       // Build an in-memory message object with a pre-generated ID
       const messageId = new mongoose.Types.ObjectId();
       const now = new Date();
@@ -597,6 +634,7 @@ const setupSocket = (server) => {
           createdMessage = await Message.create({
             _id: messageId,
             ...messageFields,
+            clientTempId: clientTempId || null,
             status: deliveryStatus,
             createdAt: now,
             updatedAt: now,
@@ -675,6 +713,42 @@ const setupSocket = (server) => {
   const sendChannelMessage = async (message, socket) => {
     try {
       const { channelId, messageType, content, sender, fileUrl, fileName, fileMetadata } = message;
+      const clientTempId = message.clientTempId || null;
+
+      // Deduplication: same logic as sendMessage — if the OutboundQueue
+      // retried, return the existing message as the echo to the sender.
+      if (clientTempId && typeof clientTempId === "string" && clientTempId.length > 0) {
+        const existing = await Message.findOne({
+          clientTempId,
+          sender,
+        }).lean();
+
+        if (existing) {
+          console.log(`[Dedup] Duplicate sendChannelMessage with clientTempId=${clientTempId}, returning existing message ${existing._id}`);
+          const channel = await Channel.findById(channelId).select("_id").lean();
+          const dedupPayload = {
+            _id: existing._id,
+            sender: existing.sender,
+            receiver: null,
+            channelId: channel?._id || channelId,
+            content: existing.content,
+            messageType: existing.messageType,
+            fileUrl: existing.fileUrl || null,
+            fileName: existing.fileName || null,
+            fileMetadata: existing.fileMetadata || {},
+            replyTo: existing.replyTo || null,
+            status: existing.status,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+            clientTempId: clientTempId,
+          };
+          const senderSockets = userSocketMap.get(sender) || new Set();
+          senderSockets.forEach((socketId) =>
+            io.to(socketId).emit("receive-channel-message", dedupPayload),
+          );
+          return;
+        }
+      }
 
       const newMessage = await Message.create({
         sender,
@@ -685,6 +759,7 @@ const setupSocket = (server) => {
         channelId,
         fileName,
         fileMetadata: fileMetadata || {},
+        clientTempId: clientTempId,
       });
 
       const messageData = await Message.findById(newMessage._id)

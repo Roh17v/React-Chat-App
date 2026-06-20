@@ -220,7 +220,7 @@ describe("resolveAndApply", () => {
   describe("outcome: merged", () => {
     it("merges an optimistic local row with its server confirmation by client_temp_id", async () => {
       // Seed an optimistic local row sitting in the outbound queue. The
-      // resolver should match on `client_temp_id` (server_id IS NULL) and
+      // resolver should match on `client_temp_id` and
       // assign the server_id without losing the local-only metadata.
       await insertLocal(driver, {
         id: "local-merge",

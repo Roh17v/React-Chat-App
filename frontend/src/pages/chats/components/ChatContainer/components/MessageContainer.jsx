@@ -1072,10 +1072,34 @@ const MessageContainer = () => {
 
   const scrollToMessage = (messageId) => {
     if (!messageId) return;
-    const target = document.getElementById(`msg-${messageId}`);
+
+    // Direct lookup — works when messageId matches the DOM id already
+    // (own messages use clientTempId, received messages use serverId).
+    let target = document.getElementById(`msg-${messageId}`);
+    let resolvedId = messageId;
+
+    // Fallback: replyTo.messageId from the other person's reply carries
+    // the MongoDB _id of the original message. On this device, our own
+    // messages use clientTempId as their DOM id (not the MongoDB _id),
+    // so the direct lookup above fails. Search the rendered messages for
+    // one whose serverId or clientTempId matches the messageId, then use
+    // that message's local _id for the DOM lookup.
+    if (!target && messagesRef.current.size > 0) {
+      for (const [localId, msg] of messagesRef.current) {
+        if (
+          (msg.serverId && String(msg.serverId) === String(messageId)) ||
+          (msg.clientTempId && String(msg.clientTempId) === String(messageId))
+        ) {
+          resolvedId = localId;
+          target = document.getElementById(`msg-${localId}`);
+          break;
+        }
+      }
+    }
+
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
-      observeHighlightWhenVisible(messageId);
+      observeHighlightWhenVisible(resolvedId);
     }
   };
 

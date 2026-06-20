@@ -288,6 +288,20 @@ export function createSyncEngine(options) {
   /** @type {Promise<BootstrapResult> | null} */
   let bootstrapInFlight = null;
   /**
+   * Guards `runCatchUpSync` against concurrent execution. When a
+   * connectivity transition (online) and a foreground resume fire in
+   * quick succession — or a disconnect+reconnect cycle triggers two
+   * `onConnectivityChange("online")` calls — both would start a
+   * `runUnifiedIncremental` pass with the same `since` cursor,
+   * fetching and applying the same messages twice. This flag ensures
+   * only one pass runs at a time; the second caller returns early and
+   * the next connectivity edge or foreground event will trigger a
+   * fresh pass.
+   *
+   * @type {boolean}
+   */
+  let catchUpInFlight = false;
+  /**
    * Per-conversation incremental in-flight tracker. Req 5.7 says we must
    * not run two `Incremental_Sync` passes for the same conversation
    * concurrently — this map records the active promise so a second call
@@ -1178,13 +1192,22 @@ export function createSyncEngine(options) {
       switch (kind) {
         case "receiveMessage":
         case "receive-channel-message": {
-          await repository.applyLiveMessage(payload);
           const clientTempId =
             typeof payload.clientTempId === "string" && payload.clientTempId.length > 0
               ? payload.clientTempId
               : null;
-          if (clientTempId != null) {
-            tempIdRegistry.resolve(clientTempId, payload);
+          try {
+            await repository.applyLiveMessage(payload);
+          } finally {
+            // Always resolve the deferred when the server echoes back a
+            // clientTempId — even if the local DB write failed (e.g. a
+            // duplicate echo from a retried send). The server HAS
+            // confirmed the message, so resolving here prevents the
+            // OutboundQueue from retrying, which would only create more
+            // server-side duplicates.
+            if (clientTempId != null) {
+              tempIdRegistry.resolve(clientTempId, payload);
+            }
           }
           diagnostics.log({
             category: "live",
@@ -1562,6 +1585,8 @@ export function createSyncEngine(options) {
   async function runCatchUpSync(trigger) {
     if (userId == null || !repository.isReady()) return;
     if (connectivity === "offline") return;
+    if (catchUpInFlight) return;
+    catchUpInFlight = true;
     try {
       if (await shouldBootstrap()) {
         await bootstrap();
@@ -1578,6 +1603,8 @@ export function createSyncEngine(options) {
         outcome: "warn",
         meta: { reason: describeError(err) },
       });
+    } finally {
+      catchUpInFlight = false;
     }
   }
 
