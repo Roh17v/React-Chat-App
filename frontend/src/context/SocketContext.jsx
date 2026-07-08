@@ -6,6 +6,7 @@ import { createContext, useContext } from "react";
 import useMediaStream from "@/hooks/useMediaStream";
 import { Capacitor } from "@capacitor/core";
 import { Network } from "@capacitor/network";
+import { App as CapacitorApp } from "@capacitor/app";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import { toast } from "sonner";
 import { getSyncEngine } from "@/offline/sync/SyncEngine";
@@ -145,6 +146,17 @@ export const SocketProvider = ({ children }) => {
   const TYPING_EXPIRE_MS = 5000;
   const typingTimers = useRef({});
 
+  // Presence: when the app is backgrounded we disconnect the socket so the
+  // server immediately marks the user offline (updates lastSeen + removes
+  // them from the onlineUsers broadcast).  A short grace period avoids
+  // flickering for quick app switches (notification peek, copy from another
+  // app, etc.).  We track whether *we* initiated the disconnect so that the
+  // foreground handler knows to reconnect — a network-driven disconnect is
+  // handled by the existing reconnection logic and must not be touched.
+  const BACKGROUND_DISCONNECT_GRACE_MS = 5000;
+  const backgroundDisconnectTimer = useRef(null);
+  const disconnectedByBackground = useRef(false);
+
   useEffect(() => {
     if (user && !socket.current) {
       socket.current = io(HOST, {
@@ -189,8 +201,86 @@ export const SocketProvider = ({ children }) => {
         window.addEventListener("online", handleBrowserOnline);
       }
 
+      // --- Presence: disconnect the socket when the app is backgrounded so
+      // the server immediately marks the user offline.  This is the only
+      // reliable way to detect "user put the phone away" on mobile — the
+      // Android WebView keeps the WebSocket alive (and responding to pings)
+      // for hours after the app is backgrounded, so the server's ping/pong
+      // never fires a disconnect.  Reconnect on foreground. ---
+      const hasActiveCall = () => {
+        try {
+          return useAppStore.getState().activeCall != null;
+        } catch {
+          return false;
+        }
+      };
+
+      const clearBackgroundTimer = () => {
+        if (backgroundDisconnectTimer.current != null) {
+          clearTimeout(backgroundDisconnectTimer.current);
+          backgroundDisconnectTimer.current = null;
+        }
+      };
+
+      const handleAppBackgrounded = () => {
+        clearBackgroundTimer();
+        // An active call needs the signaling channel; the server's Call
+        // Rescue logic already keeps call sessions alive across real
+        // disconnects, so we leave the socket alone in that case.
+        if (hasActiveCall()) return;
+        backgroundDisconnectTimer.current = setTimeout(() => {
+          backgroundDisconnectTimer.current = null;
+          // Re-check for an active call: an incoming call may have arrived
+          // during the grace period while the socket was still alive.
+          if (hasActiveCall()) return;
+          if (socket.current && socket.current.connected) {
+            disconnectedByBackground.current = true;
+            socket.current.disconnect();
+          }
+        }, BACKGROUND_DISCONNECT_GRACE_MS);
+      };
+
+      const handleAppForegrounded = () => {
+        clearBackgroundTimer();
+        if (disconnectedByBackground.current) {
+          disconnectedByBackground.current = false;
+          if (socket.current && !socket.current.connected) {
+            socket.current.connect();
+          }
+        }
+      };
+
+      let appStateListenerPromise = null;
+      let visibilityHandler = null;
+      if (Capacitor.isNativePlatform()) {
+        appStateListenerPromise = CapacitorApp.addListener(
+          "appStateChange",
+          ({ isActive }) => {
+            if (isActive) handleAppForegrounded();
+            else handleAppBackgrounded();
+          },
+        );
+      } else {
+        visibilityHandler = () => {
+          if (document.hidden) handleAppBackgrounded();
+          else handleAppForegrounded();
+        };
+        document.addEventListener("visibilitychange", visibilityHandler);
+      }
+
       const onSocketConnect = () => {
         console.log("Connected to socket server");
+
+        // Request a fresh online-users list on every connect.  This is a
+        // safety net: while the socket was disconnected (app backgrounded,
+        // OS suspended the WebView, etc.) the server may have emitted
+        // onlineUsers broadcasts that we missed.  The server's connection
+        // handler already broadcasts onlineUsers, but this ack-based
+        // request guarantees we receive it even if the broadcast raced
+        // with handler registration or was dropped by a flaky transport.
+        socket.current.emit("presence-sync", (users) => {
+          if (Array.isArray(users)) setOnlineUsers(users);
+        });
 
         const state = useAppStore.getState();
         const currentActiveCall = state.activeCall;
@@ -675,6 +765,21 @@ export const SocketProvider = ({ children }) => {
               .catch(() => {});
           }
           window.removeEventListener("online", handleBrowserOnline);
+
+          clearBackgroundTimer();
+          disconnectedByBackground.current = false;
+          if (appStateListenerPromise) {
+            appStateListenerPromise
+              .then((listener) => {
+                if (listener && typeof listener.remove === "function") {
+                  listener.remove().catch(() => {});
+                }
+              })
+              .catch(() => {});
+          }
+          if (visibilityHandler) {
+            document.removeEventListener("visibilitychange", visibilityHandler);
+          }
         }
       };
     }

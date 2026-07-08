@@ -369,7 +369,7 @@ const MessageBar = () => {
       : (sourceMessage.content || "").slice(0, 120);
 
     return {
-      messageId: sourceMessage._id,
+      messageId: sourceMessage.serverId || sourceMessage._id,
       senderId: sourceMessage.sender,
       messageType: sourceMessage.messageType,
       previewText,

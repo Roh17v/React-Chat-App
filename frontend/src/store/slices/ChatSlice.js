@@ -34,7 +34,40 @@ export const createChatSlice = (set, get) => ({
   setFileDownloadingProgress: (fileDownloadingProgress) =>
     set({ fileDownloadingProgress }),
   setDirectMessagesContacts: (contacts) =>
-    set({ directMessagesContacts: contacts }),
+    set((state) => {
+      // Reconcile selectedChatData with the fresh contact so that
+      // lastSeen (and other fields) stay in sync when the contacts list
+      // is refreshed by incremental sync, bootstrap, or live events.
+      // Without this, an already-open chat shows a stale lastSeen until
+      // the user navigates away and re-enters the chat.
+      if (
+        state.selectedChatType === "contact" &&
+        state.selectedChatData?._id &&
+        Array.isArray(contacts)
+      ) {
+        const fresh = contacts.find(
+          (c) => c._id === state.selectedChatData._id,
+        );
+        if (fresh) {
+          const current = state.selectedChatData;
+          // Only update if a visible field actually changed — avoids
+          // unnecessary re-renders when the data is identical.
+          const changed =
+            fresh.lastSeen !== current.lastSeen ||
+            fresh.firstName !== current.firstName ||
+            fresh.lastName !== current.lastName ||
+            fresh.image !== current.image ||
+            fresh.color !== current.color;
+          if (changed) {
+            return {
+              directMessagesContacts: contacts,
+              selectedChatData: { ...current, ...fresh },
+            };
+          }
+        }
+      }
+      return { directMessagesContacts: contacts };
+    }),
   resetUnreadCount: (contactId) =>
     set((state) => {
       if (!contactId || !state.directMessagesContacts) return {};

@@ -631,9 +631,33 @@ const setupSocket = (server) => {
         // Save to DB 
         let createdMessage;
         try {
+          // Resolve replyTo.messageId if it's not a valid ObjectId.
+          // The client may send a clientTempId (UUID) here when replying
+          // to an optimistic message that hasn't been confirmed by the
+          // server yet.  Mongoose would throw a CastError → the save
+          // fails → messageSendFailed → queue retries → duplicate
+          // messages on the receiver + message never persisted.
+          let replyToForSave = messageFields.replyTo;
+          if (replyToForSave && replyToForSave.messageId) {
+            const mid = replyToForSave.messageId;
+            if (typeof mid === "string" && !mongoose.Types.ObjectId.isValid(mid)) {
+              const original = await Message.findOne({ clientTempId: mid }).lean();
+              if (original) {
+                replyToForSave = {
+                  ...replyToForSave,
+                  messageId: original._id,
+                  senderId: original.sender,
+                };
+              } else {
+                replyToForSave = { ...replyToForSave, messageId: null };
+              }
+            }
+          }
+
           createdMessage = await Message.create({
             _id: messageId,
             ...messageFields,
+            replyTo: replyToForSave,
             clientTempId: clientTempId || null,
             status: deliveryStatus,
             createdAt: now,
@@ -1081,6 +1105,14 @@ const setupSocket = (server) => {
     }
 
     socket.on("confirm-read", updateMessageStatusToRead);
+
+    // Ack-based presence request: the client calls this on every connect
+    // to guarantee it has the latest onlineUsers list, even if it missed
+    // broadcasts while disconnected (overnight background, OS suspension,
+    // connectionStateRecovery, etc.).
+    socket.on("presence-sync", (cb) => {
+      if (typeof cb === "function") cb(Array.from(userSocketMap.keys()));
+    });
 
     socket.on("send-channel-message", (message) =>
       sendChannelMessage(message, socket),
