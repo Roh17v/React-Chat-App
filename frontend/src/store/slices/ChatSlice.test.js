@@ -23,7 +23,11 @@
 
 import { describe, it, expect } from "vitest";
 
-import { createChatSlice } from "./ChatSlice.js";
+import {
+  createChatSlice,
+  dedupeAndSortMessages,
+  mergeDuplicateMessages,
+} from "./ChatSlice.js";
 
 /**
  * Build a minimal store-like object exposing only the slice's
@@ -71,6 +75,55 @@ describe("ChatSlice.applySubscriptionSnapshot", () => {
       "m52",
       "m53",
     ]);
+  });
+
+  it("collapses FCM-open race: local seed + subscription twin with different id keys", () => {
+    // Reproduces notification-open: local toUiMessage uses serverId as _id,
+    // while a concurrent path may have painted the same rows under another
+    // key. Snapshot merge must not leave every bubble doubled.
+    const slice = makeSlice();
+    slice.setSelectedChatMessages(
+      [
+        {
+          _id: "local-row-1",
+          serverId: "srv-1",
+          content: "hello",
+          createdAt: "2024-01-01T00:01:00.000Z",
+          status: "delivered",
+        },
+        {
+          _id: "local-row-2",
+          serverId: "srv-2",
+          content: "world",
+          createdAt: "2024-01-01T00:02:00.000Z",
+          status: "delivered",
+        },
+      ],
+      true,
+    );
+    slice.applySubscriptionSnapshot([
+      {
+        _id: "srv-1",
+        serverId: "srv-1",
+        content: "hello",
+        createdAt: "2024-01-01T00:01:00.000Z",
+        status: "read",
+      },
+      {
+        _id: "srv-2",
+        serverId: "srv-2",
+        content: "world",
+        createdAt: "2024-01-01T00:02:00.000Z",
+        status: "read",
+      },
+    ]);
+    expect(slice.selectedChatMessages).toHaveLength(2);
+    expect(slice.selectedChatMessages.map((m) => m.content)).toEqual([
+      "hello",
+      "world",
+    ]);
+    expect(slice.selectedChatMessages[0].status).toBe("read");
+    expect(slice.selectedChatMessages[1].status).toBe("read");
   });
 
   it("appends a new tail message without disturbing the existing window", () => {
@@ -330,5 +383,184 @@ describe("ChatSlice.applySubscriptionSnapshot", () => {
       "m50",
       "m-bad",
     ]);
+  });
+});
+
+describe("dedupeAndSortMessages", () => {
+  it("collapses two API pages that return the same _id (slow double-fetch)", () => {
+    const pageA = [
+      msg({ _id: "m1", createdAt: "2024-01-01T00:01:00.000Z", content: "a" }),
+      msg({ _id: "m2", createdAt: "2024-01-01T00:02:00.000Z", content: "b" }),
+    ];
+    const pageB = [
+      msg({ _id: "m1", createdAt: "2024-01-01T00:01:00.000Z", content: "a" }),
+      msg({ _id: "m2", createdAt: "2024-01-01T00:02:00.000Z", content: "b" }),
+    ];
+    const merged = dedupeAndSortMessages([...pageB, ...pageA]);
+    expect(merged.map((m) => m._id)).toEqual(["m1", "m2"]);
+  });
+
+  it("setSelectedChatMessages merge path absorbs an overlapping page", () => {
+    const slice = makeSlice();
+    slice.setSelectedChatMessages(
+      [
+        msg({ _id: "m1", createdAt: "2024-01-01T00:01:00.000Z", content: "a" }),
+        msg({ _id: "m2", createdAt: "2024-01-01T00:02:00.000Z", content: "b" }),
+      ],
+      true,
+    );
+    // Simulate a late/slow second response with the same window + one older.
+    slice.setSelectedChatMessages(
+      [
+        msg({ _id: "m0", createdAt: "2024-01-01T00:00:00.000Z", content: "z" }),
+        msg({ _id: "m1", createdAt: "2024-01-01T00:01:00.000Z", content: "a" }),
+        msg({ _id: "m2", createdAt: "2024-01-01T00:02:00.000Z", content: "b" }),
+      ],
+      false,
+    );
+    expect(slice.selectedChatMessages.map((m) => m._id)).toEqual([
+      "m0",
+      "m1",
+      "m2",
+    ]);
+  });
+
+  it("collapses clientTempId row with server-id row for the same message", () => {
+    const optimistic = {
+      _id: "temp-1",
+      clientTempId: "temp-1",
+      content: "hello",
+      createdAt: "2024-01-01T00:01:00.000Z",
+      isOptimistic: true,
+      status: "pending",
+    };
+    const confirmed = {
+      _id: "server-1",
+      serverId: "server-1",
+      clientTempId: "temp-1",
+      content: "hello",
+      createdAt: "2024-01-01T00:01:00.000Z",
+      status: "sent",
+    };
+    const merged = dedupeAndSortMessages([optimistic, confirmed]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].status).toBe("sent");
+    // UI id stays on clientTempId so React keys do not flip after confirm.
+    expect(String(merged[0]._id)).toBe("temp-1");
+    expect(String(merged[0].serverId)).toBe("server-1");
+  });
+
+  it("normalizes non-string ids so Map-style dups cannot slip through", () => {
+    const a = msg({ _id: "99", createdAt: "2024-01-01T00:01:00.000Z" });
+    const b = { ...msg({ createdAt: "2024-01-01T00:01:00.000Z" }), _id: 99 };
+    const merged = dedupeAndSortMessages([a, b]);
+    expect(merged).toHaveLength(1);
+  });
+});
+
+describe("mergeDuplicateMessages", () => {
+  it("keeps a stable key from the optimistic row", () => {
+    const a = {
+      _id: "temp-1",
+      clientTempId: "temp-1",
+      isOptimistic: true,
+      _stableKey: "temp-1",
+      content: "x",
+    };
+    const b = {
+      _id: "server-1",
+      serverId: "server-1",
+      clientTempId: "temp-1",
+      content: "x",
+      status: "sent",
+    };
+    const merged = mergeDuplicateMessages(a, b);
+    expect(merged._stableKey).toBe("temp-1");
+    expect(String(merged._id)).toBe("temp-1");
+    expect(String(merged.serverId)).toBe("server-1");
+  });
+});
+
+describe("ChatSlice — setTypingIndicator", () => {
+  /**
+   * Real zustand only skips updates when the same state reference is
+   * returned. Our production setTypingIndicator does `return state` for
+   * no-ops. This harness mirrors that contract.
+   */
+  function makeZustandLikeSlice() {
+    /** @type {Record<string, any>} */
+    let state = {};
+    let notifyCount = 0;
+    const set = (updater) => {
+      const partial = typeof updater === "function" ? updater(state) : updater;
+      // Mirror zustand: identical reference → no notify.
+      if (Object.is(partial, state)) return;
+      state = Object.assign({}, state, partial);
+      notifyCount += 1;
+    };
+    const get = () => state;
+    // Keep actions on a stable object; only data fields live in `state`
+    // so `return state` no-ops keep working after merges.
+    const actions = createChatSlice(set, get);
+    state = {
+      typingIndicators: actions.typingIndicators,
+    };
+    return {
+      get state() {
+        return state;
+      },
+      get notifyCount() {
+        return notifyCount;
+      },
+      setTypingIndicator: actions.setTypingIndicator,
+      clearTypingIndicatorsForChat: actions.clearTypingIndicatorsForChat,
+    };
+  }
+
+  it("adds a typing user once and no-ops on repeated typing pulses", () => {
+    const h = makeZustandLikeSlice();
+    const user = { _id: "u1", firstName: "Ada", lastName: "Lovelace" };
+
+    h.setTypingIndicator({ chatId: "c1", user, isTyping: true });
+    expect(h.state.typingIndicators.c1).toHaveLength(1);
+    expect(h.notifyCount).toBe(1);
+    const firstBucket = h.state.typingIndicators;
+
+    // Heartbeat / re-emit while still typing must not notify subscribers.
+    h.setTypingIndicator({ chatId: "c1", user, isTyping: true });
+    expect(h.notifyCount).toBe(1);
+    expect(h.state.typingIndicators).toBe(firstBucket);
+    expect(h.state.typingIndicators.c1).toHaveLength(1);
+  });
+
+  it("removes a typing user on stop and no-ops if already absent", () => {
+    const h = makeZustandLikeSlice();
+    const user = { _id: "u1", firstName: "Ada", lastName: "Lovelace" };
+
+    h.setTypingIndicator({ chatId: "c1", user, isTyping: true });
+    h.setTypingIndicator({ chatId: "c1", user, isTyping: false });
+    expect(h.state.typingIndicators.c1).toEqual([]);
+    expect(h.notifyCount).toBe(2);
+
+    const afterStop = h.state.typingIndicators;
+    h.setTypingIndicator({ chatId: "c1", user, isTyping: false });
+    expect(h.notifyCount).toBe(2);
+    expect(h.state.typingIndicators).toBe(afterStop);
+  });
+
+  it("treats repeated pulses for the same user id as a single typer", () => {
+    const h = makeZustandLikeSlice();
+    h.setTypingIndicator({
+      chatId: "c1",
+      user: { _id: "u1", firstName: "Ada" },
+      isTyping: true,
+    });
+    h.setTypingIndicator({
+      chatId: "c1",
+      user: { _id: "u1", firstName: "Ada" },
+      isTyping: true,
+    });
+    expect(h.state.typingIndicators.c1).toHaveLength(1);
+    expect(h.notifyCount).toBe(1);
   });
 });

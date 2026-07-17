@@ -15,7 +15,6 @@ const ContactList = ({ contacts, isChannel = false }) => {
     selectedChatData,
     setSelectedChatData,
     setSelectedChatType,
-    setSelectedChatMessages,
     setPage,
     user,
     resetUnreadCount,
@@ -64,8 +63,10 @@ const ContactList = ({ contacts, isChannel = false }) => {
         }
       }
     }
+    // setSelectedChatData already clears messages when the conversation
+    // identity changes. Avoid a second empty wipe here — it only adds an
+    // extra empty frame before MessageContainer's getMessages fills in.
     if (selectedChatData && selectedChatData._id !== contact._id) {
-      setSelectedChatMessages([], true);
       setPage(1);
     }
   };
