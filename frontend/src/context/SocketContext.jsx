@@ -143,7 +143,10 @@ export const SocketProvider = ({ children }) => {
 
   const { stopMedia } = useMediaStream();
   // Auto-expire timers: "chatId_userId" → timeoutId.
-  const TYPING_EXPIRE_MS = 5000;
+  // Must stay longer than MessageBar's idle stop (3s) + a heartbeat (2.5s)
+  // so a brief network stall does not clear the indicator while the peer
+  // is still composing. Cleared early on clean `stop-typing`.
+  const TYPING_EXPIRE_MS = 6500;
   const typingTimers = useRef({});
 
   // Presence: when the app is backgrounded we disconnect the socket so the
