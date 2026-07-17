@@ -130,7 +130,7 @@ const Profile = () => {
         {user.profileSetup && (
           <button
             onClick={() => navigate("/chats")}
-            className="absolute -top-12 left-0 flex items-center gap-2 text-foreground-secondary hover:text-foreground transition-colors group"
+            className="flex items-center gap-2 text-foreground-secondary hover:text-foreground transition-colors group mb-6"
           >
             <FiArrowLeft className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
             <span className="text-sm font-medium">Back to chats</span>
