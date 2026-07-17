@@ -1,0 +1,180 @@
+# -----------------------------------------------------------------------------
+# Synchronus — Android APK CI
+# -----------------------------------------------------------------------------
+# Triggers: push/merge to main (frontend changes) or manual "Run workflow"
+# Output:   GitHub Release tag "apk-latest" with:
+#             - synchronus.apk
+#             - latest.json
+# Portfolio download URL (stable):
+#   https://github.com/Roh17v/React-Chat-App/releases/latest/download/synchronus.apk
+#
+# Required repo secrets (Settings → Secrets → Actions):
+#   VITE_BASE_URL
+#   VITE_FIREBASE_API_KEY
+#   VITE_FIREBASE_AUTH_DOMAIN
+#   VITE_FIREBASE_PROJECT_ID
+#   VITE_FIREBASE_STORAGE_BUCKET
+#   VITE_FIREBASE_MESSAGING_SENDER_ID
+#   VITE_FIREBASE_APP_ID
+#   VITE_FIREBASE_VAPID_KEY
+#   GOOGLE_SERVICES_JSON_BASE64  — base64 of android/app/google-services.json
+# -----------------------------------------------------------------------------
+
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build & publish APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        # React 19 + cmdk peer range conflict; same as local installs with legacy peers
+        run: npm ci --legacy-peer-deps
+
+      - name: Build web assets (Vite)
+        working-directory: frontend
+        env:
+          VITE_BASE_URL: ${{ secrets.VITE_BASE_URL }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_VAPID_KEY: ${{ secrets.VITE_FIREBASE_VAPID_KEY }}
+        run: |
+          if [ -z "$VITE_BASE_URL" ]; then
+            echo "::error::Missing secret VITE_BASE_URL. Add repo secrets (see workflow header)."
+            exit 1
+          fi
+          npm run build
+
+      - name: Sync Capacitor Android
+        working-directory: frontend
+        run: npx cap sync android
+
+      - name: Write google-services.json (from secret)
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -e
+          DEST="frontend/android/app/google-services.json"
+          if [ -z "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "::error::Missing secret GOOGLE_SERVICES_JSON_BASE64."
+            exit 1
+          fi
+          echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > "$DEST"
+          python3 -c "import json; p=json.load(open('$DEST')); assert p.get('project_info',{}).get('project_id'), 'invalid google-services.json'"
+          echo "Wrote $DEST (project_id present)"
+
+      - name: Make gradlew executable
+        run: chmod +x frontend/android/gradlew
+
+      - name: Build debug APK
+        working-directory: frontend/android
+        env:
+          ORG_GRADLE_PROJECT_versionCode: ${{ github.run_number }}
+          ORG_GRADLE_PROJECT_versionName: "1.0.${{ github.run_number }}"
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Stage APK + metadata
+        run: |
+          set -e
+          SRC="frontend/android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "$SRC" ]; then
+            echo "APK not found at $SRC"
+            find frontend/android/app/build/outputs -type f -name "*.apk" || true
+            exit 1
+          fi
+          cp "$SRC" synchronus.apk
+          ls -lh synchronus.apk
+
+          python3 <<'PY'
+          import json, os, datetime
+          meta = {
+            "app": "Synchronus",
+            "versionName": f"1.0.{os.environ['RUN_NUMBER']}",
+            "versionCode": int(os.environ["RUN_NUMBER"]),
+            "builtAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "commit": os.environ["GITHUB_SHA"],
+            "branch": os.environ["GITHUB_REF_NAME"],
+            "repo": os.environ["GITHUB_REPOSITORY"],
+            "apkUrl": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/latest/download/synchronus.apk",
+            "releaseUrl": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/latest",
+          }
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(meta, f, indent=2)
+          print(json.dumps(meta, indent=2))
+          PY
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Delete previous apk-latest release (if any)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete apk-latest --yes || true
+          git push origin :refs/tags/apk-latest || true
+
+      - name: Publish GitHub Release (latest APK)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Synchronus Android — Latest
+          body: |
+            Auto-built debug APK for portfolio / testers.
+
+            - **Version:** 1.0.${{ github.run_number }}
+            - **Commit:** `${{ github.sha }}`
+            - **Download:** [synchronus.apk](https://github.com/${{ github.repository }}/releases/latest/download/synchronus.apk)
+
+            Triggered by push/merge to `main` (frontend changes) or manual **Run workflow**.
+          files: |
+            synchronus.apk
+            latest.json
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
