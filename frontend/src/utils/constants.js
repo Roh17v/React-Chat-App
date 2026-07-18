@@ -24,7 +24,12 @@ export const PRIVATE_CONTACT_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/private`;
 
 export const CHANNEL_MESSAGES_ROUTE = `${MESSAGES_ROUTE}/channel`;
 
+// Unified incremental sync feed — fetches all new messages across all
+// conversations in a single round trip (replaces N per-conversation calls).
+export const SYNC_UPDATES_ROUTE = `${MESSAGES_ROUTE}/updates`;
+
 export const DM_CONTACTS_ROUTE = `${USER_ROUTES}/dm-contacts`;
+export const USER_UPDATES_ROUTE = `${USER_ROUTES}/updates`;
 
 export const REGISTER_PUSH_TOKEN_ROUTE = `${HOST}${USER_ROUTES}/push-token`;
 
@@ -48,3 +53,8 @@ export const CALL_FINALIZE_ROUTE = `${HOST}${CALL_ROUTE}/finalize`;
 
 export const DELETE_FOR_ME_ROUTE = `${MESSAGES_ROUTE}`;
 export const DELETE_FOR_EVERYONE_ROUTE = `${MESSAGES_ROUTE}`;
+
+// Durable mark-read REST endpoint — pairs with the `confirm-read` socket
+// event so unread state is consistent even when the socket is mid-reconnect
+// or the app is backgrounded right after the user opens a chat.
+export const MARK_READ_ROUTE = `${MESSAGES_ROUTE}/mark-read`;

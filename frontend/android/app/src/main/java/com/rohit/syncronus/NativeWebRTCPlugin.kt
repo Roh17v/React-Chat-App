@@ -1119,7 +1119,7 @@ class NativeWebRTCPlugin : Plugin() {
                 // Fast path: re-assert sender wiring and renderer binding first.
                 // This avoids unnecessary camera restart on normal PiP/fullscreen transitions.
                 applyLocalVideoSendState()
-                getActiveLocalVideoTrack()?.let { CallActivity.instance?.setLocalVideoTrack(it) }
+                localVideoTrack?.let { CallActivity.instance?.setLocalVideoTrack(it) }
                 if (callActivityActive) {
                     refreshRemoteTrackAttachment()
                 }
@@ -1165,7 +1165,7 @@ class NativeWebRTCPlugin : Plugin() {
                                     "Outbound video appears stalled after resume; restarting local capture."
                                 )
                                 restartLocalVideoCapture()
-                                getActiveLocalVideoTrack()?.let {
+                                localVideoTrack?.let {
                                     CallActivity.instance?.setLocalVideoTrack(it)
                                 }
                                 if (callActivityActive) {
@@ -1384,8 +1384,10 @@ class NativeWebRTCPlugin : Plugin() {
                         return@start
                     }
 
-                    val trackToUse = localVideoTrack ?: track
-                    CallActivity.instance?.setLocalVideoTrack(trackToUse)
+                    val trackToUse = localVideoTrack
+                    if (trackToUse != null) {
+                        CallActivity.instance?.setLocalVideoTrack(trackToUse)
+                    }
                     CallActivity.instance?.syncLocalVideoUiState()
 
                     applyBitrateCap()
@@ -2963,15 +2965,11 @@ class NativeWebRTCPlugin : Plugin() {
      * screen capturer ends up rendering itself in the preview, producing an infinity-mirror
      * recursion (the preview shows the screen, which contains the preview, ...).
      *
-     * Falls back to the screen track only if the camera track is unavailable (e.g. permission
-     * denied, hardware failure, or audio-only call promoted to video). Callers in [CallActivity]
-     * MUST use this instead of [getLocalVideoTrack] when wiring the preview renderer.
+     * Never falls back to the screen track. If the camera is unavailable, the preview should
+     * show the video-off fallback avatar, not the screen capture.
      */
     fun getLocalPreviewTrack(): VideoTrack? {
-        val camera = localVideoTrack
-        val screen = screenVideoTrack
-        val chosen = camera ?: screen
-        return chosen
+        return localVideoTrack
     }
     fun getRemoteVideoTrack(): VideoTrack? = remoteVideoTrack
     fun isPeerConnected(): Boolean = peerConnection?.iceConnectionState() == PeerConnection.IceConnectionState.CONNECTED || peerConnection?.iceConnectionState() == PeerConnection.IceConnectionState.COMPLETED

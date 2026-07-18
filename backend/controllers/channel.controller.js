@@ -63,7 +63,9 @@ export const getUserChannels = async (req, res, next) => {
 
     const userChannels = await Channel.find({
       $or: [{ admin: userId }, { members: userId }],
-    }).sort({ updatedAt: -1 });
+    }).populate("members", "_id firstName lastName email color image")
+      .sort({ updatedAt: -1 })
+      .lean();
 
     res.status(200).json(userChannels);
   } catch (error) {

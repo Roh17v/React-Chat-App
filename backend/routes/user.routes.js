@@ -5,7 +5,8 @@ import {
   searchUsers,
   dmContacts,
   getAllContacts,
-  registerPushToken
+  registerPushToken,
+  getContactsUpdates
 } from "../controllers/user.controller.js";
 import { validateToken } from "../middlewares/auth.js";
 import upload from "../middlewares/upload.middleware.js";
@@ -18,5 +19,6 @@ userRouter.get("/search", validateToken, searchUsers);
 userRouter.get("/dm-contacts", validateToken, dmContacts);
 userRouter.get("/contacts", validateToken, getAllContacts);
 userRouter.post("/push-token", validateToken, registerPushToken);
+userRouter.get("/updates", validateToken, getContactsUpdates);
 
 export default userRouter;

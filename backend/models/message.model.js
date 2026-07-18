@@ -93,6 +93,11 @@ const messageSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    clientTempId: {
+      type: String,
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true }
 );
@@ -103,6 +108,14 @@ messageSchema.index({ receiver: 1, sender: 1, createdAt: -1 });
 messageSchema.index({ channelId: 1, createdAt: -1 });
 messageSchema.index({ sender: 1, createdAt: -1 });
 messageSchema.index({ receiver: 1, status: 1 });
+messageSchema.index({ clientTempId: 1, sender: 1 }, { unique: true, partialFilterExpression: { clientTempId: { $exists: true, $ne: null } } });
+// Supports the unified incremental-sync feed (GET /api/messages/updates).
+// The $or branches for unified sync use updatedAt > since + sort ASC,
+// which benefits from an ascending cursor index on updatedAt.
+messageSchema.index({ receiver: 1, updatedAt: 1 });
+messageSchema.index({ sender: 1, updatedAt: 1 });
+messageSchema.index({ channelId: 1, updatedAt: 1 });
+
 
 const Message = mongoose.model("Message", messageSchema);
 

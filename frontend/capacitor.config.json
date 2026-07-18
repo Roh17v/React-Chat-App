@@ -9,5 +9,14 @@
     "backgroundColor": "#000000",
     "allowMixedContent": false,
     "webContentsDebuggingEnabled": false
+  },
+  "plugins": {
+    "CapacitorSQLite": {
+      "androidIsEncryption": true,
+      "androidBiometric": { "biometricAuth": false, "biometricTitle": "" },
+      "iosIsEncryption": true,
+      "iosKeychainPrefix": "syncronus_offline",
+      "iosBiometric": { "biometricAuth": false, "biometricTitle": "" }
+    }
   }
 }

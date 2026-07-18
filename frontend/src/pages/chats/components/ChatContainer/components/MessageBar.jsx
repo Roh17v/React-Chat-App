@@ -9,6 +9,35 @@ import axios from "axios";
 import { UPLOAD_FILE_ROUTE } from "@/utils/constants";
 import { cn } from "@/lib/utils";
 import { Capacitor } from "@capacitor/core";
+import { getRepository } from "@/offline";
+import { getOutboundQueue } from "@/offline/sync/OutboundQueue.js";
+
+/**
+ * Best-effort `triggerDrain()` on the singleton outbound queue. Called
+ * right after `repo.enqueueOutbound` so the queue starts working on the
+ * row instead of waiting for its periodic 60s timer to fire — that's
+ * the 10–15s "stuck pending" you'd otherwise see in the bubble.
+ *
+ * Returns silently if the queue isn't initialized yet (the OfflineProvider
+ * hasn't booted) or if the singleton's `triggerDrain` throws — the worst
+ * case is the periodic timer takes over.
+ */
+const kickOutboundDrain = () => {
+  try {
+    const q = getOutboundQueue();
+    if (q && typeof q.triggerDrain === "function") q.triggerDrain();
+  } catch {
+    // Singleton not initialized yet — periodic timer will handle it.
+  }
+};
+
+// How long after the last keystroke before we tell the peer we stopped.
+// 1.5s was too short: natural pauses while composing caused
+// typing → stop → typing loops that made the peer's chat jump.
+const TYPING_IDLE_STOP_MS = 3000;
+// While still composing, re-emit typing so the peer's safety expire
+// (SocketContext TYPING_EXPIRE_MS) does not clear the indicator.
+const TYPING_HEARTBEAT_MS = 2500;
 
 const MessageBar = () => {
   const [message, setMessage] = useState("");
@@ -16,6 +45,7 @@ const MessageBar = () => {
   const emojiRef = useRef();
   const inputRef = useRef();
   const typingTimeoutRef = useRef(null);
+  const typingHeartbeatRef = useRef(null);
   const isTypingRef = useRef(false);
   const {
     selectedChatType,
@@ -43,65 +73,149 @@ const MessageBar = () => {
     const sanitizedMessage = message.trim();
     if (sanitizedMessage === "") return;
 
-    // Generate a unique temp ID for this optimistic message.
-    const tempId = `temp_${crypto.randomUUID()}`;
-    const now = new Date().toISOString();
-
     if (selectedChatType === "contact") {
       const replyTo = buildReplyPayload(replyToMessage);
 
-      // Instantly add placeholder to the UI with status 'sending'.
-      addOptimisticMessage({
-        _id: tempId,
-        sender: user.id,
-        receiver: selectedChatData._id,
-        content: sanitizedMessage,
-        messageType: "text",
-        fileUrl: null,
-        replyTo: replyTo || null,
-        status: "sending",
-        createdAt: now,
-        isOptimistic: true,
-      });
-
-      // Clear the input immediately
+      // Clear the input immediately (before async work).
       setMessage("");
       if (inputRef.current) inputRef.current.style.height = "auto";
       clearReplyToMessage();
       keepInputFocused();
 
-      // Send to server in background with the temp ID attached.
-      socket.emit("sendMessage", {
-        sender: user.id,
-        content: sanitizedMessage,
-        receiver: selectedChatData._id,
-        messageType: "text",
-        fileUrl: undefined,
-        replyTo: replyTo || undefined,
-        clientTempId: tempId,
-      });
+      if (Capacitor.isNativePlatform()) {
+        // --- Native path: enqueue through the offline repository -----------
+        const repo = getRepository();
+        if (repo.isReady()) {
+          await repo.enqueueOutbound({
+            kind: "send_text",
+            conversationId: selectedChatData._id,
+            conversationType: "dm",
+            payload: {
+              sender: user.id,
+              content: sanitizedMessage,
+              receiver: selectedChatData._id,
+              messageType: "text",
+              replyTo: replyTo || undefined,
+            },
+          });
+          // No addOptimisticMessage: enqueueOutbound inserts the pending row
+          // and the repository subscription fires, updating the UI.
+          // Kick the queue immediately — without this it waits up to 60s
+          // for the periodic timer.
+          kickOutboundDrain();
+        } else {
+          // Repository not ready — fall through to socket path.
+          const tempId = `temp_${crypto.randomUUID()}`;
+          const now = new Date().toISOString();
+          addOptimisticMessage({
+            _id: tempId,
+            sender: user.id,
+            receiver: selectedChatData._id,
+            content: sanitizedMessage,
+            messageType: "text",
+            fileUrl: null,
+            replyTo: replyTo || null,
+            status: "sending",
+            createdAt: now,
+            isOptimistic: true,
+          });
+          socket.emit("sendMessage", {
+            sender: user.id,
+            content: sanitizedMessage,
+            receiver: selectedChatData._id,
+            messageType: "text",
+            fileUrl: undefined,
+            replyTo: replyTo || undefined,
+            clientTempId: tempId,
+          });
+        }
+      } else {
+        // --- Web path: existing socket emit --------------------------------
+        const tempId = `temp_${crypto.randomUUID()}`;
+        const now = new Date().toISOString();
+        addOptimisticMessage({
+          _id: tempId,
+          sender: user.id,
+          receiver: selectedChatData._id,
+          content: sanitizedMessage,
+          messageType: "text",
+          fileUrl: null,
+          replyTo: replyTo || null,
+          status: "sending",
+          createdAt: now,
+          isOptimistic: true,
+        });
+        socket.emit("sendMessage", {
+          sender: user.id,
+          content: sanitizedMessage,
+          receiver: selectedChatData._id,
+          messageType: "text",
+          fileUrl: undefined,
+          replyTo: replyTo || undefined,
+          clientTempId: tempId,
+        });
+      }
     } else if (selectedChatType === "channel") {
-      socket.emit("send-channel-message", {
-        sender: user.id,
-        content: sanitizedMessage,
-        messageType: "text",
-        fileUrl: undefined,
-        channelId: selectedChatData._id,
-      });
+      // Clear the input immediately.
       setMessage("");
       if (inputRef.current) inputRef.current.style.height = "auto";
       clearReplyToMessage();
       keepInputFocused();
+
+      if (Capacitor.isNativePlatform()) {
+        const repo = getRepository();
+        if (repo.isReady()) {
+          await repo.enqueueOutbound({
+            kind: "send_text",
+            conversationId: selectedChatData._id,
+            conversationType: "channel",
+            payload: {
+              sender: user.id,
+              content: sanitizedMessage,
+              channelId: selectedChatData._id,
+              messageType: "text",
+            },
+          });
+          kickOutboundDrain();
+        } else {
+          socket.emit("send-channel-message", {
+            sender: user.id,
+            content: sanitizedMessage,
+            messageType: "text",
+            fileUrl: undefined,
+            channelId: selectedChatData._id,
+          });
+        }
+      } else {
+        socket.emit("send-channel-message", {
+          sender: user.id,
+          content: sanitizedMessage,
+          messageType: "text",
+          fileUrl: undefined,
+          channelId: selectedChatData._id,
+        });
+      }
     }
 
     if (isTypingRef.current) {
-      socket.emit("stop-typing", {
-        chatType: selectedChatType,
-        receiverId:
-          selectedChatType === "contact" ? selectedChatData._id : null,
-        channelId: selectedChatType === "channel" ? selectedChatData._id : null,
-      });
+      if (socket?.connected) {
+        socket.emit("stop-typing", {
+          chatType: selectedChatType,
+          receiverId:
+            selectedChatType === "contact" ? selectedChatData._id : null,
+          channelId:
+            selectedChatType === "channel" ? selectedChatData._id : null,
+        });
+      }
       isTypingRef.current = false;
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+      if (typingHeartbeatRef.current) {
+        clearInterval(typingHeartbeatRef.current);
+        typingHeartbeatRef.current = null;
+      }
     }
   };
 
@@ -151,26 +265,89 @@ const MessageBar = () => {
           setIsUploading(false);
           if (selectedChatType === "contact") {
             const replyTo = buildReplyPayload(replyToMessage);
-            socket.emit("sendMessage", {
-              sender: user.id,
-              content: undefined,
-              receiver: selectedChatData._id,
-              messageType: "file",
-              fileUrl: response.data.fileUrl,
-              fileName: file.name,
-              fileMetadata,
-              replyTo: replyTo || undefined,
-            });
+
+            if (Capacitor.isNativePlatform()) {
+              const repo = getRepository();
+              if (repo.isReady()) {
+                await repo.enqueueOutbound({
+                  kind: "send_file",
+                  conversationId: selectedChatData._id,
+                  conversationType: "dm",
+                  payload: {
+                    sender: user.id,
+                    receiver: selectedChatData._id,
+                    messageType: "file",
+                    fileUrl: response.data.fileUrl,
+                    fileName: file.name,
+                    fileMetadata,
+                    replyTo: replyTo || undefined,
+                  },
+                });
+                kickOutboundDrain();
+              } else {
+                socket.emit("sendMessage", {
+                  sender: user.id,
+                  content: undefined,
+                  receiver: selectedChatData._id,
+                  messageType: "file",
+                  fileUrl: response.data.fileUrl,
+                  fileName: file.name,
+                  fileMetadata,
+                  replyTo: replyTo || undefined,
+                });
+              }
+            } else {
+              socket.emit("sendMessage", {
+                sender: user.id,
+                content: undefined,
+                receiver: selectedChatData._id,
+                messageType: "file",
+                fileUrl: response.data.fileUrl,
+                fileName: file.name,
+                fileMetadata,
+                replyTo: replyTo || undefined,
+              });
+            }
           } else if (selectedChatType === "channel") {
-            socket.emit("send-channel-message", {
-              sender: user.id,
-              content: message,
-              messageType: "file",
-              fileUrl: response.data.fileUrl,
-              fileName: file.name,
-              fileMetadata,
-              channelId: selectedChatData._id,
-            });
+            if (Capacitor.isNativePlatform()) {
+              const repo = getRepository();
+              if (repo.isReady()) {
+                await repo.enqueueOutbound({
+                  kind: "send_file",
+                  conversationId: selectedChatData._id,
+                  conversationType: "channel",
+                  payload: {
+                    sender: user.id,
+                    channelId: selectedChatData._id,
+                    messageType: "file",
+                    fileUrl: response.data.fileUrl,
+                    fileName: file.name,
+                    fileMetadata,
+                  },
+                });
+                kickOutboundDrain();
+              } else {
+                socket.emit("send-channel-message", {
+                  sender: user.id,
+                  content: message,
+                  messageType: "file",
+                  fileUrl: response.data.fileUrl,
+                  fileName: file.name,
+                  fileMetadata,
+                  channelId: selectedChatData._id,
+                });
+              }
+            } else {
+              socket.emit("send-channel-message", {
+                sender: user.id,
+                content: message,
+                messageType: "file",
+                fileUrl: response.data.fileUrl,
+                fileName: file.name,
+                fileMetadata,
+                channelId: selectedChatData._id,
+              });
+            }
           }
           clearReplyToMessage();
         }
@@ -212,7 +389,7 @@ const MessageBar = () => {
       : (sourceMessage.content || "").slice(0, 120);
 
     return {
-      messageId: sourceMessage._id,
+      messageId: sourceMessage.serverId || sourceMessage._id,
       senderId: sourceMessage.sender,
       messageType: sourceMessage.messageType,
       previewText,
@@ -237,53 +414,103 @@ const MessageBar = () => {
     };
   }, [emojiPickerOpen]);
 
+  // Typing signal policy (WhatsApp-like):
+  // - Emit `typing` once when composition starts.
+  // - Keep a stable heartbeat interval for the whole "is typing" session
+  //   (must NOT be recreated on every keystroke — that cancelled the
+  //   interval forever during continuous typing, so the peer's safety
+  //   expire cleared the indicator while the sender was still composing).
+  // - Only the idle-stop timer resets on each keystroke.
+  // - Emit `stop-typing` after TYPING_IDLE_STOP_MS of no keystrokes
+  //   (or on send / chat leave). Previous 1.5s idle caused typing↔stop
+  //   loops that made the peer's message list jump.
+  //
+  // Same path for web and Capacitor — only the transport is socket.io.
   useEffect(() => {
-    if (!socket || !selectedChatData?._id) return;
-
-    const shouldEmitTyping = message.trim().length > 0;
-    if (shouldEmitTyping && !isTypingRef.current) {
-      socket.emit("typing", {
-        chatType: selectedChatType,
-        receiverId:
-          selectedChatType === "contact" ? selectedChatData._id : null,
-        channelId: selectedChatType === "channel" ? selectedChatData._id : null,
-      });
-      isTypingRef.current = true;
-    }
-
-    if (!shouldEmitTyping && isTypingRef.current) {
-      socket.emit("stop-typing", {
-        chatType: selectedChatType,
-        receiverId:
-          selectedChatType === "contact" ? selectedChatData._id : null,
-        channelId: selectedChatType === "channel" ? selectedChatData._id : null,
-      });
-      isTypingRef.current = false;
-    }
-
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-    }
-
-    if (shouldEmitTyping) {
-      typingTimeoutRef.current = setTimeout(() => {
-        socket.emit("stop-typing", {
-          chatType: selectedChatType,
-          receiverId:
-            selectedChatType === "contact" ? selectedChatData._id : null,
-          channelId:
-            selectedChatType === "channel" ? selectedChatData._id : null,
-        });
-        isTypingRef.current = false;
-      }, 1500);
-    }
-
-    return () => {
+    const clearIdleTimer = () => {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
       }
     };
-  }, [message, selectedChatData, selectedChatType, socket]);
+
+    const clearHeartbeat = () => {
+      if (typingHeartbeatRef.current) {
+        clearInterval(typingHeartbeatRef.current);
+        typingHeartbeatRef.current = null;
+      }
+    };
+
+    // No socket or no chat: cannot emit. Local timers must still be
+    // cleared so a reconnect/chat-open starts clean. Actual stop-typing
+    // emit for chat/socket identity changes is owned by the leave effect.
+    if (!socket || !selectedChatData?._id) {
+      clearIdleTimer();
+      clearHeartbeat();
+      isTypingRef.current = false;
+      return;
+    }
+
+    const typingPayload = {
+      chatType: selectedChatType,
+      receiverId:
+        selectedChatType === "contact" ? selectedChatData._id : null,
+      channelId: selectedChatType === "channel" ? selectedChatData._id : null,
+    };
+
+    const stopTypingSession = () => {
+      if (!isTypingRef.current) {
+        clearIdleTimer();
+        clearHeartbeat();
+        return;
+      }
+      if (socket.connected) {
+        socket.emit("stop-typing", typingPayload);
+      }
+      isTypingRef.current = false;
+      clearIdleTimer();
+      clearHeartbeat();
+    };
+
+    const startTypingSession = () => {
+      if (socket.connected) {
+        socket.emit("typing", typingPayload);
+      }
+      isTypingRef.current = true;
+      // Heartbeat only once per session — keystroke updates must not
+      // tear this down, or continuous typing never re-pulses the peer.
+      clearHeartbeat();
+      typingHeartbeatRef.current = setInterval(() => {
+        if (!isTypingRef.current || !socket.connected) return;
+        socket.emit("typing", typingPayload);
+      }, TYPING_HEARTBEAT_MS);
+    };
+
+    const shouldEmitTyping = message.trim().length > 0;
+
+    if (shouldEmitTyping) {
+      if (!isTypingRef.current) {
+        startTypingSession();
+      }
+      // Extend idle window on every keystroke / value change.
+      clearIdleTimer();
+      typingTimeoutRef.current = setTimeout(() => {
+        stopTypingSession();
+      }, TYPING_IDLE_STOP_MS);
+    } else if (isTypingRef.current) {
+      stopTypingSession();
+    }
+
+    // Do not clear heartbeat on keystroke cleanup — only clear the idle
+    // timer handle that this effect instance owns when message changes
+    // mid-session would otherwise double-fire. Heartbeat lives for the
+    // whole session and is cleared by stopTypingSession / leave effect.
+    return () => {
+      clearIdleTimer();
+    };
+    // Depend on chat id, not the whole contact object — lastSeen/unread
+    // refreshes must not restart the typing timers mid-composition.
+  }, [message, selectedChatData?._id, selectedChatType, socket]);
 
   useEffect(() => {
     if (selectedChatType !== "contact" && replyToMessage) {
@@ -297,9 +524,22 @@ const MessageBar = () => {
     }
   }, [replyToMessage]);
 
+  // Stop typing when leaving a chat, switching conversation, losing the
+  // socket instance, or unmounting MessageBar. Runs in effect cleanup so
+  // the closed-over chat identity is the *previous* one (correct peer).
   useEffect(() => {
     return () => {
-      if (!socket || !isTypingRef.current) return;
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+      if (typingHeartbeatRef.current) {
+        clearInterval(typingHeartbeatRef.current);
+        typingHeartbeatRef.current = null;
+      }
+      if (!isTypingRef.current) return;
+      isTypingRef.current = false;
+      if (!socket?.connected) return;
       socket.emit("stop-typing", {
         chatType: selectedChatType,
         receiverId:
@@ -307,9 +547,8 @@ const MessageBar = () => {
         channelId:
           selectedChatType === "channel" ? selectedChatData?._id : null,
       });
-      isTypingRef.current = false;
     };
-  }, [selectedChatData, selectedChatType, socket]);
+  }, [selectedChatData?._id, selectedChatType, socket]);
 
   return (
     <div className="p-2 sm:p-3 safe-area-bottom bg-background">

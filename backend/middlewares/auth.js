@@ -16,6 +16,6 @@ export async function validateToken(req, res, next) {
     req.user = decoded;
     next();
   } catch (error) {
-    next(createError(400, "Invalid Token."));
+    next(createError(401, "Invalid Token."));
   }
 }

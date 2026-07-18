@@ -14,6 +14,7 @@ import PendingRequests from "./components/PendingRequests";
 import { Capacitor } from "@capacitor/core";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import CallTimer from "@/components/CallTimer";
+import { getRepository } from "@/offline";
 
 const ContactContainer = () => {
   const {
@@ -25,6 +26,10 @@ const ContactContainer = () => {
     isCallMinimized,
     setCallMinimized,
     selectedChatType,
+    connectivity,
+    bootstrapStatus,
+    isInitialized,
+    offlineMode,
   } = useAppStore();
   const isNative = Capacitor.isNativePlatform();
   const showNativeCallBanner =
@@ -45,33 +50,75 @@ const ContactContainer = () => {
   };
 
   useEffect(() => {
-    const fetchDMContacts = async () => {
-      try {
-        const response = await axios.get(`${HOST}${DM_CONTACTS_ROUTE}`, {
-          withCredentials: true,
-        });
-        setDirectMessagesContacts(response.data);
-      } catch (error) {
-        console.log(error);
-      }
-    };
+    const repo = getRepository();
+    const isNative = Capacitor.isNativePlatform();
 
-    const userChannels = async () => {
-      try {
-        const response = await axios.get(GET_USER_CHANNELS_ROUTE, {
-          withCredentials: true,
-        });
-        if (response.status === 200) {
-          setChannels(response.data);
+    if (isNative && isInitialized && repo.isReady()) {
+      // ── Native path: read from repository, then subscribe for live updates ──
+      // The OfflineProvider has already bootstrapped / synced the data
+      // (Requirements 1.1, 1.2, 1.4, 1.5). Axios is not needed here —
+      // the SyncEngine handles background refresh.
+      repo.getContacts().then((contacts) => {
+        setDirectMessagesContacts(contacts);
+      }).catch((err) => {
+        console.error("[ContactContainer] repo.getContacts failed:", err);
+      });
+
+      repo.getChannels().then((channels) => {
+        setChannels(channels);
+      }).catch((err) => {
+        console.error("[ContactContainer] repo.getChannels failed:", err);
+      });
+
+      const unsubContacts = repo.subscribeContacts((contacts) => {
+        setDirectMessagesContacts(contacts);
+      });
+
+      const unsubChannels = repo.subscribeChannels((channels) => {
+        setChannels(channels);
+      });
+
+      return () => {
+        unsubContacts();
+        unsubChannels();
+      };
+    }
+
+    if (!isNative || offlineMode === "unavailable") {
+      // ── Web path (or native when repo failed to init): keep existing axios fetch ──
+      const fetchDMContacts = async () => {
+        try {
+          const response = await axios.get(`${HOST}${DM_CONTACTS_ROUTE}`, {
+            withCredentials: true,
+          });
+          setDirectMessagesContacts(response.data);
+        } catch (error) {
+          console.log(error);
         }
-      } catch (error) {
-        console.log(error);
-      }
-    };
+      };
 
-    userChannels();
-    fetchDMContacts();
-  }, [setChannels, setDirectMessagesContacts]);
+      const userChannels = async () => {
+        try {
+          const response = await axios.get(GET_USER_CHANNELS_ROUTE, {
+            withCredentials: true,
+          });
+          if (response.status === 200) {
+            setChannels(response.data);
+          }
+        } catch (error) {
+          console.log(error);
+        }
+      };
+
+      userChannels();
+      fetchDMContacts();
+    }
+  }, [
+    setChannels,
+    setDirectMessagesContacts,
+    isInitialized,
+    offlineMode,
+  ]);
 
   return (
     <div className="relative w-full md:w-[320px] lg:w-[360px] h-full bg-sidebar border-r border-sidebar-border flex flex-col safe-area-top">
@@ -80,7 +127,25 @@ const ContactContainer = () => {
         <h1 className="text-xl font-bold text-foreground tracking-tight">
           Messages
         </h1>
+        {/* Syncing pill — Req 11.3 */}
+        {connectivity === "reconnecting" && bootstrapStatus === "running" && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/20 px-2.5 py-0.5 text-[11px] font-medium text-amber-500 ring-1 ring-amber-400/40">
+            <svg className="h-2.5 w-2.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+            </svg>
+            Syncing…
+          </span>
+        )}
       </div>
+
+      {/* Offline banner — Req 11.2 */}
+      {connectivity === "offline" && (
+        <div className="w-full bg-amber-500/15 border-b border-amber-500/30 px-4 py-1.5 text-center">
+          <span className="text-[11px] font-medium text-amber-500">
+            You are offline
+          </span>
+        </div>
+      )}
 
       {showNativeCallBanner && (
         <button

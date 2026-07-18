@@ -3,6 +3,8 @@ import { Preferences } from "@capacitor/preferences";
 import { Avatar, AvatarImage } from "@/components/ui/avatar";
 import useAppStore from "@/store";
 import { HOST, LOGOUT_ROUTE } from "@/utils/constants";
+import { getRepository } from "@/offline";
+import { getEncryptionLayer } from "@/offline";
 import {
   Tooltip,
   TooltipContent,
@@ -17,7 +19,7 @@ import axios from "axios";
 
 const ProfileInfo = () => {
   const user = useAppStore((state) => state.user);
-  const setUser = useAppStore((state) => state.setUser);
+  const logout = useAppStore((state) => state.logout);
   const navigate = useNavigate();
   const [showAvatarPreview, setShowAvatarPreview] = useState(false);
 
@@ -31,8 +33,10 @@ const ProfileInfo = () => {
 
       if (response.status === 200) {
         await Preferences.remove({ key: "auth_token" });
+        await Preferences.remove({ key: "auth_user" }).catch(() => {});
+        
         toast.success("Logged out successfully");
-        setUser(null);
+        logout();
         navigate("/auth");
       }
     } catch (error) {

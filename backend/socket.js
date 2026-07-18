@@ -555,6 +555,43 @@ const setupSocket = (server) => {
       const isReceiverOnline = receiverSockets.size > 0;
       const deliveryStatus = isReceiverOnline ? "delivered" : "sent";
 
+      // Deduplication: if the sender's OutboundQueue retried a send
+      // (e.g. socket dropped before the echo arrived), the same
+      // clientTempId will arrive again. Check for an existing message
+      // with this clientTempId + sender and short-circuit — return the
+      // existing message as the echo so the client's deferred resolves
+      // without creating a duplicate on the receiver's side.
+      if (clientTempId && typeof clientTempId === "string" && clientTempId.length > 0) {
+        const existing = await Message.findOne({
+          clientTempId,
+          sender: messageFields.sender,
+        }).lean();
+
+        if (existing) {
+          console.log(`[Dedup] Duplicate sendMessage with clientTempId=${clientTempId}, returning existing message ${existing._id}`);
+          const dedupPayload = {
+            _id: existing._id,
+            sender: existing.sender,
+            receiver: existing.receiver,
+            content: existing.content,
+            messageType: existing.messageType,
+            fileUrl: existing.fileUrl || null,
+            fileName: existing.fileName || null,
+            fileMetadata: existing.fileMetadata || {},
+            replyTo: existing.replyTo || null,
+            status: existing.status,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+            clientTempId: clientTempId,
+          };
+          senderSockets.forEach((socketId) =>
+            io.to(socketId).emit("receiveMessage", dedupPayload),
+          );
+          // Do NOT re-emit to the receiver — they already got it.
+          return;
+        }
+      }
+
       // Build an in-memory message object with a pre-generated ID
       const messageId = new mongoose.Types.ObjectId();
       const now = new Date();
@@ -594,9 +631,34 @@ const setupSocket = (server) => {
         // Save to DB 
         let createdMessage;
         try {
+          // Resolve replyTo.messageId if it's not a valid ObjectId.
+          // The client may send a clientTempId (UUID) here when replying
+          // to an optimistic message that hasn't been confirmed by the
+          // server yet.  Mongoose would throw a CastError → the save
+          // fails → messageSendFailed → queue retries → duplicate
+          // messages on the receiver + message never persisted.
+          let replyToForSave = messageFields.replyTo;
+          if (replyToForSave && replyToForSave.messageId) {
+            const mid = replyToForSave.messageId;
+            if (typeof mid === "string" && !mongoose.Types.ObjectId.isValid(mid)) {
+              const original = await Message.findOne({ clientTempId: mid }).lean();
+              if (original) {
+                replyToForSave = {
+                  ...replyToForSave,
+                  messageId: original._id,
+                  senderId: original.sender,
+                };
+              } else {
+                replyToForSave = { ...replyToForSave, messageId: null };
+              }
+            }
+          }
+
           createdMessage = await Message.create({
             _id: messageId,
             ...messageFields,
+            replyTo: replyToForSave,
+            clientTempId: clientTempId || null,
             status: deliveryStatus,
             createdAt: now,
             updatedAt: now,
@@ -675,6 +737,42 @@ const setupSocket = (server) => {
   const sendChannelMessage = async (message, socket) => {
     try {
       const { channelId, messageType, content, sender, fileUrl, fileName, fileMetadata } = message;
+      const clientTempId = message.clientTempId || null;
+
+      // Deduplication: same logic as sendMessage — if the OutboundQueue
+      // retried, return the existing message as the echo to the sender.
+      if (clientTempId && typeof clientTempId === "string" && clientTempId.length > 0) {
+        const existing = await Message.findOne({
+          clientTempId,
+          sender,
+        }).lean();
+
+        if (existing) {
+          console.log(`[Dedup] Duplicate sendChannelMessage with clientTempId=${clientTempId}, returning existing message ${existing._id}`);
+          const channel = await Channel.findById(channelId).select("_id").lean();
+          const dedupPayload = {
+            _id: existing._id,
+            sender: existing.sender,
+            receiver: null,
+            channelId: channel?._id || channelId,
+            content: existing.content,
+            messageType: existing.messageType,
+            fileUrl: existing.fileUrl || null,
+            fileName: existing.fileName || null,
+            fileMetadata: existing.fileMetadata || {},
+            replyTo: existing.replyTo || null,
+            status: existing.status,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+            clientTempId: clientTempId,
+          };
+          const senderSockets = userSocketMap.get(sender) || new Set();
+          senderSockets.forEach((socketId) =>
+            io.to(socketId).emit("receive-channel-message", dedupPayload),
+          );
+          return;
+        }
+      }
 
       const newMessage = await Message.create({
         sender,
@@ -685,6 +783,7 @@ const setupSocket = (server) => {
         channelId,
         fileName,
         fileMetadata: fileMetadata || {},
+        clientTempId: clientTempId,
       });
 
       const messageData = await Message.findById(newMessage._id)
@@ -698,30 +797,38 @@ const setupSocket = (server) => {
       const channel = await Channel.findById(channelId).populate("members");
 
 
-
       const finalData = { ...messageData._doc, channelId: channel._id };
 
       if (channel && channel.members) {
         const offlineMemberIds = [];
         channel.members.forEach((contact) => {
+          const contactIdStr = contact._id.toString();
           const memberSocketId =
-            userSocketMap.get(contact._id.toString()) || new Set();
+            userSocketMap.get(contactIdStr) || new Set();
           if (memberSocketId.size > 0) {
             memberSocketId.forEach((socketId) => {
-              io.to(socketId).emit("receive-channel-message", finalData);
+              const payload = contactIdStr === sender 
+                ? { ...finalData, clientTempId: message.clientTempId || null }
+                : finalData;
+              io.to(socketId).emit("receive-channel-message", payload);
             });
           } else {
-            offlineMemberIds.push(contact._id.toString());
+            offlineMemberIds.push(contactIdStr);
           }
         });
+        
+        const adminIdStr = channel.admin?.toString();
         const adminSocketId =
-          userSocketMap.get(channel.admin.toString()) || new Set();
+          adminIdStr ? (userSocketMap.get(adminIdStr) || new Set()) : new Set();
         if (adminSocketId.size > 0) {
           adminSocketId.forEach((socketId) => {
-            io.to(socketId).emit("receive-channel-message", finalData);
+            const payload = adminIdStr === sender 
+              ? { ...finalData, clientTempId: message.clientTempId || null }
+              : finalData;
+            io.to(socketId).emit("receive-channel-message", payload);
           });
-        } else if (channel.admin?.toString() !== sender) {
-          offlineMemberIds.push(channel.admin.toString());
+        } else if (adminIdStr && adminIdStr !== sender) {
+          offlineMemberIds.push(adminIdStr);
         }
 
         const uniqueOfflineIds = Array.from(
@@ -762,9 +869,19 @@ const setupSocket = (server) => {
 
   const updateMessageStatusToRead = async ({ userId, senderId }) => {
     try {
+      // Flip every unread message from `sender` to `receiver` to `read`.
+      // Previously we only matched `status: 'delivered'`, which left
+      // messages stuck at `sent` forever when the recipient was offline
+      // at the time of original delivery (the `delivered` bump never
+      // happened). The result on the sender's UI was a partial flip:
+      // only the messages that briefly hit `delivered` ever turned blue.
       const updatedMessages = await Message.updateMany(
-        { receiver: userId, sender: senderId, status: "delivered" },
-        { $set: { status: "read" } },
+        {
+          receiver: userId,
+          sender: senderId,
+          status: { $in: ["sent", "delivered"] },
+        },
+        { $set: { status: "read", updatedAt: new Date() } },
       );
       if (updatedMessages.modifiedCount > 0) {
 
@@ -965,7 +1082,7 @@ const setupSocket = (server) => {
       if (undeliveredMessages.length > 0) {
         await Message.updateMany(
           { receiver: userId, status: "sent" },
-          { $set: { status: "delivered" } },
+          { $set: { status: "delivered", updatedAt: new Date() } },
         );
 
         const senderIds = [
@@ -976,6 +1093,7 @@ const setupSocket = (server) => {
           const senderSockets = userSocketMap.get(senderId) || new Set();
           senderSockets.forEach((sockId) =>
             io.to(sockId).emit("message-status-update", {
+              senderId,
               receiverId: userId,
               status: "delivered",
             }),
@@ -987,6 +1105,14 @@ const setupSocket = (server) => {
     }
 
     socket.on("confirm-read", updateMessageStatusToRead);
+
+    // Ack-based presence request: the client calls this on every connect
+    // to guarantee it has the latest onlineUsers list, even if it missed
+    // broadcasts while disconnected (overnight background, OS suspension,
+    // connectionStateRecovery, etc.).
+    socket.on("presence-sync", (cb) => {
+      if (typeof cb === "function") cb(Array.from(userSocketMap.keys()));
+    });
 
     socket.on("send-channel-message", (message) =>
       sendChannelMessage(message, socket),

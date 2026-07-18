@@ -86,6 +86,17 @@ const Auth = () => {
           if (response.data.token) {
             await Preferences.set({ key: "auth_token", value: response.data.token });
           }
+          // Cache the user object so the next cold-start can boot offline
+          // without depending on the server (App.jsx falls back to this
+          // when the auth check can't reach the network).
+          try {
+            await Preferences.set({
+              key: "auth_user",
+              value: JSON.stringify(response.data),
+            });
+          } catch (cacheErr) {
+            console.warn("Could not cache user after login:", cacheErr);
+          }
           setUser(response.data);
           toast.success("Logged In Successfully.");
           setTimeout(() => {

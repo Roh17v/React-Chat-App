@@ -5,8 +5,25 @@ import { useRef, useEffect, useState } from "react";
 import { createContext, useContext } from "react";
 import useMediaStream from "@/hooks/useMediaStream";
 import { Capacitor } from "@capacitor/core";
+import { Network } from "@capacitor/network";
+import { App as CapacitorApp } from "@capacitor/app";
 import NativeCallPlugin from "@/plugins/NativeCallPlugin";
 import { toast } from "sonner";
+import { getSyncEngine } from "@/offline/sync/SyncEngine";
+
+/**
+ * Returns true when the SyncEngine singleton exists and has been started
+ * (phase !== "idle"). Safe to call even before OfflineProvider wires the
+ * singleton — the thrown error is caught and treated as "not ready".
+ */
+function isSyncEngineReady() {
+  try {
+    const engine = getSyncEngine();
+    return engine.getStatus().phase !== "idle";
+  } catch {
+    return false;
+  }
+}
 
 const SocketContext = createContext(null);
 
@@ -94,6 +111,13 @@ export const SocketProvider = ({ children }) => {
   const socket = useRef(null);
   const { user } = useAppStore();
   const [onlineUsers, setOnlineUsers] = useState([]);
+  // socketReady flips to true once `socket.current` has been assigned by
+  // the effect below. Without this flag, downstream consumers (notably
+  // OfflineProvider) read `socket.current` from context and see `null`
+  // forever offline, because refs don't trigger re-renders and no socket
+  // event fires when the device can't reach the server. Toggling state
+  // here forces a re-render that re-emits the provider value.
+  const [socketReady, setSocketReady] = useState(false);
   const {
     selectedChatData,
     selectedChatType,
@@ -114,12 +138,27 @@ export const SocketProvider = ({ children }) => {
     setTypingIndicator,
     updateContactLastSeen,
     replaceWithDeletedPlaceholder,
+    deleteMessageForMe,
   } = useAppStore();
 
   const { stopMedia } = useMediaStream();
   // Auto-expire timers: "chatId_userId" → timeoutId.
-  const TYPING_EXPIRE_MS = 5000;
+  // Must stay longer than MessageBar's idle stop (3s) + a heartbeat (2.5s)
+  // so a brief network stall does not clear the indicator while the peer
+  // is still composing. Cleared early on clean `stop-typing`.
+  const TYPING_EXPIRE_MS = 6500;
   const typingTimers = useRef({});
+
+  // Presence: when the app is backgrounded we disconnect the socket so the
+  // server immediately marks the user offline (updates lastSeen + removes
+  // them from the onlineUsers broadcast).  A short grace period avoids
+  // flickering for quick app switches (notification peek, copy from another
+  // app, etc.).  We track whether *we* initiated the disconnect so that the
+  // foreground handler knows to reconnect — a network-driven disconnect is
+  // handled by the existing reconnection logic and must not be touched.
+  const BACKGROUND_DISCONNECT_GRACE_MS = 5000;
+  const backgroundDisconnectTimer = useRef(null);
+  const disconnectedByBackground = useRef(false);
 
   useEffect(() => {
     if (user && !socket.current) {
@@ -136,9 +175,115 @@ export const SocketProvider = ({ children }) => {
         randomizationFactor: 0.2,
         timeout: 20000,
       });
+      // Force a re-render so the context value picks up the new
+      // `socket.current`. Without this, OfflineProvider stays parked on
+      // `socket: null` whenever the device is offline at boot — no socket
+      // event ever fires to nudge React.
+      setSocketReady(true);
+
+      // Force instant reconnection when the network comes back online,
+      // bypassing Socket.IO's internal exponential backoff timer.
+      let networkListenerPromise = null;
+      const handleBrowserOnline = () => {
+        if (socket.current && !socket.current.connected) {
+          // Hard-reset the socket. If it's stalled in a "connecting" state from a 
+          // dropped packet, .connect() alone won't do anything. We must disconnect first.
+          socket.current.disconnect();
+          socket.current.connect();
+        }
+      };
+      
+      if (Capacitor.isNativePlatform()) {
+        networkListenerPromise = Network.addListener("networkStatusChange", (status) => {
+          if (status.connected && socket.current && !socket.current.connected) {
+            socket.current.disconnect();
+            socket.current.connect();
+          }
+        });
+      } else {
+        window.addEventListener("online", handleBrowserOnline);
+      }
+
+      // --- Presence: disconnect the socket when the app is backgrounded so
+      // the server immediately marks the user offline.  This is the only
+      // reliable way to detect "user put the phone away" on mobile — the
+      // Android WebView keeps the WebSocket alive (and responding to pings)
+      // for hours after the app is backgrounded, so the server's ping/pong
+      // never fires a disconnect.  Reconnect on foreground. ---
+      const hasActiveCall = () => {
+        try {
+          return useAppStore.getState().activeCall != null;
+        } catch {
+          return false;
+        }
+      };
+
+      const clearBackgroundTimer = () => {
+        if (backgroundDisconnectTimer.current != null) {
+          clearTimeout(backgroundDisconnectTimer.current);
+          backgroundDisconnectTimer.current = null;
+        }
+      };
+
+      const handleAppBackgrounded = () => {
+        clearBackgroundTimer();
+        // An active call needs the signaling channel; the server's Call
+        // Rescue logic already keeps call sessions alive across real
+        // disconnects, so we leave the socket alone in that case.
+        if (hasActiveCall()) return;
+        backgroundDisconnectTimer.current = setTimeout(() => {
+          backgroundDisconnectTimer.current = null;
+          // Re-check for an active call: an incoming call may have arrived
+          // during the grace period while the socket was still alive.
+          if (hasActiveCall()) return;
+          if (socket.current && socket.current.connected) {
+            disconnectedByBackground.current = true;
+            socket.current.disconnect();
+          }
+        }, BACKGROUND_DISCONNECT_GRACE_MS);
+      };
+
+      const handleAppForegrounded = () => {
+        clearBackgroundTimer();
+        if (disconnectedByBackground.current) {
+          disconnectedByBackground.current = false;
+          if (socket.current && !socket.current.connected) {
+            socket.current.connect();
+          }
+        }
+      };
+
+      let appStateListenerPromise = null;
+      let visibilityHandler = null;
+      if (Capacitor.isNativePlatform()) {
+        appStateListenerPromise = CapacitorApp.addListener(
+          "appStateChange",
+          ({ isActive }) => {
+            if (isActive) handleAppForegrounded();
+            else handleAppBackgrounded();
+          },
+        );
+      } else {
+        visibilityHandler = () => {
+          if (document.hidden) handleAppBackgrounded();
+          else handleAppForegrounded();
+        };
+        document.addEventListener("visibilitychange", visibilityHandler);
+      }
 
       const onSocketConnect = () => {
         console.log("Connected to socket server");
+
+        // Request a fresh online-users list on every connect.  This is a
+        // safety net: while the socket was disconnected (app backgrounded,
+        // OS suspended the WebView, etc.) the server may have emitted
+        // onlineUsers broadcasts that we missed.  The server's connection
+        // handler already broadcasts onlineUsers, but this ack-based
+        // request guarantees we receive it even if the broadcast raced
+        // with handler registration or was dropped by a flaky transport.
+        socket.current.emit("presence-sync", (users) => {
+          if (Array.isArray(users)) setOnlineUsers(users);
+        });
 
         const state = useAppStore.getState();
         const currentActiveCall = state.activeCall;
@@ -267,13 +412,26 @@ export const SocketProvider = ({ children }) => {
         }
       });
 
-      socket.current.on("message-status-update", ({ receiverId, status }) => {
-        console.log("Message Status Update!", ` status: ${status}`);
-        updatedMessageStatus(receiverId, status);
+      socket.current.on("message-status-update", ({ senderId, receiverId, status }) => {
+        console.log("Message Status Update!", ` status: ${status} senderId=${senderId} receiverId=${receiverId}`);
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "message-status-update",
+            payload: { senderId, receiverId, status },
+          });
+        } else {
+          updatedMessageStatus(receiverId, status);
+        }
       });
 
       socket.current.on("new-channel-contact", (channel) => {
         console.log("New Channel Received: ", channel);
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "new-channel-contact",
+            payload: channel,
+          });
+        }
         addChannel(channel);
       });
 
@@ -536,12 +694,38 @@ export const SocketProvider = ({ children }) => {
       });
 
       socket.current.on("user-last-seen", ({ userId, lastSeen }) => {
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "user-last-seen",
+            payload: { userId, lastSeen },
+          });
+        }
         updateContactLastSeen(userId, lastSeen);
       });
 
       socket.current.on("message-deleted", ({ messageId }) => {
-        if (messageId) {
-          replaceWithDeletedPlaceholder(messageId);
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "message-deleted",
+            payload: { messageId },
+          });
+        } else {
+          if (messageId) {
+            replaceWithDeletedPlaceholder(messageId);
+          }
+        }
+      });
+
+      socket.current.on("message-deleted-for-me", ({ messageId }) => {
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "message-deleted-for-me",
+            payload: { messageId },
+          });
+        } else {
+          if (messageId) {
+            deleteMessageForMe(messageId);
+          }
         }
       });
 
@@ -566,11 +750,39 @@ export const SocketProvider = ({ children }) => {
           socket.current.off("stop-typing");
           socket.current.off("user-last-seen");
           socket.current.off("message-deleted");
+          socket.current.off("message-deleted-for-me");
           socket.current.off("connection-request-received");
           socket.current.off("connection-accepted");
 
           socket.current.disconnect();
           socket.current = null;
+          setSocketReady(false);
+          
+          if (networkListenerPromise) {
+            networkListenerPromise
+              .then((listener) => {
+                if (listener && typeof listener.remove === "function") {
+                  listener.remove().catch(() => {});
+                }
+              })
+              .catch(() => {});
+          }
+          window.removeEventListener("online", handleBrowserOnline);
+
+          clearBackgroundTimer();
+          disconnectedByBackground.current = false;
+          if (appStateListenerPromise) {
+            appStateListenerPromise
+              .then((listener) => {
+                if (listener && typeof listener.remove === "function") {
+                  listener.remove().catch(() => {});
+                }
+              })
+              .catch(() => {});
+          }
+          if (visibilityHandler) {
+            document.removeEventListener("visibilitychange", visibilityHandler);
+          }
         }
       };
     }
@@ -601,6 +813,7 @@ export const SocketProvider = ({ children }) => {
       const isChatOpen =
         selectedChatType === "contact" && selectedChatId === senderId;
 
+      // --- UI concern: emit confirm-read regardless of platform ---
       if (
         selectedChatData &&
         selectedChatType !== undefined &&
@@ -613,13 +826,28 @@ export const SocketProvider = ({ children }) => {
           });
         }
 
-        if (message.clientTempId) {
-          confirmMessage(message.clientTempId, message);
+        // --- Message-store mutation: native uses SyncEngine, web uses store directly ---
+        if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+          getSyncEngine().applyLiveEvent({
+            kind: "receiveMessage",
+            payload: message,
+          });
         } else {
-          addMessage(message);
+          if (message.clientTempId) {
+            confirmMessage(message.clientTempId, message);
+          } else {
+            addMessage(message);
+          }
         }
+      } else if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+        // Still persist background messages on native even when the chat isn't open
+        getSyncEngine().applyLiveEvent({
+          kind: "receiveMessage",
+          payload: message,
+        });
       }
 
+      // --- UI concern: contact-list update regardless of platform ---
       if (Array.isArray(directMessagesContacts) && contactId) {
         const updatedContacts = [...directMessagesContacts];
         const contactIndex = updatedContacts.findIndex(
@@ -660,15 +888,72 @@ export const SocketProvider = ({ children }) => {
     };
 
     const handleMessageSendFailed = ({ clientTempId }) => {
-      if (clientTempId) {
-        failMessage(clientTempId);
+      if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+        getSyncEngine().applyLiveEvent({
+          kind: "messageSendFailed",
+          payload: { clientTempId },
+        });
+      } else {
+        if (clientTempId) {
+          failMessage(clientTempId);
+        }
       }
     };
 
     const handleChannelReceiveMessage = (message) => {
-      if (selectedChatData && selectedChatType !== undefined) {
-        addMessage(message);
+      if (Capacitor.isNativePlatform() && isSyncEngineReady()) {
+        getSyncEngine().applyLiveEvent({
+          kind: "receive-channel-message",
+          payload: message,
+        });
+      } else {
+        if (
+          selectedChatData &&
+          selectedChatType === "channel" &&
+          selectedChatData._id === message.channelId
+        ) {
+          addMessage(message);
+        }
       }
+
+      // Update channels list in the sidebar with the new message preview
+      const state = useAppStore.getState();
+      const channels = state.channels || [];
+      const channelIndex = channels.findIndex((c) => c._id === message.channelId);
+      if (channelIndex !== -1) {
+        const updatedChannels = [...channels];
+        const existingChannel = updatedChannels[channelIndex];
+        
+        // Use the sender's full name if populated, otherwise fallback
+        let senderName = "Someone";
+        if (message.sender && typeof message.sender !== "string" && message.sender.firstName) {
+          senderName = `${message.sender.firstName} ${message.sender.lastName || ""}`.trim();
+        } else if (existingChannel.members) {
+          const senderObj = existingChannel.members.find(m => m._id === message.sender || m._id === message.senderId);
+          if (senderObj) senderName = `${senderObj.firstName} ${senderObj.lastName || ""}`.trim();
+        }
+
+        const isMessageFromMe = message.sender?._id === user.id || message.sender === user.id;
+        const messagePreview = message.messageType === "text" 
+          ? `${isMessageFromMe ? "You" : senderName}: ${message.content}`
+          : `${isMessageFromMe ? "You" : senderName} sent a file`;
+
+        const updatedChannel = {
+          ...existingChannel,
+          lastMessage: messagePreview,
+          lastMessageAt: message.createdAt || new Date().toISOString(),
+          // Don't increment unread if the chat is currently open!
+          unreadCount: 
+            (state.selectedChatType === "channel" && state.selectedChatData?._id === message.channelId)
+            ? 0
+            : (existingChannel.unreadCount || 0) + 1,
+        };
+
+        updatedChannels.splice(channelIndex, 1);
+        updatedChannels.unshift(updatedChannel);
+        useAppStore.setState({ channels: updatedChannels });
+      }
+
       console.log("Channel Message Recieved: ", message);
     };
 
