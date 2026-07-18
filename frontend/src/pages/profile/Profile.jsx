@@ -298,19 +298,22 @@ const Profile = () => {
               )}
             </Button>
 
-            {/* Diagnostics entry row */}
-            <button
-              onClick={() => setShowDiagnostics(true)}
-              className="mt-4 w-full flex items-center justify-between px-4 py-3 rounded-xl bg-background-tertiary/50 border border-border-subtle hover:bg-background-tertiary transition-colors group"
-            >
-              <div className="flex items-center gap-3">
-                <FiActivity className="w-5 h-5 text-foreground-muted group-hover:text-primary transition-colors" />
-                <span className="text-sm font-medium text-foreground-secondary group-hover:text-foreground transition-colors">
-                  Diagnostics
-                </span>
-              </div>
-              <FiArrowLeft className="w-4 h-4 text-foreground-muted rotate-180 group-hover:translate-x-0.5 transition-transform" />
-            </button>
+            {/* Diagnostics: edit-profile only — hide during signup / first-time setup */}
+            {user.profileSetup && (
+              <button
+                type="button"
+                onClick={() => setShowDiagnostics(true)}
+                className="mt-4 w-full flex items-center justify-between px-4 py-3 rounded-xl bg-background-tertiary/50 border border-border-subtle hover:bg-background-tertiary transition-colors group"
+              >
+                <div className="flex items-center gap-3">
+                  <FiActivity className="w-5 h-5 text-foreground-muted group-hover:text-primary transition-colors" />
+                  <span className="text-sm font-medium text-foreground-secondary group-hover:text-foreground transition-colors">
+                    Diagnostics
+                  </span>
+                </div>
+                <FiArrowLeft className="w-4 h-4 text-foreground-muted rotate-180 group-hover:translate-x-0.5 transition-transform" />
+              </button>
+            )}
           </div>
         </div>
         {/* Setup Notice */}

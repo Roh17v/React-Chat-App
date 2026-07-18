@@ -30,14 +30,18 @@ const AuthSplash = ({ authReady = false, onDone }) => {
           transition={{ duration: 0.45, ease: "easeOut" }}
           className="fixed inset-0 bg-background z-[9999] flex items-center justify-center overflow-hidden"
         >
-          {/* Logo — centered */}
+          {/* Logo — centered icon only (no green tile / outer strip) */}
           <motion.div
             initial={{ scale: 0.7, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             transition={{ duration: 0.5, ease: [0.34, 1.56, 0.64, 1] }}
-            className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-chat-glow"
+            className="flex items-center justify-center"
           >
-            <img src={ChatLogo} className="w-12 h-12 drop-shadow-lg" />
+            <img
+              src={ChatLogo}
+              alt=""
+              className="w-16 h-16 drop-shadow-lg"
+            />
           </motion.div>
 
           {/* Shimmer progress bar — bottom */}
