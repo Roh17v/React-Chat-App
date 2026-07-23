@@ -1632,16 +1632,28 @@ const MessageContainer = () => {
     }
   };
 
-  const messageEnterClass = (messageId) =>
-    typeof messageId === "string" && enteringMessageIds.has(messageId)
+  // Enter animation must key off the *stable list identity*, not raw `_id`.
+  // On web, confirm used to flip `_id` temp→server; tracking `_id` treated
+  // that as a brand-new bubble and replayed `animate-message-in` on every
+  // confirm / status tick. `getMessageListKey` stays fixed for the bubble.
+  const messageEnterClass = (message) => {
+    const key =
+      typeof message === "string"
+        ? message
+        : getMessageListKey(message) ||
+          (message?._id != null ? String(message._id) : "");
+    return typeof key === "string" &&
+      key.length > 0 &&
+      enteringMessageIds.has(key)
       ? "animate-message-in"
       : undefined;
+  };
 
   const renderDeletedPlaceholder = (message, isSent) => (
     <div
       className={cn(
         "flex w-full",
-        messageEnterClass(message?._id),
+        messageEnterClass(message),
         isSent ? "justify-end" : "justify-start"
       )}
     >
@@ -1811,7 +1823,7 @@ const MessageContainer = () => {
       <div
         className={cn(
           "flex w-full",
-          messageEnterClass(message?._id),
+          messageEnterClass(message),
           isSent ? "justify-end" : "justify-start"
         )}
       >
@@ -2073,7 +2085,7 @@ const MessageContainer = () => {
       <div
         className={cn(
           "flex w-full",
-          messageEnterClass(message?._id),
+          messageEnterClass(message),
           isSent ? "justify-end" : "justify-start"
         )}
       >
@@ -2213,16 +2225,22 @@ const MessageContainer = () => {
       const showDate = messageDate !== lastDate;
       lastDate = messageDate;
 
-      if (!messagesRef.current.has(message._id)) {
-        messagesRef.current.set(message._id, message);
-      }
-
       const listKey = getMessageListKey(message) || message._id;
+      // Index by every known identity so reply/scroll lookup by Mongo
+      // serverId still works after confirm (UI `_id` stays on clientTempId).
+      const indexMessage = (key) => {
+        if (key == null || key === "") return;
+        messagesRef.current.set(String(key), message);
+      };
+      indexMessage(listKey);
+      indexMessage(message._id);
+      indexMessage(message.serverId);
+      indexMessage(message.clientTempId);
       return (
         <div
           key={listKey}
-          id={`msg-${message._id}`}
-          data-message-id={message._id}
+          id={`msg-${listKey}`}
+          data-message-id={listKey}
           className="flex flex-col gap-2"
         >
           {showDate && (
@@ -2284,9 +2302,11 @@ const MessageContainer = () => {
   // Decide which message ids (if any) may play the enter animation.
   // History seed / chat-open batch: register ids as known, animate none.
   // Live arrivals after the chat has settled: animate only the new ids.
+  // Use stable list keys — never raw `_id` alone (confirm used to flip
+  // temp→server and re-trigger enter animation on status updates).
   useLayoutEffect(() => {
     const ids = selectedChatMessages
-      .map((m) => (m && typeof m._id === "string" ? m._id : null))
+      .map((m) => getMessageListKey(m) || (m?._id != null ? String(m._id) : null))
       .filter(Boolean);
 
     if (ids.length === 0) {
@@ -2306,7 +2326,9 @@ const MessageContainer = () => {
     }
 
     const fresh = ids.filter((id) => !knownMessageIdsRef.current.has(id));
-    knownMessageIdsRef.current = new Set(ids);
+    // Union into known set so a later status-only rewrite of the array
+    // cannot drop a key and re-mark it as fresh.
+    for (const id of ids) knownMessageIdsRef.current.add(id);
     if (fresh.length === 0) {
       setEnteringMessageIds((prev) => (prev.size === 0 ? prev : new Set()));
       return;
