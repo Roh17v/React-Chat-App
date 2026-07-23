@@ -481,6 +481,101 @@ describe("mergeDuplicateMessages", () => {
   });
 });
 
+describe("ChatSlice — confirmMessage / status", () => {
+  it("confirmMessage keeps stable _id and _stableKey (no remount on confirm)", () => {
+    const slice = makeSlice();
+    slice.selectedChatType = "contact";
+    slice.addOptimisticMessage({
+      _id: "temp_abc",
+      sender: "me",
+      receiver: "peer",
+      content: "hi",
+      status: "sending",
+      createdAt: "2024-01-01T00:01:00.000Z",
+      isOptimistic: true,
+    });
+    expect(slice.selectedChatMessages[0]._id).toBe("temp_abc");
+    expect(slice.selectedChatMessages[0]._stableKey).toBe("temp_abc");
+
+    slice.confirmMessage("temp_abc", {
+      _id: "server-mongo-1",
+      sender: "me",
+      receiver: "peer",
+      content: "hi",
+      status: "sent",
+      createdAt: "2024-01-01T00:01:00.000Z",
+      clientTempId: "temp_abc",
+    });
+
+    const row = slice.selectedChatMessages[0];
+    expect(slice.selectedChatMessages).toHaveLength(1);
+    // UI identity must not flip to the Mongo id (that re-animates bubbles).
+    expect(String(row._id)).toBe("temp_abc");
+    expect(String(row._stableKey)).toBe("temp_abc");
+    expect(String(row.clientTempId)).toBe("temp_abc");
+    expect(String(row.serverId)).toBe("server-mongo-1");
+    expect(row.status).toBe("sent");
+    expect(row.isOptimistic).toBe(false);
+  });
+
+  it("updatedMessageStatus only upgrades outgoing messages to the peer", () => {
+    const slice = makeSlice();
+    slice.selectedChatData = { _id: "peer" };
+    slice.setSelectedChatMessages(
+      [
+        {
+          _id: "out-1",
+          sender: "me",
+          receiver: "peer",
+          content: "a",
+          status: "sent",
+          createdAt: "2024-01-01T00:01:00.000Z",
+        },
+        {
+          _id: "in-1",
+          sender: "peer",
+          receiver: "me",
+          content: "b",
+          status: "sent",
+          createdAt: "2024-01-01T00:02:00.000Z",
+        },
+      ],
+      true,
+    );
+
+    slice.updatedMessageStatus("peer", "delivered");
+    expect(slice.selectedChatMessages[0].status).toBe("delivered");
+    // Peer-originated row must not be rewritten.
+    expect(slice.selectedChatMessages[1].status).toBe("sent");
+
+    slice.updatedMessageStatus("peer", "read");
+    expect(slice.selectedChatMessages[0].status).toBe("read");
+    // No downgrade.
+    slice.updatedMessageStatus("peer", "delivered");
+    expect(slice.selectedChatMessages[0].status).toBe("read");
+  });
+
+  it("updatedMessageStatus does not upgrade failed messages", () => {
+    const slice = makeSlice();
+    slice.selectedChatData = { _id: "peer" };
+    slice.setSelectedChatMessages(
+      [
+        {
+          _id: "fail-1",
+          sender: "me",
+          receiver: "peer",
+          content: "x",
+          status: "failed",
+          createdAt: "2024-01-01T00:01:00.000Z",
+        },
+      ],
+      true,
+    );
+    slice.updatedMessageStatus("peer", "read");
+    expect(slice.selectedChatMessages[0].status).toBe("failed");
+  });
+});
+
 describe("ChatSlice — setTypingIndicator", () => {
   /**
    * Real zustand only skips updates when the same state reference is

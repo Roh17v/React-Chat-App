@@ -453,7 +453,18 @@ export const createChatSlice = (set, get) => ({
   // Instantly inject a client-generated placeholder before the server responds.
   addOptimisticMessage: (message) => {
     set((state) => {
-      const incoming = { ...message, _stableKey: message._id };
+      const tempId =
+        message?._id != null && String(message._id).length > 0
+          ? String(message._id)
+          : message?.clientTempId != null
+            ? String(message.clientTempId)
+            : undefined;
+      const incoming = {
+        ...message,
+        _id: tempId ?? message?._id,
+        clientTempId: message?.clientTempId ?? tempId ?? null,
+        _stableKey: message?._stableKey || tempId,
+      };
       return {
         selectedChatMessages: dedupeAndSortMessages([
           ...state.selectedChatMessages,
@@ -463,24 +474,82 @@ export const createChatSlice = (set, get) => ({
     });
   },
 
-  // Swap the optimistic placeholder with the real server-confirmed message.
+  // Merge server confirmation into the optimistic row without flipping the
+  // React list key. Spreading `realMessage` alone used to replace `_id`
+  // (temp_* → Mongo id); that remounted the bubble and re-ran enter animation
+  // on every confirm / status transition on web.
   confirmMessage: (tempId, realMessage) => {
     const { selectedChatMessages, selectedChatType } = get();
+    const normalizedTemp =
+      tempId != null && String(tempId).length > 0 ? String(tempId) : "";
+    if (!normalizedTemp) return;
+
     set({
       selectedChatMessages: selectedChatMessages.map((msg) => {
-        if (msg._id !== tempId) return msg;
+        const matches =
+          String(msg._id) === normalizedTemp ||
+          String(msg.clientTempId || "") === normalizedTemp ||
+          String(msg._stableKey || "") === normalizedTemp;
+        if (!matches) return msg;
+
+        const serverIdRaw =
+          realMessage?.serverId ?? realMessage?._id ?? msg.serverId ?? null;
+        const serverId =
+          serverIdRaw != null && String(serverIdRaw).length > 0
+            ? String(serverIdRaw)
+            : null;
+        const stableKey =
+          msg._stableKey ||
+          msg.clientTempId ||
+          (String(msg._id) === normalizedTemp ? msg._id : null) ||
+          normalizedTemp;
+
+        const resolvedReceiver =
+          selectedChatType === "channel"
+            ? realMessage.receiver
+            : realMessage.receiver?._id ??
+              realMessage.receiver ??
+              msg.receiver?._id ??
+              msg.receiver;
+        const resolvedSender =
+          selectedChatType === "channel"
+            ? realMessage.sender
+            : realMessage.sender?._id ??
+              realMessage.sender ??
+              msg.sender?._id ??
+              msg.sender;
+
+        // Do not let a late/stale confirm lower delivery status (e.g. read → sent).
+        const statusRank = {
+          sending: 0,
+          pending: 0,
+          sent: 1,
+          delivered: 2,
+          read: 3,
+          failed: -1,
+        };
+        const incomingStatus = realMessage?.status ?? msg.status;
+        const prevR = statusRank[msg.status] ?? -1;
+        const nextR = statusRank[incomingStatus] ?? -1;
+        const resolvedStatus =
+          msg.status === "failed"
+            ? incomingStatus || msg.status
+            : nextR >= 0 && prevR >= 0 && nextR < prevR
+              ? msg.status
+              : incomingStatus ?? msg.status;
+
         return {
+          ...msg,
           ...realMessage,
-          receiver:
-            selectedChatType === "channel"
-              ? realMessage.receiver
-              : realMessage.receiver?._id ?? realMessage.receiver,
-          sender:
-            selectedChatType === "channel"
-              ? realMessage.sender
-              : realMessage.sender?._id ?? realMessage.sender,
+          receiver: resolvedReceiver,
+          sender: resolvedSender,
+          // Keep the first stable UI identity for the life of the bubble.
+          _id: String(stableKey),
+          clientTempId: msg.clientTempId || normalizedTemp,
+          serverId,
+          _stableKey: String(stableKey),
+          status: resolvedStatus,
           isOptimistic: false,
-          _stableKey: msg._stableKey || tempId,
         };
       }),
     });
@@ -488,24 +557,52 @@ export const createChatSlice = (set, get) => ({
 
   // Mark an optimistic placeholder as failed if the server couldn't save it.
   failMessage: (tempId) => {
+    const normalizedTemp =
+      tempId != null && String(tempId).length > 0 ? String(tempId) : "";
     set((state) => ({
-      selectedChatMessages: state.selectedChatMessages.map((msg) =>
-        msg._id === tempId ? { ...msg, status: "failed" } : msg,
-      ),
+      selectedChatMessages: state.selectedChatMessages.map((msg) => {
+        const matches =
+          String(msg._id) === normalizedTemp ||
+          String(msg.clientTempId || "") === normalizedTemp ||
+          String(msg._stableKey || "") === normalizedTemp;
+        return matches ? { ...msg, status: "failed" } : msg;
+      }),
     }));
   },
+  // Bulk receipt for the open DM: only upgrade *outgoing* messages to this
+  // peer. Never rewrite peer-originated rows (old code set status on every
+  // bubble, which forced a full list re-render and felt like re-animation).
   updatedMessageStatus: (receiverId, status) => {
-    console.log(receiverId, status);
+    const rank = {
+      sending: 0,
+      pending: 0,
+      sent: 1,
+      delivered: 2,
+      read: 3,
+      failed: -1,
+    };
+    const nextRank = rank[status] ?? -1;
     set((state) => {
-      if (state.selectedChatData?._id === receiverId) {
-        return {
-          selectedChatMessages: state.selectedChatMessages.map((message) => ({
-            ...message,
-            status,
-          })),
-        };
+      if (String(state.selectedChatData?._id) !== String(receiverId)) {
+        return state;
       }
-      return {};
+      let changed = false;
+      const selectedChatMessages = state.selectedChatMessages.map((message) => {
+        const msgReceiver = message?.receiver?._id ?? message?.receiver;
+        // Outgoing DM: we are the sender, peer is receiverId.
+        if (String(msgReceiver) !== String(receiverId)) return message;
+        if (message.status === status) return message;
+        // Never auto-heal failed rows via bulk receipts (retry owns that).
+        if (message.status === "failed") return message;
+        const prevRank = rank[message.status] ?? -1;
+        // Only upgrade (sent → delivered → read); never downgrade.
+        if (nextRank < 0 || (prevRank >= 0 && nextRank <= prevRank)) {
+          return message;
+        }
+        changed = true;
+        return { ...message, status };
+      });
+      return changed ? { selectedChatMessages } : state;
     });
   },
   updateContactLastSeen: (userId, lastSeen) =>
